@@ -1263,6 +1263,48 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   step, ~3x a step with 53 tracers; carrying 31 instead of 53 tracers saves ~1 s of ~11-12 s per step (I). The earlier
   0.23-0.31 us per cell-call figures were measured on GCM-like forcing without mixing every call (1.1-1.4 steps per
   call): every-call mixing raises the steps per call and the cost about tenfold.
+- Radiation and a live coupled run in snapy (2026-11-01 ~17:xx; V experiments/2026-10-31_refresh/_build/snapy_test/
+  results.txt sections 3-4, rt/*.json, gcm_run.py; one RTX 6000 Ada; maxichem from the new public repository's code,
+  torch 2.10 + nvrtc 12.8 without conflicts). Cheng Li's GCM radiation (pyharp ToonMcKay89 two-stream, one grey
+  shortwave + one grey longwave band, recomputed every 3600 s, heating held between): 0.05 s per update on 2.46 M cells
+  (~1 ms per step averaged over the hour); 8 / 32 repeated spectral points 0.22 / 1.09 s per update. Coupled run (C48 x
+  100 = 1.38 M cells, a hot-Jupiter-like test setup spun up 1.2 days to 833-1961 K; flow + 31 passive tracers +
+  radiation + maxichem's G31 call, passive chemistry from local equilibrium, 2.06 h at dt 70 s): chemistry every step
+  0.578 us per cell-call (1.03 accepted steps per call on average, p99 <= 3, max 36), every 7th step (490 s calls)
+  0.852 us (2.06 steps); guard counts 0, element totals changed by <= 8.7e-12 relative; the reconstruction needed extra
+  iterations in 100-2000 cells per call and left <= 46 cells per call unconverged (elements exact; 20 defect flags in
+  all). Live chemistry is ~6x cheaper than on the every-call-mixing bed (3.55 us) two hours after an equilibrium start
+  (a long run may drift toward the bed cost, I). Projected per model day on one card at 2.46 M cells (I, arithmetic on
+  the measured parts): flow 7 min; + 31 tracers + radiation 38 min; + chemistry every step at the live cost 67 min (1000
+  days ~47 days), every 7th step 44 min (~31 days); at the bed cost 3.6-4.6 h; on 6 GPUs the live-chemistry run ~10 days
+  per 1000 days (I).
+- Speedup scans (read-only, 2026-11-01 ~17:xx; /home/imalsky/tmp/speed_snapy, /home/imalsky/tmp/speed_rt; V their
+  measurements): snapy's tracers move as one array (no per-tracer loop); per tracer ~43 ms per step at C64 of which
+  WENO5 reconstruction in fp64 16.5 ms and the flux-covariance term 8.9 ms; setting the tracer reconstruction to plm cut
+  the 53-tracer step 2.70 -> 2.20 s (mass drift <= 1e-15, positivity kept; more diffusive); fp32 tracer reconstruction
+  would give ~2-3x on the tracer part (upstream work); CUDA graphs / torch.compile / stream overlap not worth it; couple
+  chemistry once per step after the RK stages (stage forcings run every stage). kintera's GCM path is one backward-Euler
+  step with a dense LU per cell: ~155 us per cell on a 40-species CHO network (fp64), ~1 MB of GPU memory per cell, no
+  error control; maxichem's call is >= 30x cheaper per cell. Realistic correlated-k radiation (80-240 spectral points
+  in published GCMs) would cost ~36 ms per point per update at C64 here; fp32 Toon 1.7-2.5x faster.
+- Why every-call mixing costs ~14 steps per call, and what would cut it (read-only scan, 2026-11-01 ~17:xx; V
+  /home/imalsky/tmp/speed_chem/results.txt, bed*.json; the ring bed tiled, state and step size carried; an instrumented
+  kernel copy bitwise equal to production). After a mix a few fast trace species are out of balance: the first try
+  (the carried step, often the whole call) fails and the step shrinks (dt 500 s: 14.1 rejections before the first
+  accepted step, median first accepted step 2e-4 s), then climbs back through ~19 small steps: 38.5 tries / 24.3
+  accepted per call at dt 500 s, 21.0 / 12.6 at 100 s, 9.9 / 6.1 at 25 s; tries grow with the input jump (1.2 for
+  < 0.01 dex, 16 for 0.03-0.1, 41 for 0.3-1, 60-85 above 1 dex) and with T (8.6 at 300-650 K, 39 at 2000-3000 K); later
+  rejections ~0; growth-capped steps 7-10 %. Variants (us per cell-call at 69,120 cells; worst error vs a tight solve,
+  local / along the trajectory): production 3.65 (0.0036 / 0.0037); the old RMS-only first step 2.57 (0.0042, but it had
+  the 11-01 miss); RMS + a half-call cap 2.64 (0.0041); remembering last call's first step 3.08; atol 1e-14 2.24
+  (0.0088); atol 1e-14 + half-call cap 1.63 (0.0098, just under 0.01; 1.58 vs 3.57 at 2.46 M cells, ~2.3x). The mix
+  applied as a steady source over the call instead of a jump before it: 0.231 (16.7x; 1.1-1.5 tries per call), but it
+  is a different coupling: vs a 16-substep reference (built the same way, so not independent) the jump coupling is off
+  by up to 2.65 dex (3.7 % of cell-calls > 0.1) and the source form by 0.91 (0.9 %); every VULCAN truth set applies
+  mixes as jumps, so adopting it needs new truth, a positivity-safe outflow, element checks and a reconstruction for the
+  reduced tracers; untried before (grep of both notes files and todo). Chemistry every 2nd / 4th step: 1.5x / 2.3x but
+  trajectories > 3 dex off (as every 10th, rejected before). Load balance: a persistent atomic work queue exists; tries
+  per cell-call p50 / p90 / p99 / max 10 / 66 / 93 / 165. Kernel headroom on this card ~1.2-1.5x (earlier reviews).
 ## 3 Author decisions and requirements (dated)
 
 - 2026-06-09 (gate 2 of the paper plan): held-out open-loop rollouts at fixed dt 6.4 s for K >= 100 steps plus 0.5 s and
