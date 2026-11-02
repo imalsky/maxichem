@@ -1,5 +1,6 @@
 # Data, reference files and caches (the data root is data/ or $CHEM_DATA; never tracked)
 data/
+experiments/
 *.npz
 *.npy
 *.h5
