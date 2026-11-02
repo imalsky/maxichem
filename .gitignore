@@ -1,0 +1,33 @@
+# Data, reference files and caches (the data root is data/ or $CHEM_DATA; never tracked)
+data/
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.pt
+*.so
+
+# Logs
+*.log
+logs/
+
+# Python and build artefacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+.env
+
+# Editor and system files
+.DS_Store
+.idea/
+*.swp
+*.swo
+*~

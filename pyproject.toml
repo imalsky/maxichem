@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maxichem"
+version = "0.1.0"
+description = "VULCAN's C-H-N-O gas-phase chemistry as a batched GPU 0-D solver for exoplanet GCMs"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Isaac Malsky" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "torch",
+    "nvidia-cuda-nvrtc-cu12",   # the kernels are compiled at run time with this wheel's libnvrtc.so.12
+]
+
+[project.optional-dependencies]
+# kinjax uses JAX internals (partial evaluation rules): pinned to the tested version
+jax = ["jax[cuda12]==0.12.0.1", "nvidia-cuda-runtime-cu12"]
+
+[project.urls]
+Repository = "https://github.com/imalsky/maxichem"
+
+[tool.setuptools]
+packages = ["maxichem"]
+
+[tool.setuptools.package-data]
+maxichem = ["designs/*.json", "kinjax.cc"]
