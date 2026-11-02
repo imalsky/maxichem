@@ -11,7 +11,10 @@ step). It also gives derivatives of every call, for learning where learning help
 (tag `paper-v1` is the published paper's code).
 
 ## Every response
-- Start every response with "Isaac". This is a canary: if the name is missing, this file has dropped out of context.
+- Every message written to Isaac starts with the word "Isaac": the final answer, every short status update between tool
+  calls, and every question. No exceptions. This is a canary: if a message lacks the name, this file has dropped out of
+  context. This file loads automatically only in sessions started in /home/imalsky/maxichem; a session started elsewhere
+  that works on maxichem reads it first and keeps the rule.
 
 ## Start of every session
 - Before any other work, run `git fetch origin` and `git status -sb`. If the copy is up to date, carry on. If it is

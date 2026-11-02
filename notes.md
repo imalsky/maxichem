@@ -1305,6 +1305,40 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   reduced tracers; untried before (grep of both notes files and todo). Chemistry every 2nd / 4th step: 1.5x / 2.3x but
   trajectories > 3 dex off (as every 10th, rejected before). Load balance: a persistent atomic work queue exists; tries
   per cell-call p50 / p90 / p99 / max 10 / 66 / 93 / 165. Kernel headroom on this card ~1.2-1.5x (earlier reviews).
+
+### 2026-11-01 (evening): can the G31 call reach < 1 us per cell-call on mixed gas? (numerical tests)
+- Request (author): under 1 us per cell-call for the GCM-facing G31 call on this card, with the gas mixed every call;
+  test numerical optimizations, with an outside review. Record: experiments/2026-11-01_mixed-speed/ (results.txt,
+  log.txt, runs/, logs/; two outside reviews before and after the results). No production code changed.
+- Method (V): an instrumented copy of kincuda.py with compile-time options, all off = bitwise production (max |dx| 0);
+  the check's ring bed (4,320 cells tiled, mixing + forcing every call, state and step size carried); idle GPU1.
+- Speed (V, us per cell-call, G31 = projection + chemistry + reform): today 4.052 at 69,120 cells / 3.975 at 2.46 M;
+  best passing jump-coupled setting V3 (log-log secant shrink after two rejections at one state, floor 1e-4, growth
+  cap 20, atol 1e-16) + reuse of rhs / Jn / u on rejected tries (bitwise) 2.632 / 2.558 (1.55x); the mix as a source
+  over the call (uniform outflow, exact element budgets) 0.573 / 0.574. All species: 3.630 -> 2.286 (V3+reuse) ->
+  0.231 (source). Tries per call 23.1 -> 14.4 -> 1.5. The projection costs ~0.33-0.35 us of the G31 call.
+- Accuracy of V3 (V): bed worst vs tight 0.0051 / 0.0052 (local / trajectory; production 0.0036 / 0.0037); kintest
+  quick 0 misses on every panel, no path or yardstick row moved > 0.01 dex from quick_ref2; QTe every-call block vs
+  VULCAN 0 misses, worst 0.0180 (production 0.0153); a jump stress rebuilt from QTe (218,238 cells, truth = the
+  production kernel at rtol 1e-6) worst 0.0133 (production 0.0106).
+- Rejected (V): atol 1e-14 (QTe worst 0.070, stress 0.0996); atol 1e-14 with the first-step max-norm kept at 1e-18
+  passes (QTe 0.023) but V3 has more margin at the same speed; atol 1e-12, rtol 5e-3, rtol 2e-3 (bed local 0.016 /
+  0.025 / 0.012, > 0.01); Shampine's filtered error estimate on every try or the first step only (1.34 dex; I: it
+  hides the first-step error the 11-01 rule guards against) or after the first accepted step (0.031); growth cap 20 alone
+  (22.9 tries vs 23.1) and the carried-step fix (23.1); a first-try timescale cap (20.9 tries but 16.6 accepted steps
+  vs 14.4). Not run alone: a smaller shrink floor (I: the typical first rejection shrinks by ~0.34, above the 0.2 floor).
+- Coupling (V, dt 25 / 100 s blocks; the dt-500 s transport is singular, no positive root): against 256 substeps of
+  transport (matrix root) and chemistry, the jump is off by up to 2.97 dex (2.55 % of cell-calls > 0.1), the source
+  forms by up to 3.7-3.8 dex (1.48-1.49 %); 64 vs 256 substeps still differ by 0.60 dex, so the reference is not
+  converged at the worst cells (I: no ranking at the worst cells; the source form is closer for typical cells). A
+  constant source can clamp at zero and lose element budgets (0.12); the device recovery ignores the source (under
+  the constant form in G31, 5 unfinished cells were recomputed without it).
+- Conclusion (I): with jump coupling, < 1 us is out of reach on this card: the passing settings still need ~14 tries
+  per call at ~0.16 us per try, and the remaining steps follow real fast relaxations after each mix. Only the source
+  coupling reaches it (0.57 us), and it is an interface change that needs a source-aware recovery, VULCAN truth with the
+  same source term and an independently converged coupled reference before it can be judged. V3 is the candidate
+  numerics change if the 1.55x is wanted; adopting it means regenerating LIBREF, AD_REF, TRACER_REF and quick_ref2 and
+  the full checks (author's call).
 ## 3 Author decisions and requirements (dated)
 
 - 2026-06-09 (gate 2 of the paper plan): held-out open-loop rollouts at fixed dt 6.4 s for K >= 100 steps plus 0.5 s and
