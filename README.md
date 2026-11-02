@@ -86,7 +86,7 @@ counts = solver.check()                           # guard counts; raises if a ce
   restart files, not advected. He is the mass remainder. `mu` is the mean molar mass (g/mol), `cp` the specific heat at
   constant pressure (erg g^-1 K^-1), `Q` the chemical heating rate (erg g^-1 s^-1, with `heating=True`), `flag` a
   per-cell status (bits 0-1 the chemistry guard, bits 2-3 the reconstruction, bit 4 a defect). A run starts from
-  `q, mem = ts.split(x)` and `h = 1e-10`. Designs are JSON files in `maxichem/designs/` (G31, N30sN2H, G30b, N30, N26)
+  `q, mem = ts.split(x)` and `h = 1e-10`. Designs are YAML files in `maxichem/designs/` (G31, N30sN2H, G30b, N30, N26)
   or any file of the same form; a design is passed by name or path.
 - Results do not depend on batch size or cell order (on one GPU type), so domain decomposition does not change them.
   Cells below 300 K are not stepped and are counted; `check()` raises for them.

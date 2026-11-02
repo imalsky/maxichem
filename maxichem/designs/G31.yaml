@@ -1,0 +1,13 @@
+name: "G31"
+about: >-
+  N30 with CH3OH and C2 carried and N2H hidden: 27 species and 4 element rows of the 25 hidden species, 31 tracers
+# species names stay quoted: YAML reads a bare NO as false
+carried: ["H", "H2O", "OH", "H2", "O", "CH3", "CH4", "C2H2", "C2H4", "C2H6", "CO", "CO2", "H2CO", "CH3OH", "C2",
+          "HCO", "O2", "N", "NH", "HCN", "NO", "NH2", "N2", "NH3", "HNO", "H2CN", "HNCO"]
+hidden: ["CH", "C", "CH2", "C2H", "C2H3", "C2H5", "CH2OH", "CH3O", "CH3CO", "H2CCO", "HCCO", "CN", "N2H2", "N2H3",
+         "N2H4", "NO2", "N2O", "C4H2", "CH3NH", "CH2NH", "CH2NH2", "CH3NH2", "CH3CHO", "HNO2", "N2H"]
+rows:
+  - element: "C"
+  - element: "H"
+  - element: "N"
+  - element: "O"

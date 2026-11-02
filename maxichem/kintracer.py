@@ -1,10 +1,13 @@
 """The reduced-tracer call: the GCM advects fewer tracers than the network has species, and each cell keeps the others as
 a memory of its own.
 
-A design (a JSON file; the package's designs/ folder holds G31, N30sN2H, G30b, N30 and N26 for VULCAN's NCHO network) splits the network's species, He aside,
+A design (a YAML file; the package's designs/ folder holds G31, N30sN2H, G30b, N30 and N26 for VULCAN's NCHO network) splits the network's species, He aside,
 into carried species, each advected as its own tracer, and hidden species, advected only through M rows over them:
-    {"name": ..., "about": ..., "carried": [species], "hidden": [species],
-     "rows": [{"element": "C"}, ..., {"sum": {"C2H4": 1, "NH3": 1}, "mass": 22.54}]}
+    name: ...
+    about: ...
+    carried: [species]        (names quoted: YAML reads a bare NO as false)
+    hidden: [species]
+    rows: [{element: "C"}, ..., {sum: {"C2H4": 1, "NH3": 1}, mass: 22.54}]
 An element row holds the atoms of one element in the hidden species (weights: the atom counts); a sum row a fixed
 non-negative molar sum of named hidden species. Every element that a hidden species holds needs its element row. The GCM
 advects the K carried species and the M rows as mass mixing ratios: a carried species' mass per mass of gas, an element
@@ -68,12 +71,12 @@ TracerSolver(net, design, device, drift=None):
     counts as a dict (one small copy); check(): the totals as a dict, raises if any cell was below the chemistry's
     300 K (kincuda). One call at a time on torch's current stream."""
 import ctypes
-import json
 import string
 from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 
 from . import kincuda as KC
 from . import kinvulcan as KV
@@ -494,13 +497,13 @@ extern "C" __global__ void reform(const double* __restrict__ X2, const double* _
 
 
 class TracerSolver:
-    """The reduced-tracer call of the module docstring for one design (a JSON file, or a name in the package's designs/ folder)."""
+    """The reduced-tracer call of the module docstring for one design (a YAML file, or a name in the package's designs/ folder)."""
 
     def __init__(self, net, design, device, drift=None):
         path = Path(design)
         if not path.suffix:
-            path = DESIGNS / f"{design}.json"
-        d = json.loads(path.read_text())
+            path = DESIGNS / f"{design}.yaml"
+        d = yaml.safe_load(path.read_text())
         self.dev = dev = torch.device(device)
         sp = [str(s) for s in net.species]
         NS = len(sp)
@@ -508,6 +511,8 @@ class TracerSolver:
         self.carried, self.hidden = list(d["carried"]), list(d["hidden"])
         if "He" not in sp:
             raise ValueError("the network has no He (the mass remainder)")
+        if not all(isinstance(s, str) for s in self.carried + self.hidden):
+            raise ValueError(f"{path}: carried and hidden must list species names (quoted: YAML reads a bare NO as false)")
         every = self.carried + self.hidden
         if len(set(every)) != len(every) or set(every) != set(sp) - {"He"}:
             raise ValueError(f"{path}: carried and hidden must split the network's species other than He")
@@ -527,7 +532,7 @@ class TracerSolver:
             else:
                 w = np.zeros(NS)
                 for q, v in r["sum"].items():
-                    if q not in self.hidden or not v > 0:
+                    if q not in self.hidden or not float(v) > 0:
                         raise ValueError(f"{path}: sum row over {q}: a hidden species with a positive weight")
                     w[sp.index(q)] = float(v)
                 if not float(r["mass"]) > 0:

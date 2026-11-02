@@ -13,6 +13,7 @@ authors = [{ name = "Isaac Malsky" }]
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
+    "pyyaml",
     "torch",
     "nvidia-cuda-nvrtc-cu12",   # the kernels are compiled at run time with this wheel's libnvrtc.so.12
 ]
@@ -28,4 +29,4 @@ Repository = "https://github.com/imalsky/maxichem"
 packages = ["maxichem"]
 
 [tool.setuptools.package-data]
-maxichem = ["designs/*.json", "kinjax.cc"]
+maxichem = ["designs/*.yaml", "kinjax.cc"]

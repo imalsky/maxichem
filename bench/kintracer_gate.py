@@ -251,7 +251,7 @@ def report(o, label, counts):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--design", required=True, help="the design's JSON file (or a name in maxichem/designs/)")
+    ap.add_argument("--design", required=True, help="the design's YAML file (or a name in maxichem/designs/)")
     ap.add_argument("--panels", default=PANELS, help=f"(b): folders under the truth data (default {PANELS})")
     ap.add_argument("--days", type=float, default=100.0, help="(b): model time per path (default 100 days)")
     ap.add_argument("--save", help="write the summaries to this JSON file")
