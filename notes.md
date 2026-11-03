@@ -1455,6 +1455,38 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   and the yardstick's worst error per row (calls 1-200: rows with a miss mini-chem 15.21 % / large 5.99 %, maxichem
   0.004 % / 0).
 
+### 2026-11-02 (evening): the one-thread-per-cell projection adopted; the yardstick's 17 missed rows are a VULCAN error
+- One-thread-per-cell projection (author: "do both", 11-02 ~17:0x; outside review: adopt with changes, all made;
+  experiments/2026-11-02_fast-proj/, log.txt): kintracer.py's phase 1, the early exit, the polish, the fix and the
+  outputs run in a kernel with one thread per cell for designs with integer row weights 0-12 on the hidden species and
+  at most 6 rows (every shipped design); the weights are literals, the densities p_h prod_r exp(lam_r)^a_rh. A cell goes
+  to the warp kernel (which redoes it as before) when an input is non-finite, when an evaluation could leave the
+  exponential's range (sum_r |lam_r| max a_rh > 600, or log max p_h + that sum > 690; the review's counterexample: a
+  1e305 memory) or is non-finite, or when it needs phase 2; hand-offs are counted (COUNTS "handoff"). New check case
+  (g): the two kernels of one solver cell by cell. Results (V, GPU1 alone): replay of the 8 recorded live calls 0.5792 (52bdf63) -> 0.2514 us per cell-call
+  (projection 0.3599 -> 0.0365, chemistry 0.2118 -> 0.2068); against 7c298ac on the same inputs (the kernel before the
+  review's range guard):
+  12 gases within 4.6e-12 dex, projected species above 1e-12 of the cell within 8.9e-15 relative (components near
+  1e-30 mol/g differ at their rounding level); live GCM-facing call with gather / scatter 0.257 us per cell-call (100
+  steps from the snapshot; dynamics with the 31 tracers 1.11 s per step, the call 0.355 s); hand-offs 224 per call =
+  the cells needing phase 2. kintracer_check 10/10 (case (g): flags and counts identical on 17 input sets, worst
+  difference 8.7e-16 of the cell's moles: the rounding of an element budget landing on atomic N or O through the
+  spill); G31 gate: kill gate passed, 776 panel paths 0 misses, worst 0.022 dex, defects 0; kincuda_check 20/20;
+  kintest quick: qual paths 0 misses, every path change 0.0000; kinjax_check 28/28; SNCHO 15/15 (case (g)'s worst: 1.9e-5 of its bound).
+- The yardstick's 17 missed rows (one start: 1x solar C/O 1, 300 K, 35.5 bar, equilibrium-far = atomic-H gas from
+  2,617 K at 5e-5 bar; CH4 0.666 dex at call 1, every dt) (V, experiments/2026-11-02_yard17/, log.txt; VULCAN reruns in
+  the VULCAN tree's experiments/2026-11-02_yard17_vulcan/): maxichem at production and at 1e4x tighter tolerances
+  agree to 0.0000 dex along VULCAN's 3,374 output times; an independent integration (the torch reference's rates and
+  right-hand side, scipy Radau and BDF at rtol 1e-10) agrees with maxichem to 0.0000 dex (CH4 frozen at 8.82e-9 after
+  ~0.01 s). VULCAN-0D rerun on the same job: the stored settings reproduce the stored run exactly (CH4 4.11e-8);
+  rtol 5e-4 / 5e-5 with the default first step (dttry 1e-10 s, dt_min 1e-14 s) stay wrong (CH4 1.2e-8, HCN 1.2-1.3 dex
+  high); a first step of 1e-18 s (dt_min 1e-20) at rtol 5e-3 / 5e-4 lands within 0.008 / 0.006 dex of the Radau
+  solution (worst of 12 gases). Cause: VULCAN's first step is far too long for the first femtoseconds of the H
+  recombination at 35 bar; its error estimate skips species whose new value is <= 0 and its clip sets small negatives
+  to 0 (CH4 is 0 at its first output, 1e-14 s); the wrong CH4 then freezes at 300 K. The 17 rows are a reference error:
+  against the corrected VULCAN run maxichem is within 0.008 dex, so the yardstick has no maxichem miss. The stored
+  reference is unchanged (the author's call); the same default first step was used for every VULCAN truth set.
+
 ## 3 Author decisions and requirements (dated)
 
 - 2026-06-09 (gate 2 of the paper plan): held-out open-loop rollouts at fixed dt 6.4 s for K >= 100 steps plus 0.5 s and
@@ -1734,6 +1766,9 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   being SUPER fast in a gcm and always accurate"; then: rewrite the projection kernel (one thread per cell) and look into
   large speedups of the GCM's tracer routine without doing them yet; reusing the factored matrix across calls: "probably
   don't do this".
+
+- 2026-11-02 ~18:0x: the yardstick's 17 missed rows: "can you retest those cases? Figure it out"; then "push stuff"
+  (5 commits pushed, 9ff3f2a..7c298ac).
 
 ## 4 Data
 

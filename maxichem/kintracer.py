@@ -41,9 +41,18 @@ One call, per cell (inside, specific moles n_i = q_i / m_i, mol per gram of gas;
     (kincuda.CudaSolver: its guard and device-side recovery).
  4. New tracers from the result (n = x / sum_i x_i m_i): the carried species, the row sums of the hidden species, and
     the hidden species as the new memory; the mean molar mass, cp and (opt-in) the heating rate.
-Steps 1-2 and 4 are two CUDA kernels generated per design (NVRTC, as kincuda.py), one warp per cell, each cell's
-arithmetic depending only on its own inputs: results do not depend on the batch size or order, and nothing is read back
-to the host during a call. The chemistry conserves mass, so the tracers and the mean molar mass come back consistent.
+Steps 1-2 and 4 are CUDA kernels generated per design (NVRTC, as kincuda.py). For a design with hidden species whose
+row weights on them are integers 0-12 (at most 6 rows), steps 1-2 run first in a kernel with one thread per cell: the
+design's weights are literals in the code, the densities are formed as p_h prod_r exp(lam_r)^a_rh (p_h = exp(lg_h),
+M exponentials per evaluation) with the row sums and the Newton matrix accumulated alongside, through the IT1
+iterations, the polishing iteration, the fix and the outputs. A cell goes on to the one-warp-per-cell kernel, which redoes it from
+its inputs, when an input is not finite, when an evaluation could leave the exponential's range (sum_r |lam_r|
+max_h a_rh > 600, or log max_h p_h plus that sum > 690) or gives a non-finite density, when the cell needs more than
+the IT1 iterations, or when its residual after the polishing iteration is above RTOL; these cells are counted
+(handoff). Other designs (no hidden species, more than 6 rows, other weights) run the one-warp-per-cell kernel for
+every cell. Step 4 is one warp per cell. Each cell's arithmetic depends only on its own inputs: results do not depend on
+the batch size or order, and nothing is read back to the host during a call. The chemistry conserves mass, so the
+tracers and the mean molar mass come back consistent.
 
 TracerSolver(net, design, device, drift=None):
     (q, mem, T, P, dt, h, *, photo=None, heating=False) -> (q, mem, h, mu, cp, Q, flag, counts): the GCM-facing call.
@@ -62,7 +71,7 @@ TracerSolver(net, design, device, drift=None):
         1 converged later, 2 not converged (spill path); bit 4: reconstruction defect, an advected row not reproduced
         (relative 1e-10, absolute 1e-30), a negative He remainder or a non-finite or negative state); counts (device
         int64 [len(COUNTS)], this call's: cells that took extra iterations, that took the dual-objective steps, that did
-        not converge, with a defect, with a negative He remainder, then the chemistry's).
+        not converge, with a defect, with a negative He remainder, handed to the warp kernel, then the chemistry's).
     split(x) -> (q, mem): tracers and memory of full states x [B, NS] (mole fractions), to start a run.
     step(C, R, G, T, P, dt, h) -> (C, R, G, h, x, flag): the same call in specific moles (carried species, rows,
         memory), with x [B, NS] the mole fractions after the call.
@@ -88,9 +97,247 @@ AMASS = {"C": 12.011, "H": 1.008, "N": 14.007, "O": 15.999, "He": 4.002602, "S":
 RTOL, CONV, FLOOR, DCAP = 1e-10, 1e-8, 1e-12, 30.0   # DCAP: largest Newton step in lam before the line search
 IT1, IT2, BLK, P3IT = 8, 60, 10, 400
 ROWTOL, ROWABS = 1e-10, 1e-30                        # reconstruction: advected rows reproduced to this
-COUNTS = ("extra", "dual", "unconverged", "defect", "he_negative") + KC.COUNTS
+COUNTS = ("extra", "dual", "unconverged", "defect", "he_negative", "handoff") + KC.COUNTS
 RGAS = KV.KB * 6.02214076e23                         # erg mol^-1 K^-1
 WARPS = 4                                            # warps (cells in flight) per block
+
+
+def _fast_src(A, hidx, cidx, NS, MW, mrow, spill, relem, EL, IHE):
+    """CUDA source of the one-thread-per-cell kernel prepfast (module docstring) for a design, or None (the warp kernel
+    alone) if the design has no hidden species, more than 6 rows, or a weight on a hidden species that is not an integer
+    in 0-12. A [M, H] the rows' weights on the hidden species, hidx / cidx the species indices of the hidden / carried
+    species, EL [NS, E] element counts."""
+    A = np.asarray(A, float)
+    if not (A.size and A.shape[0] <= 6 and np.all(A == np.round(A)) and A.min() >= 0 and A.max() <= 12):
+        return None
+    A = A.astype(int)
+    M, H = A.shape
+    K, NE = len(cidx), EL.shape[1]
+    f = lambda v: repr(float(v))  # noqa: E731
+    pmax = [int(A[k].max()) for k in range(M)]
+
+    def dens(name, rows, hess, store):
+        o = [f"__device__ __forceinline__ bool {name}(const double* p, double lpm, const double* lam, double* rs, "
+             "double* hm, double* n, bool* fin) {",
+             "  double g = 0.0;"]
+        o += [f"  g += fabs(lam[{k}]) * {f(pmax[k])};" for k in range(M)]
+        o += ["  if (!(g <= 600.0) || !(lpm + g <= 690.0)) return false;"]
+        for k in range(M):
+            if pmax[k] > 0:
+                o.append(f"  const double P{k}_1 = exp(lam[{k}]);")
+                o += [f"  const double P{k}_{q} = P{k}_{q - 1} * P{k}_1;" for q in range(2, pmax[k] + 1)]
+        if rows:
+            o += [f"  rs[{k}] = 0.0;" for k in range(M)]
+        if hess:
+            o += [f"  hm[{e * M + g_}] = 0.0;" for e in range(M) for g_ in range(e, M)]
+        o += ["  bool ok = true;", "  double v;"]
+        for h in range(H):
+            fac = "".join(f" * P{k}_{A[k, h]}" for k in range(M) if A[k, h] > 0)
+            o.append(f"  v = p[{h}]{fac};")
+            o.append("  ok = ok && isfinite(v);")
+            if store:
+                o.append(f"  n[{h}] = v;")
+            if rows:
+                o += [f"  rs[{k}] += {'v' if A[k, h] == 1 else f(A[k, h]) + ' * v'};" for k in range(M) if A[k, h] > 0]
+            if hess:
+                o += [f"  hm[{e * M + g_}] += {'v' if A[e, h] * A[g_, h] == 1 else f(A[e, h] * A[g_, h]) + ' * v'};"
+                      for e in range(M) for g_ in range(e, M) if A[e, h] * A[g_, h] > 0]
+        o += ["  *fin = ok;", "  return ok;", "}"]
+        return "\n".join(o)
+
+    o = [dens("fd_rsh", True, True, False), dens("fd_rs", True, False, False), dens("fd_n", False, False, True), r"""
+// the Jacobi-scaled Newton direction (as ndir) from the accumulated matrix hm (upper triangle, unmasked)
+__device__ __forceinline__ void tdir(const double* hm, const double* act, const double* r, double* d) {
+  double Hm[M][M], dg[M], S[M][M], y[M];
+  for (int e = 0; e < M; ++e)
+    for (int f = e; f < M; ++f) {
+      const double v = hm[e * M + f] * (act[e] * act[f]) + (e == f ? 1.0 - act[e] : 0.0);
+      Hm[e][f] = v;
+      Hm[f][e] = v;
+    }
+  for (int e = 0; e < M; ++e) dg[e] = 1.0 / sqrt(Hm[e][e] > 1e-300 ? Hm[e][e] : 1e-300);
+  for (int e = 0; e < M; ++e) {
+    for (int f = 0; f < M; ++f) S[e][f] = Hm[e][f] * dg[e] * dg[f] + (e == f ? 1e-14 : 0.0);
+    y[e] = dg[e] * r[e];
+  }
+  for (int p = 0; p < M; ++p) {
+    int piv = p;
+    for (int i = p + 1; i < M; ++i) if (fabs(S[i][p]) > fabs(S[piv][p])) piv = i;
+    if (piv != p) {
+      for (int j = 0; j < M; ++j) { const double t = S[p][j]; S[p][j] = S[piv][j]; S[piv][j] = t; }
+      const double t = y[p]; y[p] = y[piv]; y[piv] = t;
+    }
+    for (int i = p + 1; i < M; ++i) {
+      const double f = S[i][p] / S[p][p];
+      for (int j = p + 1; j < M; ++j) S[i][j] -= f * S[p][j];
+      y[i] -= f * y[p];
+    }
+  }
+  for (int i = M - 1; i >= 0; --i) {
+    double v = y[i];
+    for (int j = i + 1; j < M; ++j) v -= S[i][j] * y[j];
+    y[i] = v / S[i][i];
+  }
+  for (int e = 0; e < M; ++e) {
+    d[e] = dg[e] * y[e];
+    if (!isfinite(d[e])) d[e] = 0.0;
+  }
+}
+
+// one phase-1 Newton iteration (as newton(): step cap, line search over LS1, Armijo); stop: the early exit; false:
+// the product form's range left (the cell goes to the warp kernel)
+__device__ __forceinline__ bool fiter(const double* p, double lpm, double* lam, const double* b, const double* act,
+                                      const double* s, int stop, bool* done) {
+  double rs[M], hm[M * M], r[M], d[M];
+  bool fin;
+  *done = false;
+  if (!fd_rsh(p, lpm, lam, rs, hm, 0, &fin)) return false;
+  for (int k = 0; k < M; ++k) r[k] = (rs[k] - b[k]) * act[k];
+  if (stop) {
+    double res = 0.0;
+    for (int k = 0; k < M; ++k) {
+      const double v = fabs(r[k]) / s[k];
+      res = (isnan(v) || v > res) ? v : res;
+    }
+    if (fin && !isnan(res) && res <= $RTOL) { *done = true; return true; }
+  }
+  tdir(hm, act, r, d);
+  double dmax = 0.0;
+  for (int e = 0; e < M; ++e) dmax = fmax(dmax, fabs(d[e]));
+  const double cf = $DCAP / (dmax > $DCAP ? dmax : $DCAP);
+  double f0 = 0.0;
+  for (int k = 0; k < M; ++k) {
+    d[k] *= cf;
+    f0 += (r[k] / s[k]) * (r[k] / s[k]);
+  }
+  double t = 0.0;
+  for (int l = 0; l < 4; ++l) {
+    const double L = LS1[l];
+    double lt[M], rt[M];
+    for (int k = 0; k < M; ++k) lt[k] = lam[k] - L * d[k];
+    bool tf;
+    if (!fd_rs(p, lpm, lt, rt, 0, 0, &tf)) return false;
+    double ft = 0.0;
+    for (int k = 0; k < M; ++k) {
+      const double v = (rt[k] - b[k]) * act[k] / s[k];
+      ft += v * v;
+    }
+    if (ft <= (1.0 - 1e-4 * L * cf) * f0) { t = L; break; }
+  }
+  for (int k = 0; k < M; ++k) lam[k] -= t * d[k];
+  return true;
+}
+
+// resid() of the product form (INF if not finite); false: range left
+__device__ __forceinline__ bool fres(const double* p, double lpm, const double* lam, const double* b, const double* act,
+                                     const double* s, double* res) {
+  double rs[M];
+  bool fin;
+  if (!fd_rs(p, lpm, lam, rs, 0, 0, &fin)) return false;
+  double v0 = 0.0;
+  for (int k = 0; k < M; ++k) {
+    const double v = fabs((rs[k] - b[k]) * act[k]) / s[k];
+    v0 = (isnan(v) || v > v0) ? v : v0;
+  }
+  *res = (fin && !isnan(v0)) ? v0 : INF;
+  return true;
+}
+
+extern "C" __global__ void prepfast(const double* __restrict__ C, const double* __restrict__ R,
+    const double* __restrict__ G, int B, double* __restrict__ X, double* __restrict__ N, int* __restrict__ status,
+    int* __restrict__ badv, u64* __restrict__ counts, int* __restrict__ idx, int* __restrict__ nidx) {
+  for (int cell = blockIdx.x * blockDim.x + threadIdx.x; cell < B; cell += gridDim.x * blockDim.x) {
+    const double* Cc = C + (size_t)cell * NC;
+    const double* Rc = R + (size_t)cell * M;
+    const double* Gc = G + (size_t)cell * NH;
+    double b[M], act[M], s[M], p[NH], c[NC], n[NH];
+    bool ok = true;
+    double rm = 0.0, scale = 0.0, sm = 0.0;"""]
+    o += [f"    b[{k}] = Rc[{k}]; ok = ok && isfinite(b[{k}]); rm += b[{k}] * {f(mrow[k])}; "
+          f"scale = fmax(scale, fabs(b[{k}]));" for k in range(M)]
+    o += [f"    c[{i}] = Cc[{i}]; ok = ok && isfinite(c[{i}]); sm += c[{i}] * {f(MW[cidx[i]])};" for i in range(K)]
+    o += [f"    const double he = (1.0 - sm - rm) / {f(MW[IHE])};",
+          "    scale = fmax(scale, 1e-30);",
+          f"    const double fl = $FLOOR * scale / (double)NH;"]
+    o += [f"    p[{h}] = Gc[{h}]; ok = ok && isfinite(p[{h}]); p[{h}] = fmax(p[{h}], 0.0) + fl;" for h in range(H)]
+    o += ["    bool dlg = !ok;", "    double lam[M], res = INF;", "    for (int k = 0; k < M; ++k) lam[k] = 0.0;",
+          "    if (!dlg) {"]
+    for k in range(M):          # rows with holders and no budget remove their holders
+        hold = [h for h in range(H) if A[k, h] > 0]
+        o.append(f"      const bool z{k} = {'true' if hold else 'false'} && b[{k}] <= 0.0;")
+    for h in range(H):
+        zs = " || ".join(f"z{k}" for k in range(M) if A[k, h] > 0) or "false"
+        o.append(f"      if ({zs}) p[{h}] = 0.0;")
+    for k in range(M):
+        hold = " || ".join(f"p[{h}] > 0.0" for h in range(H) if A[k, h] > 0) or "false"
+        o.append(f"      act[{k}] = (({hold}) && b[{k}] > 0.0) ? 1.0 : 0.0; s[{k}] = act[{k}] > 0.0 ? b[{k}] : 1.0;")
+    o.append(r"""      double pm = 0.0;
+      for (int h = 0; h < NH; ++h) pm = fmax(pm, p[h]);
+      const double lpm = log(pm);                                 // log of the largest prior (-inf if none is left)
+      bool done = false;
+      for (int it = 0; it < $IT1 && !done; ++it)
+        if (!fiter(p, lpm, lam, b, act, s, 1, &done)) { dlg = true; break; }
+      if (!dlg && !fres(p, lpm, lam, b, act, s, &res)) dlg = true;
+      dlg = dlg || res > $RTOL;                                   // needs phase 2: the warp kernel
+      if (!dlg && !fiter(p, lpm, lam, b, act, s, 0, &done)) dlg = true;   // the polishing iteration
+      if (!dlg && !fres(p, lpm, lam, b, act, s, &res)) dlg = true;
+      dlg = dlg || res > $RTOL;
+      bool fin = true;
+      if (!dlg && !fd_n(p, lpm, lam, 0, 0, n, &fin)) dlg = true;
+      dlg = dlg || !fin;
+    }
+    if (dlg) {                                                    // the warp kernel redoes this cell
+      idx[atomicAdd(nidx, 1)] = cell;
+      atomicAdd(counts + 5, 1ULL);
+      continue;
+    }
+    // the exact fix (as prepare)
+    double qk[M], held, rem[M];""")
+    for k in range(M):
+        terms = " + ".join(f"{'' if A[k, h] == 1 else f(A[k, h]) + ' * '}n[{h}]" for h in range(H) if A[k, h] > 0) or "0.0"
+        o.append(f"    held = {terms};")
+        o.append(f"    {{ const double v = held > b[{k}] ? b[{k}] / fmax(held, 1e-300) : 1.0; "
+                 f"qk[{k}] = fmin(fmax(v, 0.0), 1.0); }}")
+    for h in range(H):
+        o.append("    { double sc = 1.0;" + "".join(f" sc = fmin(sc, qk[{k}]);" for k in range(M) if A[k, h] > 0)
+                 + f" n[{h}] *= sc; }}")
+    for k in range(M):
+        terms = " + ".join(f"{'' if A[k, h] == 1 else f(A[k, h]) + ' * '}n[{h}]" for h in range(H) if A[k, h] > 0) or "0.0"
+        o.append(f"    rem[{k}] = fmax(b[{k}] - ({terms}), 0.0);")
+    # the full state, in species order
+    hpos = {j: h for h, j in enumerate(hidx)}
+    cpos = {j: i for i, j in enumerate(cidx)}
+    o.append("    double m[NS];")
+    for j in range(NS):
+        v = f"c[{cpos[j]}]" if j in cpos else f"n[{hpos[j]}]" if j in hpos else "0.0"
+        v += "".join(f" + rem[{k}]" for k in range(M) if spill[k] == j)
+        o.append(f"    m[{j}] = {'fmax(he, 0.0)' if j == IHE else v};")
+    o.append("    bool nf = false, neg = false, off = false;")
+    o.append("    double tot = 0.0, w, g;")
+    o.append("    for (int j = 0; j < NS; ++j) { nf = nf || !isfinite(m[j]); neg = neg || m[j] < 0.0; tot += m[j]; }")
+    for e in range(NE):
+        wt = " + ".join(f"{'' if EL[j, e] == 1 else f(EL[j, e]) + ' * '}c[{cpos[j]}]" for j in cidx if EL[j, e] != 0)
+        wt = (wt or "0.0") + "".join(f" + b[{k}]" for k in range(M) if relem[k] == e)
+        gt = " + ".join(f"{'' if EL[j, e] == 1 else f(EL[j, e]) + ' * '}m[{j}]" for j in range(NS) if EL[j, e] != 0) or "0.0"
+        o.append(f"    w = {wt}; g = {gt}; off = off || fabs(g - w) > $ROWTOL * fabs(w) + $ROWABS;")
+    for k in range(M):
+        if spill[k] < 0:
+            terms = " + ".join(f"{'' if A[k, h] == 1 else f(A[k, h]) + ' * '}m[{hidx[h]}]" for h in range(H)
+                               if A[k, h] > 0) or "0.0"
+            o.append(f"    off = off || fabs(({terms}) - b[{k}]) > $ROWTOL * fabs(b[{k}]) + $ROWABS;")
+    o.append(r"""    const bool bad = off || he < 0.0 || nf || neg;
+    for (int j = 0; j < NS; ++j) {
+      X[(size_t)cell * NS + j] = m[j] / tot;
+      N[(size_t)cell * NS + j] = m[j];
+    }
+    status[cell] = 0;
+    badv[cell] = bad;
+    if (bad) atomicAdd(counts + 3, 1ULL);
+    if (he < 0.0) atomicAdd(counts + 4, 1ULL);
+  }
+}
+""")
+    return "\n".join(o)
 
 
 def molar_masses(species):
@@ -302,16 +549,19 @@ extern "C" __global__ void prepare(const double* __restrict__ C, const double* _
     const double* __restrict__ G, int B, double* __restrict__ X, double* __restrict__ N, int* __restrict__ status,
     int* __restrict__ badv, u64* __restrict__ counts, const double* __restrict__ AT, const int* __restrict__ cpos,
     const int* __restrict__ hpos, const double* __restrict__ MW, const double* __restrict__ mrow,
-    const int* __restrict__ spill, const int* __restrict__ relem, const double* __restrict__ EL) {
+    const int* __restrict__ spill, const int* __restrict__ relem, const double* __restrict__ EL,
+    const int* __restrict__ idx, const int* __restrict__ nidx) {
   const int lane = threadIdx.x & 31;
   const int nw = (gridDim.x * blockDim.x) >> 5;
+  const int nloop = nidx ? *nidx : B;
   Cell c;
 #pragma unroll
   for (int q = 0; q < NSL; ++q) {
     const int j = lane + 32 * q;
     for (int k = 0; k < M; ++k) c.a[k][q] = j < NS ? AT[k * NS + j] : 0.0;
   }
-  for (int cell = (blockIdx.x * blockDim.x + threadIdx.x) >> 5; cell < B; cell += nw) {
+  for (int w = (blockIdx.x * blockDim.x + threadIdx.x) >> 5; w < nloop; w += nw) {
+    const int cell = nidx ? idx[w] : w;
     double c53[NSL], m[NSL], n[NSL];
     double sm = 0.0, rm = 0.0, scale = 0.0;
 #pragma unroll
@@ -590,7 +840,11 @@ class TracerSolver:
         self._tab = [self.AT.contiguous(), t(cpos, i32), t(hpos, i32), self.MW, t(mrow), t(spill, i32), t(relem, i32),
                      self.EL.contiguous()]
         self._nasa = [t(net.lo).contiguous(), t(net.hi).contiguous()]   # NASA-9 a1..a7, b1, b2 per species
-        src = string.Template(_SRC).substitute(
+        hidx = [sp.index(s_) for s_ in self.hidden]
+        fsrc = _fast_src(np.stack(AT)[:, hidx], hidx, [sp.index(s_) for s_ in self.carried], NS, molar_masses(sp),
+                         mrow, spill, relem, atoms[:, [el.index(e) for e in els]], sp.index("He"))
+        self.fast = fsrc is not None
+        src = string.Template(_SRC + (fsrc or "")).substitute(
             NS=NS, M=M, NSL=-(-NS // 32), NC=max(self.K, 1), NH=max(self.H, 1), NE=len(els), IHE=sp.index("He"),
             FLOOR=repr(FLOOR), DCAP=repr(DCAP), RTOL=repr(RTOL), CONV=repr(CONV), IT1=IT1, IT2=IT2, BLK=BLK, P3IT=P3IT,
             ROWTOL=repr(ROWTOL), ROWABS=repr(ROWABS), RGAS=repr(RGAS))
@@ -600,12 +854,13 @@ class TracerSolver:
         KC._check(cu.cuModuleLoadData(ctypes.byref(self._mod), KC.compile_cubin(src, f"{prop.major}{prop.minor}")),
                   "load")
         self._fn = {}
-        for name in ("prepare", "reform"):
+        for name in ("prepare", "reform") + (("prepfast",) if self.fast else ()):
             fn = ctypes.c_void_p()
             KC._check(cu.cuModuleGetFunction(ctypes.byref(fn), self._mod, name.encode()), "function")
             self._fn[name] = fn
         self._blocks = prop.multi_processor_count * 16                 # most blocks per launch (cells loop over warps)
         self.kc = KC.CudaSolver(net, dev, drift)
+        self._nidx = torch.zeros(1, dtype=torch.int32, device=dev)
         self.count = torch.zeros(len(COUNTS), dtype=torch.int64, device=dev)
         self.total = torch.zeros(len(COUNTS), dtype=torch.int64, device=dev)
 
@@ -628,7 +883,17 @@ class TracerSolver:
         x = torch.empty(B, NS, dtype=F64, device=self.dev)
         n = torch.empty_like(x)
         status, bad = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(2))
-        self._launch("prepare", B, [C, R, G, ctypes.c_int(B), x, n, status, bad, self.count, *self._tab])
+        if self.fast:
+            self._nidx.zero_()
+            idx = torch.empty(B, dtype=torch.int32, device=self.dev)
+            KC._launch(self._fn["prepfast"], max(1, -(-B // 128)), 128, 0,
+                       torch.cuda.current_stream(self.dev).cuda_stream,
+                       [C, R, G, ctypes.c_int(B), x, n, status, bad, self.count, idx, self._nidx])
+            self._launch("prepare", B, [C, R, G, ctypes.c_int(B), x, n, status, bad, self.count, *self._tab, idx,
+                                        self._nidx])
+        else:
+            self._launch("prepare", B, [C, R, G, ctypes.c_int(B), x, n, status, bad, self.count, *self._tab,
+                                        ctypes.c_void_p(0), ctypes.c_void_p(0)])
         return x, n, status, bad
 
     def prepare(self, C, R, G):

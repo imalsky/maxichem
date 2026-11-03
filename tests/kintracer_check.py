@@ -40,6 +40,14 @@ design's split and rows, the inputs) and a mismatch is refused (tests/libref.py)
     the state equals the reference's to 1e-6 relative on the species above 1e-12 of the cell's moles (both meet the 1e-8
     convergence test; a spill or a stalled projection differs by orders of magnitude); the cells permuted and one cell
     alone give bitwise the same states, status and flags.
+(g) The one-thread-per-cell projection against the one-warp-per-cell kernel of the same solver (fast off), N26 and N30:
+    the mixed bed, mixed again half and half with a neighbour, a zero memory, each row's budget zeroed in every third
+    cell, odd inputs (NaN, inf, 1e305 memory, budgets x 1e300, negative tracers in a few cells) and, for N30, the cells
+    of (f). Pass: identical status and defect flags in every cell, identical counts apart from the hand-off, the same
+    NaN and +-inf entries, every finite species within 1e-9 relative + 1e-14 of the cell's moles (the absolute part is
+    the rounding of the element budgets landing on a rare atomic species through the spill), hand-offs at least the
+    cells with status 1 or 2 (only the warp kernel writes those); designs with a fractional weight or more than 6 rows
+    get no one-thread kernel.
     python tests/kintracer_check.py [VULCAN thermo folder] (about 1 min). Exit 0 = every case PASS."""
 import argparse
 import sys
@@ -370,6 +378,61 @@ def main():
             f"converged {int(F['conv'].sum())}, dual-objective steps {int(F['p3'].sum())}); spilled share of each element "
             f"row {spill:.1e}; state vs the reference {dif:.1e} rel.; elements {float(er.max()):.1e} rel.; defects "
             f"{int(bad.sum())}; permuted and one-cell batches bitwise {same}")
+    # ---- (g) the one-thread-per-cell projection against the warp kernel of the same solver
+    hi, worst, notes, okg, nsets = KT.COUNTS.index("handoff"), 0.0, [], True, 0
+    for nm in ("N26", "N30"):
+        ts = solvers[nm]
+        if not ts.fast:
+            okg = False
+            notes.append(f"{nm}: no one-thread kernel")
+            continue
+        nb = tt(bed["n0"])
+        Q = bm(torch.cat([nb[:, ts.ic], torch.where(ts.hid, nb, torch.zeros_like(nb)) @ ts.A], 1))
+        C, R, G = Q[:, :ts.K].contiguous(), Q[:, ts.K:].contiguous(), nb[:, ts.ih].contiguous()
+        nbr = torch.roll(torch.arange(C.shape[0], device=dev), 1)
+        sets = {"bed": (C, R, G), "neighbour": (0.5 * (C + C[nbr]), 0.5 * (R + R[nbr]), G),
+                "zero memory": (C, R, torch.zeros_like(G))}
+        for k in range(ts.M):
+            Rz = R.clone()
+            Rz[::3, k] = 0.0
+            sets[f"row {k} zeroed"] = (C, Rz, G)
+        Cx, Rx, Gx = C.clone(), R.clone(), G.clone()
+        Cx[0::97, 0], Rx[1::97, 0], Gx[2::97, 1], Cx[4::97, 1], Gx[5::97, 0] = (float("nan"), float("inf"), 1e305,
+                                                                              -1e-12, float("nan"))
+        Rx[3::97] *= 1e300
+        sets["odd inputs"] = (Cx, Rx, Gx)
+        if nm == "N30":
+            sets["far from the memory"] = (tt(Cf), tt(Rf), tt(Gf))
+        for sn, (c_, r_, g_) in sets.items():
+            nsets += 1
+            ts.count.zero_()
+            na, sa, ba = ts.prepare(c_, r_, g_)
+            ca = ts.count.clone()
+            ts.fast = False
+            ts.count.zero_()
+            nw, sw, bw = ts.prepare(c_, r_, g_)
+            cw = ts.count.clone()
+            ts.fast = True
+            flags = int((sa != sw).sum()) + int((ba != bw).sum())
+            same_c = torch.equal(torch.cat([ca[:hi], ca[hi + 1:]]), torch.cat([cw[:hi], cw[hi + 1:]])) and int(cw[hi]) == 0
+            same_f = all(torch.equal(f(na), f(nw)) for f in (torch.isnan, torch.isposinf, torch.isneginf))
+            fin = torch.isfinite(na) & torch.isfinite(nw)
+            tot = torch.where(fin, torch.maximum(na.abs(), nw.abs()), torch.zeros_like(na)).sum(1, keepdim=True)
+            bound = 1e-9 * torch.maximum(na.abs(), nw.abs()) + 1e-14 * tot
+            rel = float(torch.where(fin, (na - nw).abs() / bound.clamp(min=1e-300), torch.zeros_like(na)).max())
+            routed = int((sw != 0).sum())
+            good = flags == 0 and same_c and same_f and rel <= 1.0 and int(ca[hi]) >= routed
+            okg = okg and good
+            worst = max(worst, rel)
+            if not good:
+                notes.append(f"{nm} {sn}: flags differ {flags}, counts {same_c}, non-finite {same_f}, {rel:.1e} of the bound, "
+                             f"handed off {int(ca[hi])} of {routed} needed")
+    A = (ts.AT[:, ts.ih]).cpu().numpy()
+    elig = (KT._fast_src(A * 0.5, *([None] * 9)) is None and KT._fast_src(np.vstack([A, A[:3]]), *([None] * 9)) is None)
+    okg = okg and elig
+    verdict("(g) one thread per cell vs the warp kernel", okg,
+            f"N26 and N30, {nsets} input sets: states within {worst:.1e} of the bound (1e-9 rel. + 1e-14 of the cell); "
+            f"fractional-weight and 7-row designs refused {elig}; " + ("; ".join(notes) or "flags and counts identical"))
     print(f"{sum(results)} of {len(results)} cases PASS ({time.time() - t0:.0f} s)", flush=True)
     sys.exit(0 if all(results) else 1)
 

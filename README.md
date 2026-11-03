@@ -111,8 +111,8 @@ first seven, 1e-8 for H, OH, O, 1e-6 for H2 and N2). The target domain is 1e-5 t
   mixing (up to 1.26 dex), and a few cells at 300 times solar metallicity at 0.33 dex in the first calls after an
   equilibrium start. The per-cell memory is required (without it the errors reach about 6 dex).
 - Speed, on an RTX 6000 Ada (fp64 at 1/64 of its fp32 rate) with no other job. In a coupled GCM run (snapy, a C48 x 100
-  hot Jupiter, 1.38 million cells, G31 every 70-s step) the whole reduced-tracer call takes 0.37 us per cell-call with
-  its gather and scatter (projection 0.15, chemistry 0.21): the gas changes little between calls and a cell takes about
+  hot Jupiter, 1.38 million cells, G31 every 70-s step) the whole reduced-tracer call takes 0.26 us per cell-call with
+  its gather and scatter (projection 0.04, chemistry 0.21): the gas changes little between calls and a cell takes about
   one step per call.
   The all-species kernel takes about 0.24 us per cell-call at large batches when the gas is not mixed between calls
   (1.08 steps per call). On mixing test beds, where every cell's gas is mixed far from its last state before each call,
