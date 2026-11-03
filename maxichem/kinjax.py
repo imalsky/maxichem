@@ -381,6 +381,8 @@ class KinJax:
     device constants of the traced call; rtol, atol, max_steps and adapt are static."""
 
     def __init__(self, net, drift=None):
+        raise NotImplementedError("kinjax: the JAX layer is not yet ported to the derivative kernels' current interface "
+                                  "(photolysis, the 14-column rate table, the collision limit's cotangent)")
         if not jax.config.jax_enable_x64:
             raise RuntimeError("kinjax needs jax_enable_x64 (float64 state)")
         lib = _lib()

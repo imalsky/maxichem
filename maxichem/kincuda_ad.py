@@ -2,13 +2,18 @@
 kernels generated from the same tables: a tangent (JVP) kernel and an adjoint (VJP) kernel; each also returns the call's
 result with the call kernel's arithmetic (bitwise). One warp per cell: each lane walks W of the call kernel's 32 W lane
 streams (S v, Jacobian terms, LU updates), and the trailing block, the solves and the Sherman-Morrison steps are the call
-kernel's code, so every sum of the primal is the call kernel's. Networks: at most 64 species with at most 32 leading
-rows, fewer than 512 reactions, and the Arrhenius, falloff and special laws only (no Troe, efficiency or explicit
-reverse laws), e.g. NCHO.
+kernel's code, so every sum of the primal is the call kernel's. Networks: at most 96 species (64 leading rows and the
+32-row trailing block), at most 2,047 reactions (photolysis branches included), every rate law of kincuda but explicit reverse laws, e.g.
+every VULCAN-JAX network; photolysis as CudaSolver(photo=True).
 
 Differentiated inputs: the state x, T, P, dt, the starting step size h, per-cell log rate multipliers lm [B, R] (each
-multiplies a reaction's forward and reverse coefficients together) and the Arrhenius table rc [R, 9] (ln A, B, C of k0,
-of the special law's second k0 term and of k_inf, as kincuda.tables). Outputs: x_out, h_out.
+multiplies a reaction's forward and reverse coefficients together, after the collision limit; a photolysis row's kf =
+J exp(lm)), the Arrhenius columns of the rate table rc [R, 9 of RCW] (ln A, B, C of k0, of the second k0 term and of
+k_inf, as kincuda.tables; the Troe parameters and efficiencies are not differentiated) and the photolysis rates J
+[B, branches] (derivatives in J itself, so they hold at J = 0). Outputs: x_out, h_out. The rate derivatives include the
+Troe factor (standard and vm11 widths, kpart) and the collision limit: with A = ln of a pair's forward coefficient before
+the limit and G = ln kr - A, the limit c adds d ln c = -(wA dA + wG dG + wE d ln nd) to both directions (cap_w: wA 1
+above the limit, 1/2 at it; wG = wA times the reverse direction's share of the larger direction, 1/2 at a tie).
 
 Two contracts, both on the branch the call takes (accept / reject, clamped species, step-control limits):
   frozen (adapt=False): the accepted step sizes held fixed (replay): no derivative through dt, h or the error estimate,
@@ -68,24 +73,27 @@ NAMES = ("M", "DINV", "N0", "N1", "N2", "N12", "V", "PART", "NN", "Y", "F", "SV"
 
 def supported(tab):
     """Raises NotImplementedError unless the derivative kernels take the network of kincuda.tables' tab: at most 64
-    species with at most 32 leading rows, fewer than 512 reactions, the Arrhenius, falloff and special laws only."""
-    if tab["law"] or tab["k0"] > 32 or tab["ns"] > 64 or 2 * tab["nr"] >= 1024:
-        raise NotImplementedError("the derivative kernels take networks of at most 64 species (32 leading rows), "
-                                  "fewer than 512 reactions and the Arrhenius, falloff and special laws only")
+    leading rows (with the 32-row trailing block: at most 96 species), at most 2,047 reactions (photolysis branches
+    included), no explicit reverse law."""
+    if "rev" in tab["law"] or tab["k0"] > 64 or 2 * tab["nr"] >= 4096:
+        raise NotImplementedError("the derivative kernels take networks of at most 96 species (64 leading rows), "
+                                  "at most 2,047 reactions (photolysis branches included) and no explicit reverse law")
 
 
 def ad_tables(net, tab):
     """Tables of the derivative kernels beyond kincuda.tables: the stream of the transposed concentration Jacobian (for
-    each species the terms rho_k n_a n_b of the reactions holding it, rho = per-reaction cotangent times kf or kr), its
-    piece offsets, and the row masks of the transposed triangular solves."""
-    ns, nr, k0, P = tab["ns"], tab["nr"], tab["k0"], tab["P"]
+    each species the terms rho_k n_a n_b of the reactions holding it, rho = per-reaction cotangent times kf or kr; a
+    photolysis branch only its absorber's), its piece offsets, the row masks of the transposed triangular solves, and
+    px: the photolysis branches' product slots (kincuda.tables leaves them out of rx: no reverse side)."""
+    ns, nr, nrt, k0, P = tab["ns"], tab["nr"], tab["nrt"], tab["k0"], tab["P"]
     pos = {int(s): k for k, s in enumerate(tab["perm"])}
-    S = np.asarray(net.S)
+    reac = net.reac + (net.photo if nr > nrt else [])
+    S = np.hstack([np.asarray(net.S), np.asarray(net.Sp)]) if nr > nrt else np.asarray(net.S)
     rows = [[] for _ in range(ns)]
     for r in range(nr):
         if not np.any(S[:, r] != 0):
             continue
-        for side, k in ((net.reac[r]["re"], r), (net.reac[r]["pr"], nr + r)):
+        for side, k in ((reac[r]["re"], r), (reac[r]["pr"], nr + r))[:1 if r >= nrt else 2]:
             sl = [pos[q] for q in side]
             for m in range(len(sl)):
                 rest = sl[:m] + sl[m + 1:]
@@ -99,7 +107,7 @@ def ad_tables(net, tab):
             nx += c > 0
         xg.append(nx)
     npg = ns + nx
-    if npg > 127:
+    if npg > 511:
         raise ValueError("too many gather pieces")
     lanes, ground = KC._lanes(range(len(pieces)), lambda q: len(pieces[q][1]), 32)
     gt = np.zeros((ground, 32), np.uint64)
@@ -108,11 +116,12 @@ def ad_tables(net, tab):
         for it in its:
             dst, terms = pieces[it]
             for e, (k, a, b) in enumerate(terms):
-                gt[q, l_] = int(k) | a << 12 | b << 18 | dst << 24 | int(e == len(terms) - 1) << 35 | 1 << 37
+                gt[q, l_] = int(k) | a << 12 | b << 19 | dst << 26 | int(e == len(terms) - 1) << 35 | 1 << 37
                 q += 1
     urow = sum(1 << k for k in range(k0) if any((k, j) in P for j in range(k + 1, ns)))
     lrow = sum(1 << k for k in range(k0) if any((k, j) in P for j in range(k)))
-    return dict(gt=gt, xg=np.array(xg, np.int32), npg=npg, urow=urow, lrow=lrow)
+    px = [pos.get(q, ns) for r in reac[nrt:] for q in list(r["pr"]) + [None] * (3 - len(r["pr"]))] or [ns]
+    return dict(gt=gt, xg=np.array(xg, np.int32), npg=npg, urow=urow, lrow=lrow, px=px)
 
 
 def layout(tab, ext, kind):
@@ -142,6 +151,10 @@ _SRC_AD = r"""
 #define NPG $npg
 #define UROW $urow
 #define LROW $lrow
+#define NRT $nrt                               // thermal reactions; rows NRT..NR-1: photolysis branches (kf = J)
+#define NJ $nj
+#define KCOLL $kcoll
+__device__ const unsigned char PX[] = {$px};   // photolysis branches' product slots, 3 per branch (padding NS)
 $offsets
 
 __device__ __forceinline__ double sgn(double a) { return a > 0.0 ? 1.0 : (a < 0.0 ? -1.0 : 0.0); }
@@ -238,9 +251,23 @@ __device__ __forceinline__ void svs2(const double* w1, const double* w2, double*
   __syncwarp();
 }
 
-// Rate coefficients of the cell (the call kernel's code), times exp(lm) when per-cell log multipliers are given.
-__device__ __forceinline__ void rates(double* S, double* kf, double* kr, double Tc, double nd, const double* lmc,
-    const double* __restrict__ rc, const int* __restrict__ rf, const double* __restrict__ nasa, const Tab& T, int lane)
+// The collision limit's derivative weights of a reaction from its pair before the limit (COLL's q): wA = 1 if
+// q > K_COLL, 1/2 at q = K_COLL (the tie of the min), else 0; wG = wA v, v = the reverse direction's share of the larger
+// (1/2 at a tie; a direction of fewer than two molecules does not count).
+__device__ __forceinline__ void cap_w(int fl, double kf, double kr, double nd, double& wA, double& wG) {
+  const int mf = (fl >> 10) & 3, mr = (fl >> 12) & 3;
+  const double qf = mf >= 2 ? kf * (mf == 3 ? nd : 1.0) : 0.0, qr = mr >= 2 ? kr * (mr == 3 ? nd : 1.0) : 0.0;
+  const double q = fmax(qf, qr), w = q > KCOLL ? 1.0 : (q == KCOLL ? 0.5 : 0.0);
+  wA = w;
+  wG = w * (qr > qf ? 1.0 : (qr < qf ? 0.0 : 0.5));
+}
+
+// Rate coefficients of the cell (the call kernel's code: the law, the reverse from Gibbs, the collision limit;
+// photolysis rows kf = J, kr = 0), times exp(lm) when per-cell log multipliers are given; cw[r], cw[NR + r] = the
+// collision limit's weights (cap_w).
+__device__ __forceinline__ void rates(double* S, double* kf, double* kr, double* cw, double Tc, double nd,
+    const double* lmc, const double* Jc, const double* __restrict__ rc, const int* __restrict__ rf,
+    const double* __restrict__ nasa, const Tab& T, int lane)
 {
   const double lT = log(Tc), iT = 1.0 / Tc, lKT = log(KBOLTZ * Tc / P0BAR);
   double* g = S + A_V;                    // G / RT of each species
@@ -257,6 +284,14 @@ __device__ __forceinline__ void rates(double* S, double* kf, double* kr, double 
   if (lane == 0) g[NS] = 0.0;
   __syncwarp();
   for (int r = lane; r < NR; r += 32) {
+    if (r >= NRT) {
+      kf[r] = Jc[r - NRT];
+      kr[r] = 0.0;
+      cw[r] = 0.0;
+      cw[NR + r] = 0.0;
+      if (lmc) kf[r] *= exp(lmc[r]);
+      continue;
+    }
     const int fl = rf[r];
     const double k = law(rc + RCW * r, fl, Tc, lT, iT, nd);
     const u8* x = T.rx + 6 * r;
@@ -264,28 +299,44 @@ __device__ __forceinline__ void rates(double* S, double* kf, double* kr, double 
     const double c3 = (fl & 4) ? nd : 1.0;
     kf[r] = k * c3;
     kr[r] = $kr;
+    cap_w(fl, kf[r], kr[r], nd, cw[r], cw[NR + r]);
+    COLL(fl, kf[r], kr[r], nd);
     if (lmc) { const double e = exp(lmc[r]); kf[r] *= e; kr[r] *= e; }
   }
   __syncwarp();
 }
 
-// Partial derivatives of ln kf of a reaction (rate law q = its rc row, flags fl) at (T, nd): dT = d/dT, dn = d/d ln nd,
-// D[j] = d/d q[j]. ln kr adds d(sum G/RT, products - reactants)/dT + dmu / T to dT.
-__device__ __forceinline__ void kpart(const double* q, int fl, double lT, double iT, double nd, double& dT, double& dn,
-                                      double* D) {
+// Partial derivatives of ln kf of a thermal reaction (rate law q = its rc row, flags fl; the collision limit not
+// included) at (T, nd): dT = d/dT, dn = d/d ln nd, D[j] = d/d q[j] for the nine Arrhenius columns (the Troe parameters
+// and the efficiency are not differentiated). ln kr adds d(sum G/RT, products - reactants)/dT + dmu / T to dT.
+// Troe factor: log10 F = f / (1 + y^2), f = log10 Fc(T), z = log10 Pr, N = 0.75 - 1.27 f; vm11 y = z / N, standard
+// x = z - 0.4 - 0.67 f, y = x / (N - 0.14 x); s = d log10 F / dz enters d ln k / d ln k_low, d ln k_inf, d ln nd.
+__device__ __forceinline__ void kpart(const double* q, int fl, double Tc, double lT, double iT, double nd, double& dT,
+                                      double& dn, double* D) {
   const double e0 = exp(q[0] + q[1] * lT - q[2] * iT), e1 = (fl & 2) ? exp(q[3] + q[4] * lT - q[5] * iT) : 0.0;
   const double kl = e0 + e1, w0 = kl > 0.0 ? e0 / kl : 0.0, w1 = kl > 0.0 ? e1 / kl : 0.0;
-  double ph = 1.0, pc = 0.0;              // d ln k / d ln k_low, d ln k / d ln k_inf
+  double ph = 1.0, pc = 0.0, fT = 0.0;    // d ln k / d ln k_low, d ln k / d ln k_inf, d ln F / dT through Fc
   if (fl & 1) {
     const double rr = kl * nd / exp(q[6] + q[7] * lT - q[8] * iT);
     ph = 1.0 / (1.0 + rr);
     pc = rr / (1.0 + rr);
+    if ((fl & 64) && rr > 0.0) {
+      const double ea = (1.0 - q[9]) * exp(-Tc / q[10]), eb = q[9] * exp(-Tc / q[11]), ec = exp(-q[12] / Tc);
+      const double fc = ea + eb + ec, f = log10(fc), z = log10(rr), nn = 0.75 - 1.27 * f;
+      const bool vm = (fl & 512) != 0;
+      const double x = vm ? z : z - 0.4 - 0.67 * f, dd = vm ? nn : nn - 0.14 * x, y = x / dd;
+      const double yz = nn / (dd * dd), yf = (vm ? 1.27 * x : 1.27 * x - 0.67 * nn) / (dd * dd);
+      const double u = 1.0 / (1.0 + y * y), sz = -2.0 * f * y * yz * u * u, tf = u - 2.0 * f * y * yf * u * u;
+      ph += sz;
+      pc -= sz;
+      fT = tf * (-ea / q[10] - eb / q[11] + ec * q[12] * iT * iT) / fc;   // ln F = ln 10 log10 F; df/dT = Fc' / (Fc ln 10)
+    }
   }
   D[0] = ph * w0; D[1] = ph * w0 * lT; D[2] = -ph * w0 * iT;
   D[3] = ph * w1; D[4] = ph * w1 * lT; D[5] = -ph * w1 * iT;
   D[6] = pc; D[7] = pc * lT; D[8] = -pc * iT;
-  dT = (ph * (w0 * (q[1] + q[2] * iT) + w1 * (q[4] + q[5] * iT)) + pc * (q[7] + q[8] * iT)) * iT;
-  dn = -pc + ((fl & 4) ? 1.0 : 0.0);
+  dT = (ph * (w0 * (q[1] + q[2] * iT) + w1 * (q[4] + q[5] * iT)) + pc * (q[7] + q[8] * iT)) * iT + fT;
+  dn = -pc + ((fl & 4) ? 1.0 : 0.0);      // pc already holds -s: d ln k / d ln nd = -Pr / (1 + Pr) + s
 }
 
 // d(G/RT)/dT = -(H/RT)/T of each species into g[0..NS] (g[NS] = 0).
@@ -303,26 +354,39 @@ __device__ __forceinline__ void gibbs_dT(double* g, double Tc, const double* __r
   __syncwarp();
 }
 
-// Tangents of ln kf, ln kr (dk[r], dk[NR + r]) for the tangents of T (dTc), ln nd (dlnd), the log multipliers (dlmc,
-// may be null) and the Arrhenius table (drc, may be null).
+// Tangents of kf, kr (dk[r], dk[NR + r]; absolute, not of ln k: a photolysis row's kf = J exp(lm) may be 0) for the
+// tangents of T (dTc), ln nd (dlnd), the log multipliers (dlmc, may be null), J (dJc, may be null) and the Arrhenius
+// table (drc [R, 9], may be null); kf, kr, cw: the cell's rates and collision-limit weights (rates()). With A = ln of
+// the pair's forward coefficient before the limit, G = ln kr - A, L = ln nd, the limit adds
+// d ln c = -(wA dA + wG dG + wE dL) to both directions (wE = (wA - wG) [forward of 3 molecules] + wG [reverse of 3]).
 __device__ __forceinline__ void rates_tan(double* S, double* dk, double Tc, double nd, double dTc, double dlnd,
-    const double* dlmc, const double* __restrict__ rc, const double* drc, const int* __restrict__ rf,
-    const double* __restrict__ nasa, const Tab& T, int lane)
+    const double* lmc, const double* dlmc, const double* dJc, const double* __restrict__ rc, const double* drc,
+    const int* __restrict__ rf, const double* __restrict__ nasa, const double* kf, const double* kr, const double* cw,
+    const Tab& T, int lane)
 {
   const double lT = log(Tc), iT = 1.0 / Tc;
   double* gT = S + A_N1;
   gibbs_dT(gT, Tc, nasa, lane);
   for (int r = lane; r < NR; r += 32) {
+    const double dl = dlmc ? dlmc[r] : 0.0;
+    if (r >= NRT) {
+      dk[r] = (dJc ? (lmc ? exp(lmc[r]) : 1.0) * dJc[r - NRT] : 0.0) + kf[r] * dl;
+      dk[NR + r] = 0.0;
+      continue;
+    }
     const int fl = rf[r];
     double dT, dn, D[9];
-    kpart(rc + 9 * r, fl, lT, iT, nd, dT, dn, D);
-    double d = dT * dTc + dn * dlnd;
-    if (drc) for (int j = 0; j < 9; j++) d += D[j] * drc[9 * r + j];
-    if (dlmc) d += dlmc[r];
+    kpart(rc + RCW * r, fl, Tc, lT, iT, nd, dT, dn, D);
+    double dA = dT * dTc + dn * dlnd;
+    if (drc) for (int j = 0; j < 9; j++) dA += D[j] * drc[9 * r + j];
     const u8* x = T.rx + 6 * r;
     const double ddg = gT[x[3]] + gT[x[4]] + gT[x[5]] - gT[x[0]] - gT[x[1]] - gT[x[2]];
-    dk[r] = d;
-    dk[NR + r] = d + (ddg + (double)(((fl >> 3) & 7) - 4) * iT) * dTc;
+    const double dG = (ddg + (double)(((fl >> 3) & 7) - 4) * iT) * dTc;
+    const double wA = cw[r], wG = cw[NR + r];
+    const double wE = (wA - wG) * (((fl >> 10) & 3) == 3 ? 1.0 : 0.0) + wG * (((fl >> 12) & 3) == 3 ? 1.0 : 0.0);
+    const double dc = -(wA * dA + wG * dG + wE * dlnd);
+    dk[r] = kf[r] * (dA + dc + dl);
+    dk[NR + r] = kr[r] * (dA + dG + dc + dl);
   }
   __syncwarp();
 }
@@ -489,13 +553,13 @@ __device__ __forceinline__ double attempt(double* S, double (&c)[NT], double ha,
     __syncwarp();
   }
   smup(K1, u, c0, lane);
-  for (int i = lane; i < NS; i += 32) K2[i] = F[i] + 4.0 * ih * K1[i];
+  for (int i = lane; i < NS; i += 32) K2[i] = fma(4.0 * ih, K1[i], F[i]);
   __syncwarp();
   wsolve(M, dinv, K2, u, c0, T.smap, c, lane, myt);
   for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i];
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, T, sst, sround, lane);
-  for (int i = lane; i < NS; i += 32) K3[i] = F[i] + ih * (K1[i] - K2[i]);
+  for (int i = lane; i < NS; i += 32) K3[i] = fma(ih, K1[i] - K2[i], F[i]);
   __syncwarp();
   wsolve(M, dinv, K3, u, c0, T.smap, c, lane, myt);
   for (int i = lane; i < NS; i += 32) {
@@ -505,7 +569,7 @@ __device__ __forceinline__ double attempt(double* S, double (&c)[NT], double ha,
   }
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, T, sst, sround, lane);
-  for (int i = lane; i < NS; i += 32) K4[i] = F[i] + ih * (K1[i] - K2[i] - (8.0 / 3.0) * K3[i]);
+  for (int i = lane; i < NS; i += 32) K4[i] = fma(ih, fma(-8.0 / 3.0, K3[i], K1[i] - K2[i]), F[i]);
   __syncwarp();
   wsolve(M, dinv, K4, u, c0, T.smap, c, lane, myt);
   double e2 = 0.0, em = 0.0;
@@ -588,19 +652,19 @@ __device__ __forceinline__ double rattempt(double* S, double* Wd, double ha, boo
   __syncwarp();
   dense_lu(Wd, dinv, pr, lane);
   dense_solve(Wd, dinv, pr, K1, lane);
-  for (int i = lane; i < NS; i += 32) K2[i] = F[i] + 4.0 * ih * K1[i];
+  for (int i = lane; i < NS; i += 32) K2[i] = fma(4.0 * ih, K1[i], F[i]);
   __syncwarp();
   dense_solve(Wd, dinv, pr, K2, lane);
   for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i];
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, T, sst, sround, lane);
-  for (int i = lane; i < NS; i += 32) K3[i] = F[i] + ih * (K1[i] - K2[i]);
+  for (int i = lane; i < NS; i += 32) K3[i] = fma(ih, K1[i] - K2[i], F[i]);
   __syncwarp();
   dense_solve(Wd, dinv, pr, K3, lane);
   for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i] + K3[i];
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, T, sst, sround, lane);
-  for (int i = lane; i < NS; i += 32) K4[i] = F[i] + ih * (K1[i] - K2[i] - (8.0 / 3.0) * K3[i]);
+  for (int i = lane; i < NS; i += 32) K4[i] = fma(ih, fma(-8.0 / 3.0, K3[i], K1[i] - K2[i]), F[i]);
   __syncwarp();
   dense_solve(Wd, dinv, pr, K4, lane);
   double e2 = 0.0, em = 0.0;
@@ -696,7 +760,7 @@ template <bool DN> __device__ __forceinline__ bool fstep(double* S, double (&c)[
 #if KIND == 0
 // ---------------------------------------------------------------------------------------------------------- tangent
 // The tangent of F = (n_tot / nd) S v at Y, Fd (unless null), for the state tangent Yd and the rate tangents (dk:
-// d ln kf, d ln kr; dlnd: d ln nd); leaves n, n1 = the concentrations and their tangent; sv, svd = S v and its tangent
+// d kf, d kr; dlnd: d ln nd); leaves n, n1 = the concentrations and their tangent; sv, svd = S v and its tangent
 // (va: a per-reaction work array). Returns n_tot, td = sum Yd.
 __device__ __forceinline__ double rhs_dual(double* S, const double* Y, const double* Yd, double* Fd, double* sv,
     double* svd, double* va, const double* kf, const double* kr, const double* dk, double nd, double dlnd, double& td,
@@ -718,7 +782,7 @@ __device__ __forceinline__ double rhs_dual(double* S, const double* Y, const dou
     const double Pd = n1[q[0]] * a1 * a2 + a0 * n1[q[1]] * a2 + a0 * a1 * n1[q[2]];
     const double Qd = n1[q[3]] * b1 * b2 + b0 * n1[q[4]] * b2 + b0 * b1 * n1[q[5]];
     v[r] = kf[r] * P - kr[r] * Q;
-    va[r] = kf[r] * (dk[r] * P + Pd) - kr[r] * (dk[NR + r] * Q + Qd);
+    va[r] = dk[r] * P + kf[r] * Pd - (dk[NR + r] * Q + kr[r] * Qd);
   }
   __syncwarp();
   svs2(v, va, sv, svd, part, T, sst, sround, lane);
@@ -730,7 +794,7 @@ __device__ __forceinline__ double rhs_dual(double* S, const double* Y, const dou
   return ntot;
 }
 
-// out = d/de [J(N) K] along the tangent (N + e Nd, ln k + e dk, ln nd + e dlnd): the second derivative of F, reaction
+// out = d/de [J(N) K] along the tangent (N + e Nd, k + e dk, ln nd + e dlnd): the second derivative of F, reaction
 // by reaction, from hyper-dual products. n, n1 = the concentrations at N and their tangent; svN, sv1N = S v at N and
 // its tangent; ntot, td = sum N, sum Nd.
 __device__ __forceinline__ void jdot(double* S, const double* N, const double* Nd, const double* K, double* out,
@@ -768,7 +832,7 @@ __device__ __forceinline__ void jdot(double* S, const double* N, const double* N
       hp[s][0] = p0; hp[s][1] = p1; hp[s][2] = p2; hp[s][3] = p12;
     }
     v[r] = kf[r] * hp[0][2] - kr[r] * hp[1][2];
-    va[r] = kf[r] * (hp[0][3] + hp[0][2] * dk[r]) - kr[r] * (hp[1][3] + hp[1][2] * dk[NR + r]);
+    va[r] = kf[r] * hp[0][3] + dk[r] * hp[0][2] - (kr[r] * hp[1][3] + dk[NR + r] * hp[1][2]);
   }
   __syncwarp();
   svs2(v, va, sv2, sv12, part, T, sst, sround, lane);
@@ -855,12 +919,15 @@ template <bool DN> __device__ __forceinline__ double tstep(double* S, const doub
     double* __restrict__ dxout, double* __restrict__ dhout, int* __restrict__ count, int B, double rtol, double atol,    \
     int max_steps, int adapt, const int* __restrict__ perm, const unsigned* __restrict__ blob,                          \
     const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, const unsigned* __restrict__ sst,     \
-    const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, int sround, int jround
+    const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, int sround, int jround,    \
+    const double* __restrict__ Jin, const double* dJin
 #define JVP_PASS x0, Ta, Pa, dta, hin, lm, rc, dx0, dTa, dPa, ddta, dhin, dlm, drc, D, xout, hout, doneo, noko, dxout, \
-    dhout, count, B, rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, sst, jt, lu, optr, sround, jround
+    dhout, count, B, rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, sst, jt, lu, optr, sround, jround,   \
+    Jin, dJin
 
 // The call and its tangents, one warp per cell. D tangent directions share the call: direction d's inputs and outputs
-// at [d * B + cell] (dx0, dxout, dlm by rows of NS or NR), drc at [d * NR * 9]; dlm, drc may be null. DN = false: every
+// at [d * B + cell] (dx0, dxout, dlm, dJin by rows of NS, NR or NJ), drc at [d * NR * 9]; dlm, drc, dJin may be
+// null; Jin [B, NJ] (null when NJ = 0). DN = false: every
 // cell, the call kernel's attempts (queue count[0]). DN = true: the first count[6] cells of list, the recover kernel's
 // attempts (dense W in wscr, one NS x NS per warp; max_steps = the recovery's tries; queue count[9]), each result then
 // tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8] and NaN tangents.
@@ -883,8 +950,9 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
   double* S = smem + wib * PERWA;
   double *N = S + A_NN, *Nd = S + A_ND, *Y = S + A_Y, *Yd = S + A_YD;
   const size_t wid = (size_t)(blockIdx.x * WPB + wib);
-  double* kf = scratch + wid * (3 * NR + 2 + D * (2 * NR + NS));
-  double *kr = kf + NR, *va = kr + NR + 2, *dk = va + NR, *Ng = dk + 2 * NR * D;   // per direction: d ln k, state tangent
+  double* kf = scratch + wid * (5 * NR + 2 + D * (2 * NR + NS));
+  double *kr = kf + NR, *va = kr + NR + 2, *cw = va + NR, *dk = cw + 2 * NR, *Ng = dk + 2 * NR * D;   // per direction:
+                                                                                     // d kf, d kr, state tangent
   double* Wd = DN ? wscr + wid * NS * NS : nullptr;
   if (lane == 0) kf[2 * NR] = 0.0;                            // the zero rate of the Jacobian's padding words
   double hd[DMAX], tdot[DMAX], dlnd[DMAX];                    // per direction: h, t, ln nd tangents (warp-uniform)
@@ -898,16 +966,19 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
     for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; }
     for (int d = 0; d < D; d++)
       for (int i = lane; i < NS; i += 32) Ng[d * NS + i] = dx0[((size_t)d * B + cell) * NS + perm[i]];
+    for (int b = lane; b < NJ; b += 32) { const double qj = Jin[(size_t)cell * NJ + b]; p += qj >= 0.0 ? 0.0 * qj : DNAN; }
     const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
-    if (fin && !cold) rates(S, kf, kr, Tc, nd, lm ? lm + (size_t)cell * NR : nullptr, rc, rf, nasa, T, lane);
+    const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
+    if (fin && !cold) rates(S, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, T, lane);
     const double hi = hin[cell], m = fmin(hi, dt);
     for (int d = 0; d < D; d++) {
       const size_t qd = (size_t)d * B + cell;
       const double dTc = dTa[qd], ddt = adapt ? ddta[qd] : 0.0, dhi = adapt ? dhin[qd] : 0.0;
       dlnd[d] = dPa[qd] / Pc - dTc / Tc;
       if (fin && !cold)
-        rates_tan(S, dk + 2 * NR * d, Tc, nd, dTc, dlnd[d], dlm ? dlm + qd * NR : nullptr, rc,
-                  drc ? drc + (size_t)d * NR * 9 : nullptr, rf, nasa, T, lane);
+        rates_tan(S, dk + 2 * NR * d, Tc, nd, dTc, dlnd[d], lmc, dlm ? dlm + qd * NR : nullptr,
+                  dJin ? dJin + qd * NJ : nullptr, rc, drc ? drc + (size_t)d * NR * 9 : nullptr, rf, nasa, kf, kr, cw,
+                  T, lane);
       const double md = hi < dt ? dhi : (hi > dt ? ddt : 0.5 * (dhi + ddt));
       hd[d] = m > 1e-12 ? md : (m < 1e-12 ? 0.0 : 0.5 * md);
       tdot[d] = 0.0;
@@ -975,7 +1046,7 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
       __syncwarp();
       int bad = 0;
       if (lane == 0) {
-        bad = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell);
+        bad = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell$jpass);
         redo[cell] = bad ? 2 : 1;
         atomicAdd(count + (bad ? 8 : 7), 1);
       }
@@ -1008,20 +1079,35 @@ extern "C" __global__ void __launch_bounds__(32 * WPB) jvp_rec(JVP_ARGS, int* __
 #if KIND == 1
 // ---------------------------------------------------------------------------------------------------------- adjoint
 // y <- W^-T y = M0^-T (y + c0 (u . y) 1) (W = M0 - w 1^T, u = M0^-1 w): U^T then L^T with every factor read from M (the
-// dense block's factors written back), lane l holding entries l and K0 + l.
+// dense block's factors written back), lane l holding the leading entries l + 32 p (< K0) and K0 + l.
 __device__ __forceinline__ void tsolve(const double* M, const double* dinv, double* y, const double* u, double c0,
                                        const u16* smap, int lane) {
-  const bool hp = lane < K0, ht = lane < NT;
-  double a0 = hp ? y[lane] : 0.0, a1 = ht ? y[K0 + lane] : 0.0;
-  const double al = c0 * wsum((hp ? u[lane] * a0 : 0.0) + (ht ? u[K0 + lane] * a1 : 0.0));
-  if (hp) a0 += al;
+  const bool ht = lane < NT;
+  bool hp[RP];
+  double a0[RP], d0[RP];
+  double sl = 0.0;
+  #pragma unroll
+  for (int p = 0; p < RP; p++) {
+    hp[p] = lane + 32 * p < K0;
+    a0[p] = hp[p] ? y[lane + 32 * p] : 0.0;
+    d0[p] = hp[p] ? dinv[lane + 32 * p] : 0.0;
+    sl += hp[p] ? u[lane + 32 * p] * a0[p] : 0.0;
+  }
+  double a1 = ht ? y[K0 + lane] : 0.0;
+  const double al = c0 * wsum(sl + (ht ? u[K0 + lane] * a1 : 0.0));
+  #pragma unroll
+  for (int p = 0; p < RP; p++) if (hp[p]) a0[p] += al;
   if (ht) a1 += al;
-  const double d0 = hp ? dinv[lane] : 0.0, d1 = ht ? dinv[K0 + lane] : 0.0;
+  const double d1 = ht ? dinv[K0 + lane] : 0.0;
   #pragma unroll
   for (int k = 0; k < K0; k++) {                        // U^T, sparse rows: y_j -= U_kj w_k (j > k)
     if (!((UROW >> k) & 1ull)) continue;
-    const double wk = __shfl_sync(FULL, a0 * d0, k);
-    if (hp && lane > k) { const unsigned s = smap[k * NS + lane]; if (s != 0xFFFFu) a0 -= M[s] * wk; }
+    const double wk = __shfl_sync(FULL, a0[k >> 5] * d0[k >> 5], k & 31);
+    #pragma unroll
+    for (int p = 0; p < RP; p++) {
+      const int j = lane + 32 * p;
+      if (hp[p] && j > k) { const unsigned s = smap[k * NS + j]; if (s != 0xFFFFu) a0[p] -= M[s] * wk; }
+    }
     if (ht) { const unsigned s = smap[k * NS + K0 + lane]; if (s != 0xFFFFu) a1 -= M[s] * wk; }
   }
   #pragma unroll
@@ -1029,22 +1115,30 @@ __device__ __forceinline__ void tsolve(const double* M, const double* dinv, doub
     const double wk = __shfl_sync(FULL, a1 * d1, k);
     if (ht && lane > k) a1 -= M[smap[(K0 + k) * NS + K0 + lane]] * wk;
   }
-  a0 *= d0;
+  #pragma unroll
+  for (int p = 0; p < RP; p++) a0[p] *= d0[p];
   a1 *= d1;
   #pragma unroll
   for (int k = NT - 1; k >= 0; k--) {                   // L^T, dense rows: w_j -= L_kj x_k (j < k)
     const double xk = __shfl_sync(FULL, a1, k);
     if (ht && lane < k) a1 -= M[smap[(K0 + k) * NS + K0 + lane]] * xk;
-    if (hp) { const unsigned s = smap[(K0 + k) * NS + lane]; if (s != 0xFFFFu) a0 -= M[s] * xk; }
+    #pragma unroll
+    for (int p = 0; p < RP; p++)
+      if (hp[p]) { const unsigned s = smap[(K0 + k) * NS + lane + 32 * p]; if (s != 0xFFFFu) a0[p] -= M[s] * xk; }
   }
   #pragma unroll
   for (int k = K0 - 1; k >= 0; k--) {                   // L^T, sparse rows
     if (!((LROW >> k) & 1ull)) continue;
-    const double xk = __shfl_sync(FULL, a0, k);
-    if (hp && lane < k) { const unsigned s = smap[k * NS + lane]; if (s != 0xFFFFu) a0 -= M[s] * xk; }
+    const double xk = __shfl_sync(FULL, a0[k >> 5], k & 31);
+    #pragma unroll
+    for (int p = 0; p < RP; p++) {
+      const int j = lane + 32 * p;
+      if (hp[p] && j < k) { const unsigned s = smap[k * NS + j]; if (s != 0xFFFFu) a0[p] -= M[s] * xk; }
+    }
   }
   __syncwarp();
-  if (hp) y[lane] = a0;
+  #pragma unroll
+  for (int p = 0; p < RP; p++) if (hp[p]) y[lane + 32 * p] = a0[p];
   if (ht) y[K0 + lane] = a1;
   __syncwarp();
 }
@@ -1111,14 +1205,16 @@ __device__ __forceinline__ void rhs_vjp(double* S, const double* Y, const double
     for (int m = 0; m < 3; m++) {
       if (q[m] < NS) { sb -= Fb[q[m]]; mre += 1.0; }
       if (q[3 + m] < NS) { sb += Fb[q[3 + m]]; mpr += 1.0; }
+      if (r >= NRT && PX[3 * (r - NRT) + m] < NS) sb += Fb[PX[3 * (r - NRT) + m]];   // photolysis products
     }
     const double vb = sb * g;
-    const double a = kf[r] * (n[q[0]] * n[q[1]] * n[q[2]]), b = kr[r] * (n[q[3]] * n[q[4]] * n[q[5]]), ab = a - b;
+    const double pp = n[q[0]] * n[q[1]] * n[q[2]];
+    const double a = kf[r] * pp, b = kr[r] * (n[q[3]] * n[q[4]] * n[q[5]]), ab = a - b;
     ff += vb * ab;
     tl += vb * (mre * a - mpr * b);
     rho[r] = vb * kf[r];
     rho[NR + r] = -vb * kr[r];
-    lbk[r] += vb * ab;
+    lbk[r] += r < NRT ? vb * ab : vb * pp;                   // photolysis: the cotangent of kf itself
     lbk[NR + r] -= vb * b;
   }
   __syncwarp();
@@ -1128,8 +1224,8 @@ __device__ __forceinline__ void rhs_vjp(double* S, const double* Y, const double
     for (int qq = 0; qq < ground; qq++) {
       const u64 w = __ldg(gt + qq * 32 + lane);
       if ((w >> 37) & 1ull) {
-        acc = fma(rho[w & 1023ull], n[(w >> 12) & 63ull] * n[(w >> 18) & 63ull], acc);
-        if ((w >> 35) & 1ull) { part[(w >> 24) & 127ull] = acc; acc = 0.0; }
+        acc = fma(rho[w & 4095ull], n[(w >> 12) & 127ull] * n[(w >> 19) & 127ull], acc);
+        if ((w >> 35) & 1ull) { part[(w >> 26) & 511ull] = acc; acc = 0.0; }
       }
     }
   }
@@ -1184,8 +1280,9 @@ __device__ __forceinline__ void rhs_vjp_n(double* S, double* lbk, double* rho, d
     #pragma unroll
     for (int m = 0; m < 3; m++) { mre += q[m] < NS ? 1.0 : 0.0; mpr += q[3 + m] < NS ? 1.0 : 0.0; }
     const double n0 = n[q[0]], n1 = n[q[1]], n2 = n[q[2]], n3 = n[q[3]], n4 = n[q[4]], n5 = n[q[5]];
-    const double a = kf[r] * (n0 * n1 * n2), b = kr[r] * (n3 * n4 * n5), ab = a - b;
-    double vbF = 0.0, lm = 0.0, lr = 0.0;
+    const double pp = n0 * n1 * n2;
+    const double a = kf[r] * pp, b = kr[r] * (n3 * n4 * n5), ab = a - b;
+    double vbF = 0.0, lm = 0.0, lr = 0.0, lp = 0.0;          // lp: a photolysis row's cotangent of kf itself
     #pragma unroll
     for (int s = 0; s < 4; s++) {
       const double *z = S + OZ[s], *d = S + ON1[s];
@@ -1194,11 +1291,13 @@ __device__ __forceinline__ void rhs_vjp_n(double* S, double* lbk, double* rho, d
       for (int m = 0; m < 3; m++) {
         if (q[m] < NS) sb -= z[q[m]];
         if (q[3 + m] < NS) sb += z[q[3 + m]];
+        if (r >= NRT && PX[3 * (r - NRT) + m] < NS) sb += z[PX[3 * (r - NRT) + m]];
       }
       const double vb = sb * g;
       const double Pd = d[q[0]] * n1 * n2 + n0 * d[q[1]] * n2 + n0 * n1 * d[q[2]];
       const double Qd = d[q[3]] * n4 * n5 + n3 * d[q[4]] * n5 + n3 * n4 * d[q[5]];
       const double ad = kf[r] * Pd, bd = kr[r] * Qd;
+      lp += vb * rt[s] * pp + vb * Pd;
       lm += vb * rt[s] * ab + vb * (ad - bd);
       lr -= vb * rt[s] * b + vb * bd;
       ff[s] += vb * ab;
@@ -1210,10 +1309,11 @@ __device__ __forceinline__ void rhs_vjp_n(double* S, double* lbk, double* rho, d
       if (s < 2) vbF += vb;
     }
     lm += vbF * ab;
+    lp += vbF * pp;
     lr -= vbF * b;
     ffF += vbF * ab;
     tF += vbF * (mre * a - mpr * b);
-    lbk[r] += lm;
+    lbk[r] += r < NRT ? lm : lp;
     lbk[NR + r] += lr;
   }
   __syncwarp();
@@ -1231,7 +1331,7 @@ __device__ __forceinline__ void rhs_vjp_n(double* S, double* lbk, double* rho, d
     for (int qq = 0; qq < ground; qq++) {
       const u64 w = __ldg(gt + qq * 32 + lane);
       if ((w >> 37) & 1ull) {
-        const int k = (int)(w & 1023ull), ia = (int)((w >> 12) & 63ull), ib = (int)((w >> 18) & 63ull);
+        const int k = (int)(w & 4095ull), ia = (int)((w >> 12) & 127ull), ib = (int)((w >> 19) & 127ull);
         const double na = n[ia], nb = n[ib], r0 = rho[k], r1 = rho[2 * NR + k];
         acc = fma(r0 + r1, na * nb, acc);
         #pragma unroll
@@ -1239,7 +1339,7 @@ __device__ __forceinline__ void rhs_vjp_n(double* S, double* lbk, double* rho, d
           const double* d = S + ON1[s];
           acc = fma(s == 0 ? r0 : (s == 1 ? r1 : rho[s * 2 * NR + k]), d[ia] * nb + na * d[ib], acc);
         }
-        if ((w >> 35) & 1ull) { part[(w >> 24) & 127ull] = acc; acc = 0.0; }
+        if ((w >> 35) & 1ull) { part[(w >> 26) & 511ull] = acc; acc = 0.0; }
       }
     }
   }
@@ -1330,9 +1430,10 @@ __device__ __forceinline__ void save(double* rp, const double* N, double h, doub
     const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, double* rec,                          \
     const unsigned* __restrict__ sst, const u64* __restrict__ jt, const u64* __restrict__ lu,                           \
     const int* __restrict__ optr, const u64* __restrict__ gt, const int* __restrict__ xg, int sround, int jround,       \
-    int ground
+    int ground, const double* __restrict__ Jin, double* __restrict__ gJ, double* __restrict__ gA
 #define VJP_PASS x0, Ta, Pa, dta, hin, lm, rc, gx, gh, xout, hout, doneo, noko, gx0, gT, gP, gdt, ghin, glm, count, B, \
-    rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, rec, sst, jt, lu, optr, gt, xg, sround, jround, ground
+    rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, rec, sst, jt, lu, optr, gt, xg, sround, jround, ground, \
+    Jin, gJ, gA
 
 // The call and the cotangents of its inputs, one warp per cell. DN = false: every cell, the call kernel's attempts
 // (queue count[0]; CAP stored attempts per cell in rec). DN = true: the first count[6] cells of list, the recover
@@ -1358,8 +1459,8 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
   double* S = smem + wib * PERWA;
   double *M = S + A_M, *N = S + A_NN, *Y = S + A_Y, *Nb = S + A_NB, *Yb = S + A_YB, *z = S + A_Z, *K4 = S + A_K4;
   const size_t wid = (size_t)(blockIdx.x * WPB + wib);
-  double* kf = scratch + wid * (12 * NR + 2);
-  double *kr = kf + NR, *lbk = kr + NR + 2, *rho = lbk + 2 * NR;    // rho: 4 x 2 NR
+  double* kf = scratch + wid * (14 * NR + 2);
+  double *kr = kf + NR, *lbk = kr + NR + 2, *rho = lbk + 2 * NR, *cw = rho + 8 * NR;    // rho: 4 x 2 NR
   if (lane == 0) kf[2 * NR] = 0.0;                            // the zero rate of the Jacobian's padding words
   double* recA = rec + wid * 2 * CP * REC;
   double* recB = recA + CP * REC;
@@ -1372,8 +1473,9 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
     double p = 0.0;
     for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; }
+    for (int b = lane; b < NJ; b += 32) { const double qj = Jin[(size_t)cell * NJ + b]; p += qj >= 0.0 ? 0.0 * qj : DNAN; }
     const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
-    if (fin && !cold) rates(S, kf, kr, Tc, nd, lmc, rc, rf, nasa, T, lane);
+    if (fin && !cold) rates(S, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, T, lane);
     __syncwarp();
     const double hi = hin[cell], m0 = fmin(hi, dt), h0 = fmax(m0, 1e-12);
     double h = h0, t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
@@ -1405,7 +1507,7 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
       __syncwarp();
       int b = 0;
       if (lane == 0) {
-        b = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell);
+        b = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell$jpass);
         redo[cell] = b ? 2 : 1;
         atomicAdd(count + (b ? 8 : 7), 1);
       }
@@ -1522,7 +1624,7 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
       if (lane == 0) { ghin[cell] = wh * mb; gdt[cell] = dtb + (1.0 - wh) * mb; }
     }
     for (int i = lane; i < NS; i += 32) gx0[(size_t)cell * NS + perm[i]] = Nb[i];
-    // rate cotangents -> T, P and the log multipliers
+    // rate cotangents -> T, P, the log multipliers, J and (gA, for arrh) the forward coefficients before the limit
     double gTl = 0.0, gnl = 0.0;
     if (run) {
       const double lT = log(Tc), iT = 1.0 / Tc;
@@ -1530,23 +1632,35 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
       gibbs_dT(gTs, Tc, nasa, lane);
       for (int r = lane; r < NR; r += 32) {
         const double lm = lbk[r], lr = lbk[NR + r];  // ln k (forward and reverse together), ln kr alone
+        if (r >= NRT) {                              // photolysis: lm = the cotangent of kf = J exp(lm)
+          glm[(size_t)cell * NR + r] = kf[r] * lm;
+          gA[(size_t)cell * NR + r] = 0.0;
+          gJ[(size_t)cell * NJ + r - NRT] = (lmc ? exp(lmc[r]) : 1.0) * lm;
+          continue;
+        }
         glm[(size_t)cell * NR + r] = lm;
         const int fl = rf[r];
         double dT, dn, D[9];
-        kpart(rc + 9 * r, fl, lT, iT, nd, dT, dn, D);
+        kpart(rc + RCW * r, fl, Tc, lT, iT, nd, dT, dn, D);
         const u8* x = T.rx + 6 * r;
         const double ddg = gTs[x[3]] + gTs[x[4]] + gTs[x[5]] - gTs[x[0]] - gTs[x[1]] - gTs[x[2]];
-        gTl += lm * dT + lr * (ddg + (double)(((fl >> 3) & 7) - 4) * iT);
-        gnl += lm * dn;
+        const double wA = cw[r], wG = cw[NR + r];
+        const double wE = (wA - wG) * (((fl >> 10) & 3) == 3 ? 1.0 : 0.0) + wG * (((fl >> 12) & 3) == 3 ? 1.0 : 0.0);
+        const double Ab = (1.0 - wA) * lm, Gb = lr - wG * lm;   // the collision limit (rates_tan)
+        gA[(size_t)cell * NR + r] = Ab;
+        gTl += Ab * dT + Gb * (ddg + (double)(((fl >> 3) & 7) - 4) * iT);
+        gnl += Ab * dn - wE * lm;
       }
     } else {
-      for (int r = lane; r < NR; r += 32) glm[(size_t)cell * NR + r] = 0.0;
+      for (int r = lane; r < NR; r += 32) { glm[(size_t)cell * NR + r] = 0.0; gA[(size_t)cell * NR + r] = 0.0; }
+      for (int b = lane; b < NJ; b += 32) gJ[(size_t)cell * NJ + b] = 0.0;
     }
     const double gTt = wsum(gTl), lnd = wsum(gnl) + lbnd;
     if (lane == 0) { gT[cell] = run ? gTt - lnd / Tc : 0.0; gP[cell] = run ? lnd / Pc : 0.0; }
     if (DN && bad) {                                          // still failed after the recovery
       for (int i = lane; i < NS; i += 32) gx0[(size_t)cell * NS + i] = DNAN;
-      for (int r = lane; r < NR; r += 32) glm[(size_t)cell * NR + r] = DNAN;
+      for (int r = lane; r < NR; r += 32) { glm[(size_t)cell * NR + r] = DNAN; gA[(size_t)cell * NR + r] = DNAN; }
+      for (int b = lane; b < NJ; b += 32) gJ[(size_t)cell * NJ + b] = DNAN;
       if (lane == 0) { gT[cell] = DNAN; gP[cell] = DNAN; gdt[cell] = DNAN; ghin[cell] = DNAN; }
     }
     int nxt = 0;
@@ -1569,9 +1683,10 @@ extern "C" __global__ void __launch_bounds__(32 * WPB) vjp_rec(VJP_ARGS, int* __
   vjp_cells<true>(VJP_PASS, redo, list, wscr, didx, atoms);
 }
 
-// Cotangent of the Arrhenius table: grc[r, j] = sum over cells of glm[cell, r] d ln k_r / d rc[r, j], one block per
-// reaction, a fixed summation order.
-extern "C" __global__ void arrh(const double* __restrict__ glm, const double* __restrict__ Ta,
+// Cotangent of the Arrhenius table (its nine Arrhenius columns): grc[r, j] = sum over cells of gA[cell, r] d A_r /
+// d rc[r, j] (gA: the cotangent of the forward coefficient's log before the collision limit; 0 for photolysis rows),
+// one block per reaction, a fixed summation order.
+extern "C" __global__ void arrh(const double* __restrict__ gA, const double* __restrict__ Ta,
     const double* __restrict__ Pa, const double* __restrict__ rc, const int* __restrict__ rf, double* __restrict__ grc,
     int B)
 {
@@ -1580,12 +1695,12 @@ extern "C" __global__ void arrh(const double* __restrict__ glm, const double* __
   double acc[9];
   #pragma unroll
   for (int j = 0; j < 9; j++) acc[j] = 0.0;
-  for (int cell = tid; cell < B; cell += 256) {
-    const double g = glm[(size_t)cell * NR + r];
+  for (int cell = tid; cell < B && r < NRT; cell += 256) {
+    const double g = gA[(size_t)cell * NR + r];
     if (g == 0.0) continue;
     const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
     double dT, dn, D[9];
-    kpart(rc + 9 * r, fl, log(Tc), 1.0 / Tc, nd, dT, dn, D);
+    kpart(rc + RCW * r, fl, Tc, log(Tc), 1.0 / Tc, nd, dT, dn, D);
     #pragma unroll
     for (int j = 0; j < 9; j++) acc[j] += g * D[j];
   }
@@ -1617,15 +1732,20 @@ def source_ad(tab, ext, kind, wpb, cap=CAP, drift=None):
         offsets="\n".join([f"#define KIND {int(kind == 'vjp')}"] + [f"#define A_{k} {v}" for k, v in off.items()]),
         sv_r=m(w["r"]), sv_sg=w["r"], sv_x2=w["r"] + 1, sv_dst=w["r"] + 2, sv_pm=m(w["part"]),
         sv_end=w["r"] + 2 + w["part"], j_km=m(w["k"]), j_sg=w["k"], j_x2=w["k"] + 1, j_a=j_a, j_b=j_a + w["s"],
-        j_sm=m(w["s"]), j_end=j_a + 2 * w["s"], slm=m(w["slot"]), lu_b=w["slot"], lu_c=2 * w["slot"], kr=KC._KR)
+        j_sm=m(w["s"]), j_end=j_a + 2 * w["s"], slm=m(w["slot"]), lu_b=w["slot"], lu_c=2 * w["slot"], kr=KC._KR,
+        nrt=tab["nrt"], nj=tab["nj"], kcoll=repr(KC.K_COLL), px=", ".join(map(str, ext["px"])),
+        jpass=", Jin" if tab["nj"] else "")
 
 
 class ADSolver:
-    """ADSolver(net, device, drift=None): one solver call with its derivatives, x [B, S] in the network's species order, T [B] K,
-    P [B] dyn cm^-2, dt [B] s, h [B] s (float64 CUDA tensors), optional per-cell log multipliers lm [B, R] and Arrhenius
-    table rc [R, 9] (default: the network's, as kincuda.tables).
+    """ADSolver(net, device, cap=CAP, drift=None, photo=False): one solver call with its derivatives, x [B, S] in the
+    network's species order, T [B] K, P [B] dyn cm^-2, dt [B] s, h [B] s (float64 CUDA tensors), optional per-cell log
+    multipliers lm [B, R] and rate table rc [R, W] (default: the network's, kincuda.tables' rc; W = 9, or 14 with the
+    Troe factor or efficiencies; its nine Arrhenius columns are differentiated). photo: the network's photolysis
+    branches enter as in CudaSolver(photo=True) (reactions R_thermal..R-1, kf = J exp(lm)); the calls then take
+    J [B, len(net.photo)] (None = 0).
       jvp(...)  -> (x, h, done, accepted steps, dx, dh): the call and its tangent for the input tangents;
-      vjp(...)  -> (x, h, done, accepted steps, cotangents dict x, T, P, dt, h, lm [B, R], rc [R, 9]).
+      vjp(...)  -> (x, h, done, accepted steps, cotangents dict x, T, P, dt, h, lm [B, R], rc [R, 9], J [B, branches]).
     adapt selects the contract (module docstring). After each kernel the call kernel's guard lists the cells
     CudaSolver recomputes on the device, and those cells are redone on the recovery's path with their derivatives
     (module docstring), so the result is bitwise CudaSolver.launch's and the derivative is that of the result returned.
@@ -1636,17 +1756,20 @@ class ADSolver:
     counted, not stepped, and check() raises for them, as CudaSolver.check. Calls run one at a time on torch's current
     stream (the rate and record scratch are shared)."""
 
-    def __init__(self, net, device, cap=CAP, drift=None):
+    def __init__(self, net, device, cap=CAP, drift=None, photo=False):
+        if photo and (not net.photo or net.photo_missing):
+            raise ValueError("photo=True needs a network with photolysis branches whose species are all in its species "
+                             f"list (branches {len(net.photo)}, missing species {net.photo_missing})")
         self.dev = torch.device(device)
         torch.zeros(1, device=self.dev)
         prop = torch.cuda.get_device_properties(self.dev)
         fit = lambda t: (prop.shared_memory_per_block_optin - len(KC._blob(t)[0])) // (8 * KC._perc(t))  # noqa: E731
-        tab = KC.tables(net, 2)                               # the call kernel's warps per cell (CudaSolver's rule)
+        tab = KC.tables(net, 2, photo)                        # the call kernel's warps per cell (CudaSolver's rule)
         if KC.warps(fit(tab)) != 2:
-            tab = KC.tables(net, KC.warps(fit(tab)))
+            tab = KC.tables(net, KC.warps(fit(tab)), photo)
         supported(tab)
         ext = ad_tables(net, tab)
-        self.ns, self.nr, self.cap = tab["ns"], tab["nr"], cap
+        self.ns, self.nr, self.cap, self.nj, self.rcw = tab["ns"], tab["nr"], cap, tab["nj"], tab["rc"].shape[1]
         blob, _ = KC._blob(tab)
         cu = KC._cuda()
         self.wpb, self.smem, self.max_blocks, self.src, self._fn, self._mod = {}, {}, {}, {}, {}, {}
@@ -1678,7 +1801,7 @@ class ADSolver:
         self.rc0 = g(tab["rc"])
         self._tabs = [g(tab["perm"]), g(np.frombuffer(blob, np.int32).copy()), g(tab["rf"]), g(tab["nasa"])]
         self._nw = {k: self.max_blocks[k] * self.wpb[k] for k in ("jvp", "vjp")}
-        self._scratch = torch.empty(self._nw["vjp"] * (12 * self.nr + 2), dtype=torch.float64, device=self.dev)
+        self._scratch = torch.empty(self._nw["vjp"] * (14 * self.nr + 2), dtype=torch.float64, device=self.dev)
         self._jscr = self._scratch
         self._rec = torch.empty(self._nw["vjp"] * 2 * cap * (self.ns + 6), dtype=torch.float64, device=self.dev)
         self._rrec = torch.empty(self._nw["vjp"] * 2 * self.capr * (self.ns + 6), dtype=torch.float64, device=self.dev)
@@ -1693,7 +1816,7 @@ class ADSolver:
         self.total = torch.zeros(10, dtype=torch.int32, device=self.dev)
         self.flag = None
 
-    def _prep(self, x, T, P, dt, h, lm, rc, max_steps):
+    def _prep(self, x, T, P, dt, h, lm, rc, J, max_steps):
         if not all(a.is_cuda and a.dtype == torch.float64 for a in (x, T, P, dt, h)) or x.shape[1] != self.ns:
             raise ValueError(f"x [B, {self.ns}], T, P, dt, h [B]: float64 CUDA tensors")
         if max_steps > self.cap * self.cap or KC.REC_STEPS * max_steps > self.capr ** 2:
@@ -1701,20 +1824,27 @@ class ADSolver:
         B = x.shape[0]
         lm = None if lm is None else lm.contiguous()
         rc = self.rc0 if rc is None else rc.contiguous()
-        if lm is not None and tuple(lm.shape) != (B, self.nr) or tuple(rc.shape) != (self.nr, 9):
-            raise ValueError(f"lm [B, {self.nr}], rc [{self.nr}, 9]")
-        return B, [a.contiguous() for a in (x, T, P, dt, h)], lm, rc
+        if lm is not None and tuple(lm.shape) != (B, self.nr) or tuple(rc.shape) != (self.nr, self.rcw) or not all(
+                a.dtype == torch.float64 and a.device == x.device for a in (lm, rc) if a is not None):
+            raise ValueError(f"lm [B, {self.nr}], rc [{self.nr}, {self.rcw}]: float64 on the device of x")
+        if J is not None and not self.nj:
+            raise ValueError("J given, but the solver was built without photolysis (photo=False)")
+        if self.nj:
+            J = torch.zeros(B, self.nj, dtype=torch.float64, device=self.dev) if J is None else J.contiguous()
+            if J.dtype != torch.float64 or J.device != x.device or tuple(J.shape) != (B, self.nj):
+                raise ValueError(f"J [B, {self.nj}]: float64 on the device of x")
+        return B, [a.contiguous() for a in (x, T, P, dt, h)], lm, rc, J
 
     def _ptr(self, a):
         return ctypes.c_void_p(0) if a is None else a
 
-    def _guard(self, x, T, P, dt, xo, done, nok, atol, stream):
+    def _guard(self, x, T, P, dt, xo, done, nok, atol, J, stream):
         """The call kernel's guard on the kernel's result: (redo, list) of the cells to redo on the recovery's path."""
         B = x.shape[0]
         redo, lst = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(2))
         KC._launch(self._fn["guard"], -(-B // 128) or 1, 128, 0, stream,
                    [x, T, P, dt, xo, done, nok, self._atoms, redo, lst, self.count, ctypes.c_int(B),
-                    ctypes.c_double(atol)])
+                    ctypes.c_double(atol)] + ([J] if self.nj else []))
         return redo, lst
 
     def _finish(self, redo):
@@ -1735,29 +1865,34 @@ class ADSolver:
         return n
 
     def jvp(self, x, T, P, dt, h, dx, dT, dP, ddt, dh, lm=None, dlm=None, rc=None, drc=None, adapt=True, rtol=1e-3,
-            atol=1e-16, max_steps=4000):
+            atol=1e-16, max_steps=4000, J=None, dJ=None):
         """The call and its tangent: (x, h, done, accepted steps, dx, dh) for the tangents dx [B, S], dT, dP, ddt,
-        dh [B], dlm [B, R] and drc [R, 9] (dlm, drc optional); with a leading axis of D <= DMAX directions on every
-        tangent (dx [D, B, S], dT [D, B], ..., dlm [D, B, R], drc [D, R, 9]) the D tangents share one call and come
-        back as dx [D, B, S], dh [D, B]."""
-        B, (x, T, P, dt, h), lm, rc = self._prep(x, T, P, dt, h, lm, rc, max_steps)
+        dh [B], dlm [B, R], drc [R, 9] and dJ [B, branches] (dlm, drc, dJ optional); with a leading axis of D <= DMAX
+        directions on every tangent (dx [D, B, S], dT [D, B], ..., dlm [D, B, R], drc [D, R, 9], dJ [D, B, branches])
+        the D tangents share one call and come back as dx [D, B, S], dh [D, B]."""
+        B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps)
         one = dx.dim() == 2
         D = 1 if one else dx.shape[0]
         lead = () if one else (D,)
         if not 1 <= D <= DMAX or tuple(dx.shape) != lead + (B, self.ns) or any(
                 tuple(a.shape) != lead + (B,) for a in (dT, dP, ddt, dh)) or (
                 dlm is not None and tuple(dlm.shape) != lead + (B, self.nr)) or (
-                drc is not None and tuple(drc.shape) != lead + (self.nr, 9)):
-            raise ValueError(f"tangents: dx [D, B, S], dT, dP, ddt, dh [D, B], dlm [D, B, R], drc [D, R, 9] "
-                             f"(D <= {DMAX}), or the same without the D axis")
+                drc is not None and tuple(drc.shape) != lead + (self.nr, 9)) or (
+                dJ is not None and (not self.nj or tuple(dJ.shape) != lead + (B, self.nj))):
+            raise ValueError(f"tangents: dx [D, B, S], dT, dP, ddt, dh [D, B], dlm [D, B, R], drc [D, R, 9], "
+                             f"dJ [D, B, branches] (photo=True only) (D <= {DMAX}), or the same without the D axis")
+        if not all(a.dtype == torch.float64 and a.device == x.device for a in (dx, dT, dP, ddt, dh, dlm, drc, dJ)
+                   if a is not None):
+            raise ValueError("tangents: float64 on the device of x")
         tan = [a.contiguous() for a in (dx, dT, dP, ddt, dh)]
         dlm = None if dlm is None else dlm.contiguous()
         drc = None if drc is None else drc.contiguous()
+        dJ = None if dJ is None else dJ.contiguous()
         xo, dxo = torch.empty_like(x), torch.empty((D, B, self.ns), dtype=torch.float64, device=self.dev)
         ho, nok = (torch.empty(B, dtype=torch.float64, device=self.dev) for _ in range(2))
         dho = torch.empty((D, B), dtype=torch.float64, device=self.dev)
         done = torch.empty(B, dtype=torch.int32, device=self.dev)
-        need = self._nw["jvp"] * (3 * self.nr + 2 + D * (2 * self.nr + self.ns))
+        need = self._nw["jvp"] * (5 * self.nr + 2 + D * (2 * self.nr + self.ns))
         if self._jscr.numel() < need:
             self._jscr = torch.empty(need, dtype=torch.float64, device=self.dev)
         nb = max(1, min(-(-B // self.wpb["jvp"]), self.max_blocks["jvp"]))
@@ -1766,19 +1901,23 @@ class ADSolver:
         args = lambda ms: [x, T, P, dt, h, self._ptr(lm), rc, *tan, self._ptr(dlm), self._ptr(drc), ctypes.c_int(D),
                            xo, ho, done, nok, dxo, dho, self.count, ctypes.c_int(B), ctypes.c_double(rtol),
                            ctypes.c_double(atol), ctypes.c_int(ms), ctypes.c_int(int(adapt)), *self._tabs, self._jscr,
-                           *self._st, *self._rounds[:2]]  # noqa: E731
+                           *self._st, *self._rounds[:2], self._ptr(J), self._ptr(dJ)]  # noqa: E731
         KC._launch(self._fn["jvp"], nb, 32 * self.wpb["jvp"], self.smem["jvp"], stream, args(max_steps))
-        redo, lst = self._guard(x, T, P, dt, xo, done, nok, atol, stream)
+        redo, lst = self._guard(x, T, P, dt, xo, done, nok, atol, J, stream)
         KC._launch(self._fn["jvp_rec"], nb, 32 * self.wpb["jvp"], self.smem["jvp"], stream,
                    args(KC.REC_STEPS * max_steps) + [redo, lst, self._wscr, self._didx, self._atoms])
         self._finish(redo)
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
-    def vjp(self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=1e-16, max_steps=4000):
+    def vjp(self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=1e-16, max_steps=4000,
+            J=None):
         """The call and the cotangents of its inputs for the cotangents gx [B, S] of x_out and gh [B] of h_out
         (optional): (x, h, done, accepted steps, dict x, T, P, dt, h, lm [B, R] (of each reaction's log multiplier),
-        rc [R, 9])."""
-        B, (x, T, P, dt, h), lm, rc = self._prep(x, T, P, dt, h, lm, rc, max_steps)
+        rc [R, 9] (of the Arrhenius columns), J [B, branches] (photo=True))."""
+        B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps)
+        if tuple(gx.shape) != (B, self.ns) or (gh is not None and tuple(gh.shape) != (B,)) or not all(
+                a.dtype == torch.float64 and a.device == x.device for a in (gx, gh) if a is not None):
+            raise ValueError(f"cotangents gx [B, {self.ns}], gh [B]: float64 on the device of x")
         gx = gx.contiguous()
         gh = None if gh is None else gh.contiguous()
         xo = torch.empty_like(x)
@@ -1787,6 +1926,9 @@ class ADSolver:
         g = dict(x=torch.empty_like(x), T=torch.empty_like(T), P=torch.empty_like(T), dt=torch.empty_like(T),
                  h=torch.empty_like(T), lm=torch.empty(B, self.nr, dtype=torch.float64, device=self.dev),
                  rc=torch.empty(self.nr, 9, dtype=torch.float64, device=self.dev))
+        if self.nj:
+            g["J"] = torch.empty(B, self.nj, dtype=torch.float64, device=self.dev)
+        gA = torch.empty(B, self.nr, dtype=torch.float64, device=self.dev)
         nb = max(1, min(-(-B // self.wpb["vjp"]), self.max_blocks["vjp"]))
         self.count.zero_()
         stream = torch.cuda.current_stream(self.dev).cuda_stream
@@ -1794,12 +1936,11 @@ class ADSolver:
                                 g["T"], g["P"], g["dt"], g["h"], g["lm"], self.count, ctypes.c_int(B),
                                 ctypes.c_double(rtol), ctypes.c_double(atol), ctypes.c_int(ms),
                                 ctypes.c_int(int(adapt)), *self._tabs, self._scratch, rec, *self._st, *self._gt,
-                                *self._rounds]  # noqa: E731
+                                *self._rounds, self._ptr(J), self._ptr(g.get("J")), gA]  # noqa: E731
         KC._launch(self._fn["vjp"], nb, 32 * self.wpb["vjp"], self.smem["vjp"], stream, args(max_steps, self._rec))
-        redo, lst = self._guard(x, T, P, dt, xo, done, nok, atol, stream)
+        redo, lst = self._guard(x, T, P, dt, xo, done, nok, atol, J, stream)
         KC._launch(self._fn["vjp_rec"], nb, 32 * self.wpb["vjp"], self.smem["vjp"], stream,
                    args(KC.REC_STEPS * max_steps, self._rrec) + [redo, lst, self._wscr, self._didx, self._atoms])
-        KC._launch(self._fn["arrh"], self.nr, 256, 0, stream, [g["lm"], T, P, rc, self._tabs[2], g["rc"],
-                                                               ctypes.c_int(B)])
+        KC._launch(self._fn["arrh"], self.nr, 256, 0, stream, [gA, T, P, rc, self._tabs[2], g["rc"], ctypes.c_int(B)])
         self._finish(redo)
         return xo, ho, done.bool(), nok, g
