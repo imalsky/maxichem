@@ -16,8 +16,9 @@ design's split and rows, the inputs) and a mismatch is refused (tests/libref.py)
     differ at the integration tolerance (up to ~1e-3 relative). A cell is touched from the call on which the reference
     took the host iterations or the integration branched (accepted steps differ, or the next step size by more than 1e-6
     relative), and so is every cell whose gas it reached through the mixing. Pass: on untouched cells the 12 scored gases
-    within 1e-8 dex (floors 1e-10 H2O CO CO2 CH4 NH3 HCN C2H2, 1e-8 H OH O, 1e-6 H2 N2) at every call, and the end state
-    (all species, to 1e-8 relative + 1e-20; rows) within 1e-8; the extra iterations taken by the cells the reference
+    within 1e-8 dex (floors 1e-10 H2O CO CO2 CH4 NH3 HCN C2H2, 1e-8 H OH O, 1e-6 H2 N2) at every call, the end state's
+    species within 1e-6 relative + 1e-16 (the chemistry's atol; untouched cells' step sizes agree to 1e-6) and its rows
+    within 1e-8 relative; the extra iterations taken by the cells the reference
     sent to the host (at most 1e-3 of the untouched cell-calls differ: a residual at the 1e-10 threshold); on touched
     cells each cell's worst error against the full mechanism (same calls, 12 gases, floored) at most the reference's
     plus 1e-3 dex. Every call: the elements of the state before the chemistry equal those of the tracers (the carried
@@ -55,6 +56,7 @@ from maxichem import paths  # noqa: E402
 GASES = ["H2O", "CO", "CO2", "CH4", "NH3", "HCN", "C2H2", "H", "OH", "O", "H2", "N2"]
 FLOORS = np.log10([1e-10] * 7 + [1e-8] * 3 + [1e-6] * 2)
 TOL, TRUTH_SLACK, ELTOL, NEED_SHARE = 1e-8, 1e-3, 1e-12, 1e-3
+END_REL, END_ABS = 1e-6, 1e-16                         # the end state's species: 1e-6 relative + the chemistry's atol
 NBED, NQC = 50, 200
 QCIDS = (4240050031, 4240000130, 4240000338)
 dev = torch.device("cuda")
@@ -144,16 +146,17 @@ def parity(name, ts, E, ncall, n0, h0, forcing, mix, spread, gi):
     clean = np.logical_not(touched)
     ne = E["n_end"]
     xr = ne / ne.sum(1, keepdims=True)
-    rel = np.abs(x.cpu().numpy() - xr) / (np.abs(xr) + 1e-20)
+    rel = np.abs(x.cpu().numpy() - xr) / (END_REL * np.abs(xr) + END_ABS)           # 1 = the bound
     rb = np.abs(R.cpu().numpy() - E["bud_end"]) / np.maximum(np.abs(E["bud_end"]), 1e-300)
     rel_end = float(rel[clean].max()) if clean.any() else 0.0
     rb_end = float(rb[clean].max()) if clean.any() else 0.0
     slack = float((worst_lib - worst_ref)[touched].max()) if touched.any() else 0.0
     tot = dict(zip(KT.COUNTS, ts.total.tolist()))
-    ok = (d_clean <= TOL and rel_end <= TOL and rb_end <= TOL and need_bad <= max(5, NEED_SHARE * nun)
+    ok = (d_clean <= TOL and rel_end <= 1.0 and rb_end <= TOL and need_bad <= max(5, NEED_SHARE * nun)
           and slack <= TRUTH_SLACK and el_err <= ELTOL and defects == 0)
     verdict(name, ok, f"{ncall} calls x {B} cells; untouched cell-calls {ncl}: worst 12-gas difference {d_clean:.2e} dex, "
-            f"end state {rel_end:.1e} rel. (+1e-20), rows {rb_end:.1e} rel.; extra iterations differing from the "
+            f"end state {rel_end:.1e} of the bound (1e-6 rel. + 1e-16), rows {rb_end:.1e} rel.; extra iterations "
+            f"differing from the "
             f"reference's host iterations {need_bad} of {nun} cell-calls; branched cells {int(branched.sum())}, touched "
             f"{int(touched.sum())}: difference {d_touch:.2e} dex, worst error vs the full mechanism minus the reference's "
             f"{slack:+.2e} dex (slack {TRUTH_SLACK:g}); elements before the chemistry {el_err:.1e} rel.; reconstruction "

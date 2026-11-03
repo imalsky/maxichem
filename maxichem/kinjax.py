@@ -133,8 +133,8 @@ def _lib():
     return _LIB[0]
 
 
-_MODULES = {}   # handle -> dict(ns, nr, rec (recovery scratch doubles), call / jvp / vjp: (cells per block, resident
-                #                                                                                      blocks))
+_MODULES = {}   # handle -> dict(ns, nr, rec (recovery scratch doubles), stride (the call kernel's scratch doubles per
+                # cell slot), call / jvp / vjp: (cells per block, resident blocks))
 
 
 # --- primitives -------------------------------------------------------------------------------------------------------
@@ -158,7 +158,7 @@ def _sa(shape, dtype=jnp.float64):
 def _call_abstract(x, T, P, dt, h, lm, rc, *tabs, module, rtol, atol, max_steps, adapt, rec_steps):
     B, ns = x.shape
     nr = _MODULES[module]["nr"]
-    scr = _nw(B, module, "jvp") * (3 * nr + 2) if _has(lm) else _nw(B, module, "call") * (2 * nr + 2)
+    scr = _nw(B, module, "jvp") * (3 * nr + 2) if _has(lm) else _nw(B, module, "call") * _MODULES[module]["stride"]
     rscr = _nw(B, module, "jvp") * ns * ns if _has(lm) else _MODULES[module]["rec"]
     i32 = jnp.int32
     return (_sa((B, ns)), _sa((B,)), _sa((B,), i32), _sa((B,)), _sa((B,), i32), _sa((10,), i32), _sa((scr,)),
@@ -188,8 +188,8 @@ def _adj_abstract(*args, module, rtol, atol, max_steps, adapt, rec_steps, want_l
     return (_sa((D, B, ns)),) + tuple(_sa((D, B)) for _ in range(4)) + (
         _sa((D, B, nr) if want_lm else (0,)), _sa((D, groups, nr, 9) if want_rc else (0,)),
         _sa((B, ns)), _sa((B,)), _sa((B,), i32), _sa((B,)), _sa((B,), i32), _sa((10,), i32),
-        _sa((nw * (12 * nr + 2),)), _sa((nw * 2 * cap * (ns + 3),)), _sa((0,) if want_lm else (B * nr,)),
-        _sa((B,), i32), _sa((nw * ns * ns,)), _sa((nw * 4 * cap * (ns + 3),)))
+        _sa((nw * (12 * nr + 2),)), _sa((nw * 2 * cap * (ns + 6),)), _sa((0,) if want_lm else (B * nr,)),
+        _sa((B,), i32), _sa((nw * ns * ns,)), _sa((nw * 4 * cap * (ns + 6),)))
 
 
 def _lower(target, keep):
@@ -375,7 +375,7 @@ batching.primitive_batchers[_adj_p] = functools.partial(_tan_batch, _adj_p)
 # --- the solver -------------------------------------------------------------------------------------------------------
 
 class KinJax:
-    """KinJax(net, drift=None)(x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-18, max_steps=4000, adapt=True) ->
+    """KinJax(net, drift=None)(x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-16, max_steps=4000, adapt=True) ->
     (x, h, done, steps, flag, status): one solver call per cell on the local CUDA devices, differentiable (see the module
     docstring); drift: the element-drift allowance (kincuda). The call kernel's layout is CudaSolver's (built once here through torch to choose it); the tables are
     device constants of the traced call; rtol, atol, max_steps and adapt are static."""
@@ -402,7 +402,8 @@ class KinJax:
         major, minor, _, optin = props.pop()
         nl = 32 * cs.w
         rounds = [tab["sst"].shape[0], tab["jround"], ext["gt"].shape[0], nl]
-        geo = {"call": [self.ns, self.nr, cs.cpb, nl * cs.cpb, cs.smem, nl, cs.smem_rec] + rounds}
+        geo = {"call": [self.ns, self.nr, cs.cpb, nl * cs.cpb, cs.smem, nl, cs.smem_rec] + rounds
+                       + [cs.stride, cs.stride_rec]}
         self.src = {"call": cs.src}
         for kind in ("jvp", "vjp"):
             perwa = KA.layout(tab, ext, kind)[1]
@@ -410,14 +411,15 @@ class KinJax:
             if wpb < 1:
                 raise RuntimeError(f"the {kind} kernel's work arrays do not fit in shared memory")
             sm = 8 * wpb * perwa + len(blob)                    # the recovery's kernel: the same grid and layout
-            geo[kind] = [self.ns, self.nr, wpb, 32 * wpb, sm, 32 * wpb, sm] + rounds
+            geo[kind] = [self.ns, self.nr, wpb, 32 * wpb, sm, 32 * wpb, sm] + rounds + [0, 0]
             self.src[kind] = KA.source_ad(tab, ext, kind, wpb, drift=drift) + (_ARRHG if kind == "vjp" else "")
-        rec = cs.rec_blocks * (2 * self.nr + 2 + (0 if cs.info["rec_w_shared"] else self.ns ** 2))
+        stride, stride_rec = cs.stride, cs.stride_rec          # the call / recover kernels' scratch per slot / block
+        rec = cs.rec_blocks * stride_rec
         del cs
         handle, cells = -1, {}
         for k, kind in enumerate(("call", "jvp", "vjp")):
             cubin = KC.compile_cubin(self.src[kind], f"{major}{minor}")
-            g = (ctypes.c_int * 11)(*geo[kind])
+            g = (ctypes.c_int * 13)(*geo[kind])
             mb = []
             for d in devs:
                 b = (ctypes.c_int * 2)()
@@ -427,10 +429,10 @@ class KinJax:
                 handle = h
                 mb.append(tuple(b))
             cells[kind] = (geo[kind][2], min(q[0] for q in mb))
-            if kind == "call" and min(q[1] for q in mb) * (2 * self.nr + 2) > rec:
+            if kind == "call" and min(q[1] for q in mb) * stride_rec > rec:
                 raise RuntimeError("kinjax: the devices hold more recover blocks than the recovery scratch")
         self.module = int(handle)
-        _MODULES[self.module] = dict(ns=self.ns, nr=self.nr, rec=rec, **cells)
+        _MODULES[self.module] = dict(ns=self.ns, nr=self.nr, rec=rec, stride=stride, **cells)
         u = lambda a, t: jnp.asarray(np.ascontiguousarray(a).view(t))  # noqa: E731
         self.rc = jnp.asarray(tab["rc"])
         self.tabs = (jnp.asarray(tab["perm"]), u(np.frombuffer(blob, np.uint32), np.uint32), jnp.asarray(tab["rf"]),
@@ -439,7 +441,7 @@ class KinJax:
                      u(ext["gt"], np.uint64), jnp.asarray(ext["xg"]), u(tab["didx"], np.uint16))
         self._jit = jax.jit(self.call, static_argnames=("rtol", "atol", "max_steps", "adapt"))
 
-    def call(self, x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-18, max_steps=4000, adapt=True):
+    def call(self, x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-16, max_steps=4000, adapt=True):
         """The traceable call (use inside jit / vmap / grad); __call__ is its jitted form."""
         T = jnp.asarray(T, jnp.float64)
         lead = T.shape
@@ -454,7 +456,7 @@ class KinJax:
         return (xo.reshape(lead + (self.ns,)), ho.reshape(lead), done.reshape(lead),
                 nok.astype(jnp.int32).reshape(lead), redo.reshape(lead), count[1:9])
 
-    def __call__(self, x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-18, max_steps=4000, adapt=True):
+    def __call__(self, x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-16, max_steps=4000, adapt=True):
         return self._jit(x, T, P, dt, h, lm, rc, rtol=rtol, atol=atol, max_steps=max_steps, adapt=adapt)
 
 

@@ -104,6 +104,8 @@ struct Module {          // one cubin of one kind loaded into one device's prima
                                           // main kernel's; it runs on the main kernel's grid and scratch slots)
   int sround, jround, ground, nl;         // rounds of the S v, Jacobian and gather streams; lanes of the first two
   int max_blocks, rec_blocks;             // resident blocks on the device
+  int stride, stride_rec;                 // kind 0: global scratch (doubles) per cell slot of the call kernel and per
+                                          // block of the recover kernel (rates, the copy for a retry, W if global)
 };
 
 std::mutex registry_mutex;
@@ -245,15 +247,16 @@ extern "C" int KinjaxDevice(int device, int* out, char* err, int errlen) {
 // Loads a cubin of `kind` (0 call, 1 jvp, 2 vjp) into the primary context of `device` and returns the handle (>= 0; -1
 // on error, message in err): a new one for handle -1, else `handle`. geo: ns, nr, cells and threads per block of the
 // main kernel, its dynamic shared memory (bytes), the recovery kernel's threads per block and shared memory, the rounds
-// of the S v, Jacobian and gather streams, the lanes of the first two. blocks[0] = resident blocks of the main kernel
-// on the device, blocks[1] = of the recovery kernel.
+// of the S v, Jacobian and gather streams, the lanes of the first two, and (kind 0; 0 otherwise) the call kernel's
+// scratch doubles per cell slot and the recover kernel's per block. blocks[0] = resident blocks of the main kernel on
+// the device, blocks[1] = of the recovery kernel.
 extern "C" int64_t KinjaxLoad(int64_t handle, int device, int kind, const void* cubin, const int* geo, int* blocks,
                               char* err, int errlen) {
   const Driver& d = drv();
   if (!d.error.empty()) { set_message(err, errlen, d.error); return -1; }
   if (kind < 0 || kind > 2) { set_message(err, errlen, "kind must be 0, 1 or 2"); return -1; }
   Module m{handle, device, kind, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, geo[0], geo[1], geo[2], geo[3],
-           geo[4], geo[5], geo[6], geo[7], geo[8], geo[9], geo[10], 0, 0};
+           geo[4], geo[5], geo[6], geo[7], geo[8], geo[9], geo[10], 0, 0, geo[11], geo[12]};
   CUdevice dev;
   CUresult r = d.DeviceGet(&dev, device);
   if (r == CUDA_SUCCESS) r = d.PrimaryCtxRetain(&m.ctx, dev);   // kept for the life of the process
@@ -324,9 +327,10 @@ ffi::Error CallImpl(CUstream stream, int32_t device, KINJAX_PRIMAL_PARAMS, ffi::
   if (ffi::Error e = check_primal(m, a, B); e.failure()) return e;
   if (count->element_count() != 10 || list->element_count() != static_cast<size_t>(B))
     return ffi::Error::InvalidArgument("kinjax: count [10], list [B]");
-  const size_t per_cell = (with_lm ? 3 : 2) * static_cast<size_t>(m.nr) + 2, nw = static_cast<size_t>(blocks(m, B)) * m.cells;
+  const size_t per_cell = with_lm ? 3 * static_cast<size_t>(m.nr) + 2 : static_cast<size_t>(m.stride),
+               nw = static_cast<size_t>(blocks(m, B)) * m.cells;
   if (scratch->element_count() < nw * per_cell) return ffi::Error::InvalidArgument("kinjax: rate scratch too small");
-  if (rscratch->element_count() < (with_lm ? nw * m.ns * m.ns : static_cast<size_t>(m.rec_blocks) * (2 * m.nr + 2)))
+  if (rscratch->element_count() < (with_lm ? nw * m.ns * m.ns : static_cast<size_t>(m.rec_blocks) * m.stride_rec))
     return ffi::Error::InvalidArgument("kinjax: recovery scratch too small");
   Scope sc(m.ctx);
   if (sc.r != CUDA_SUCCESS) return ffi::Error::Internal(cu_error(sc.r, "push context"));
@@ -490,8 +494,8 @@ ffi::Error VjpImpl(CUstream stream, int32_t device, KINJAX_PRIMAL_PARAMS, ffi::A
       (!want_lm && glms->element_count() != static_cast<size_t>(B) * m.nr) ||
       (want_rc && grc->element_count() != static_cast<size_t>(D) * groups * m.nr * 9))
     return ffi::Error::InvalidArgument("kinjax_vjp: lm / rc cotangent outputs do not match");
-  if (scratch->element_count() < nw * (12 * m.nr + 2) || rec->element_count() < nw * 2 * cap * (m.ns + 3) ||
-      rrec->element_count() < nw * 4 * cap * (m.ns + 3) || wscr->element_count() < nw * m.ns * m.ns ||
+  if (scratch->element_count() < nw * (12 * m.nr + 2) || rec->element_count() < nw * 2 * cap * (m.ns + 6) ||
+      rrec->element_count() < nw * 4 * cap * (m.ns + 6) || wscr->element_count() < nw * m.ns * m.ns ||
       count->element_count() != 10 || list->element_count() != static_cast<size_t>(B))
     return ffi::Error::InvalidArgument("kinjax_vjp: scratch too small");
   if (D == 0) return ffi::Error::Success();

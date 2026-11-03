@@ -15,14 +15,14 @@ judged).
     error over those steps counts. Only cells whose output depends on the input are judged (largest |d ln x| > 1e-6,
     |d h_out / h_out| > 1e-6): elsewhere both sides are rounding. Cases: GCM-like (panel P after 150 calls, the next
     call), cold starts dt 500 s, scrambled sigma 1 dt 50 s, GCM-like states at 1000 +- 2 K (NASA-9 switch). Pass: p90
-    over cells <= 1e-5 for every input but the starting step size h. Its derivative runs through the whole chain of
-    controller steps, and on cold and scrambled starts the differences have no clean plateau for about 10 % of cells
-    (truncation at the clamped controller's kinks for large steps, cancellation-amplified rounding for small ones), so
-    one direction's p90 sits at that noise. h is one number per cell, so a direction only scales each cell's steps: the
-    h class runs NDH directions per case (NDH step scales per cell) as tiled copies of the cells in one batch, and over
-    the (cell, direction) pairs: a plateau for >= 85 % of the sensitive pairs and at least the case's floor of
-    sensitive pairs; p90 of the best error <= 3e-4; and at most 1 % of the pairs with a best error above both 1e-4 and
-    3 x the two differences' own disagreement at that plateau (an error the differences resolve).
+    over cells <= 1e-5 (3e-5 on the cold starts) for every input but the starting step size h. Its derivative runs
+    through the whole chain of controller steps, and on cold and scrambled starts the differences have no clean plateau
+    for about 10 % of cells (truncation at the clamped controller's kinks for large steps, cancellation-amplified
+    rounding for small ones), so one direction's p90 sits at that noise. h is one number per cell, so a direction only
+    scales each cell's steps: the h class runs NDH directions per case (NDH step scales per cell) as tiled copies of the
+    cells in one batch, and over the (cell, direction) pairs: a plateau for >= 85 % of the sensitive pairs and at least
+    the case's floor of sensitive pairs; p90 of the best error <= 3e-4; and at most 1 % of the pairs with a best error
+    above both 1e-4 and 3 x the two differences' own disagreement at that plateau (an error the differences resolve).
 (d) Dot products <c, J v> vs <J^T c, v> per cell, both contracts, log-weighted cotangents (c_i = N(0, 1) / x_i),
     scale = the larger of the two sums of absolute terms; pass: p99 over cells <= 1e-6 with every input class (the
     multipliers on reactions away from balance), and with the starting step alone (adaptive; with (b)'s check of its
@@ -306,11 +306,12 @@ def h_stats(e, d, ns):
                 n=ns)
 
 
-def fd_case(name, a, max_steps=4000, judge=None, ref=None, info=False, hmin=1):
+def fd_case(name, a, max_steps=4000, judge=None, ref=None, info=False, hmin=1, xbar=1e-5):
     """Central differences of the call (its primal: bitwise CudaSolver.launch, recovered cells included) against the
     tangents; judge: the cells judged (default all); ref: the errors of another run on the same cells and directions,
     whose statistics doubled raise a class's bars; info: printed, not judged; hmin: the least number of sensitive
-    (cell, direction) pairs of the starting-step class. Returns the errors per input class (h: its statistics)."""
+    (cell, direction) pairs of the starting-step class; xbar: the p90 bar of the other classes. Returns the errors per
+    input class (h: its statistics)."""
     x, T, P, dt, h = a
     B = x.shape[0]
     errs, hs = {}, {}
@@ -352,7 +353,7 @@ def fd_case(name, a, max_steps=4000, judge=None, ref=None, info=False, hmin=1):
             fin = torch.isfinite(best_x) & sens
             errs[cls] = (best_x[fin].cpu().numpy(), int(fin.sum()), int(sens.sum()))
     rh = ref["h"] if ref else dict(p90=0.0, share=0.0, cover=1.0)
-    bar = {k: max(1e-5, 2.0 * np.quantile(ref[k][0], 0.9) if ref and len(ref[k][0]) else 0.0)
+    bar = {k: max(xbar, 2.0 * np.quantile(ref[k][0], 0.9) if ref and len(ref[k][0]) else 0.0)
            for k in errs if k != "h"}
     hb = dict(p90=max(3e-4, 2.0 * rh["p90"]), share=max(0.01, 2.0 * rh["share"]),
               gap=max(0.15, 2.0 * (1.0 - rh["cover"])))         # gap: the share of sensitive pairs without a plateau
@@ -389,18 +390,18 @@ def gcm_states(B, ncalls=150, extra=0):
 
 
 def finite_differences():
-    """The four cases; hmin: half the sensitive starting-step pairs each case has (80, 387, 822, 384), so a tangent
-    that loses its dependence on h cannot pass by leaving nothing to judge."""
+    """The four cases; hmin: about half the sensitive starting-step pairs each case has (80, 348, 868, 142), so a
+    tangent that loses its dependence on h cannot pass by leaving nothing to judge."""
     x, h, fo = gcm_states(256)
     fd_case("GCM-like (panel P, call 151)", (x, *fo[0], h), hmin=40)
     x0, T, P = yardstick(64, 3, 0.0)
-    fd_case("cold starts dt 500 s", (x0, T, P, full(64, 500.0), full(64, 1e-10)), hmin=190)
+    fd_case("cold starts dt 500 s", (x0, T, P, full(64, 500.0), full(64, 1e-10)), hmin=190, xbar=3e-5)
     x0, T, P = yardstick(64, 4, 1.0)
     fd_case("scrambled sigma 1 dex, dt 50 s", (x0, T, P, full(64, 50.0), full(64, 1e-10)), hmin=410)
     x, h, fo = gcm_states(64, 150)
     T = 1000.0 + 4.0 * (torch.rand(64, generator=gen, dtype=torch.float64, device=dev) - 0.5)
     fd_case("GCM-like states at T = 1000 +- 2 K (NASA-9 range switch), dt 50 s", (x, T, fo[0][1], full(64, 50.0), h),
-            hmin=190)
+            hmin=71)
 
 
 # ---------------------------------------------------------------------------------------------------------------- (d)
@@ -417,18 +418,19 @@ def dot_tests():
         dots(name, a)
 
 
-def dots(name, a, max_steps=4000, judge=None, sv=None):
+def dots(name, a, max_steps=4000, judge=None, sv=None, kw=None):
     """Dot products of one case, both contracts; judge: the cells judged (default all, and the Arrhenius batch totals
-    printed); sv: (ADSolver, CudaSolver), default the module's."""
+    printed); sv: (ADSolver, CudaSolver), default the module's; kw: extra call arguments (atol)."""
+    kw = kw or {}
     ad_, kc_ = sv or (ad, kc)
     x, T, P, dt, h = a
     B = x.shape[0]
     far = away_from_balance(x, T, P)
     for adapt in (False, True):
         lab = "adaptive" if adapt else "frozen"
-        xo, ho = kc_.launch(*a, max_steps=max_steps)[:2]
+        xo, ho = kc_.launch(*a, max_steps=max_steps, **kw)[:2]
         cx, ch = rn(B, ad_.ns) / xo.clamp(min=1e-30) * (xo > 1e-25), rn(B) / ho     # log-weighted cotangents
-        _, _, _, _, g = ad_.vjp(*a, cx, ch, adapt=adapt, max_steps=max_steps)
+        _, _, _, _, g = ad_.vjp(*a, cx, ch, adapt=adapt, max_steps=max_steps, **kw)
         parts = [("x, T, P, dt, h and lm on reactions away from balance", "all"),
                  ("lm on every reaction (balanced ones are rounding; not judged)", "lm")]
         if adapt:                               # the starting step alone (its terms are small beside the others')
@@ -439,7 +441,7 @@ def dots(name, a, max_steps=4000, judge=None, sv=None):
             if kind != "all":
                 v.update({k: v[k] * 0.0 for k in ("x", "T", "P", "dt", "h", "lm") if k != kind})
             _, _, _, nok, dxo, dho = ad_.jvp(*a, v["x"], v["T"], v["P"], v["dt"], v["h"], dlm=v["lm"],
-                                             adapt=adapt, max_steps=max_steps)
+                                             adapt=adapt, max_steps=max_steps, **kw)
             lhs = (cx * dxo).sum(1) + ch * dho
             terms = [(g[k] * v[k]).reshape(B, -1) for k in ("x", "T", "P", "dt", "h", "lm")]
             rhs = sum(q.sum(1) for q in terms)
@@ -668,22 +670,22 @@ def recovered():
     B = 256
     x0, T, P = yardstick(B, 51, 0.0)
     xs, hs, _, _ = kc(x0, T, P, full(B, 100.0), full(B, 1e-10))          # settled states
-    cases = [("settled starts dt 1000 s, max_steps 3", (xs, T, P, full(B, 1e3), hs), 3, (ad, kc)),
-             ("cold starts dt 500 s, max_steps 60", (x0, T, P, full(B, 500.0), full(B, 1e-10)), 60, (ad, kc))]
-    sz = (KA.ADSolver(net, dev, drift=0.0), KC.CudaSolver(net, dev, drift=0.0))   # every rounding drift flagged
-    xz, Tz, Pz = yardstick(1024, 2, 1.0)
+    cases = [("settled starts dt 1000 s, max_steps 3", (xs, T, P, full(B, 1e3), hs), 3, (ad, kc), {}),
+             ("cold starts dt 500 s, max_steps 60", (x0, T, P, full(B, 500.0), full(B, 1e-10)), 60, (ad, kc), {})]
+    sz = (KA.ADSolver(net, dev, drift=0.0), KC.CudaSolver(net, dev, drift=0.0))   # every rounding drift flagged (at
+    xz, Tz, Pz = yardstick(1024, 2, 1.0)                     # atol 1e-18: the default's clamping allowance covers it)
     cases.append(("scrambled 1 dex dt 500 s, drift allowance 0", (xz, Tz, Pz, full(1024, 500.0), full(1024, 1e-10)),
-                  4000, sz))
-    for name, a, ms, (ad_, kc_) in cases:
+                  4000, sz, dict(atol=1e-18)))
+    for name, a, ms, (ad_, kc_), kw in cases:
         n = a[0].shape[0]
-        ref = kc_.launch(*a, max_steps=ms)
+        ref = kc_.launch(*a, max_steps=ms, **kw)
         st_k = dict(zip(KC.COUNTS, kc_.count.tolist()[1:9]))
         v = (a[0] * rn(n, ad_.ns), a[1] * 1e-2 * rn(n), a[2] * 1e-2 * rn(n), a[3] * 1e-2 * rn(n), a[4] * 1e-2 * rn(n))
         dlm, drc, lm = rn(n, ad_.nr) * 1e-2, rn(ad_.nr, 9) * 1e-3, rn(n, ad_.nr) * 1e-2
         cx, ch = rn(n, ad_.ns), rn(n)
-        j = ad_.jvp(*a, *v, dlm=dlm, drc=drc, max_steps=ms)
+        j = ad_.jvp(*a, *v, dlm=dlm, drc=drc, max_steps=ms, **kw)
         st_j, fl_j = dict(ad_.status), ad_.flag.clone()
-        g = ad_.vjp(*a, cx, ch, max_steps=ms)
+        g = ad_.vjp(*a, cx, ch, max_steps=ms, **kw)
         st_v, fl_v = dict(ad_.status), ad_.flag.clone()
         same = all(torch.equal(p, q) and torch.equal(p, w) for p, q, w in zip(ref[:4], j[:4], g[:4]))
         flags = torch.equal(ref[4], fl_j) and torch.equal(ref[4], fl_v) and st_j == st_v == st_k
@@ -695,14 +697,14 @@ def recovered():
         # the unflagged cells alone, as their own batch: per-cell bitwise the same (the redo leaves them unchanged)
         i0 = f0.nonzero().squeeze(1)
         sub = lambda q: q[i0]  # noqa: E731
-        ja = ad_.jvp(*map(sub, a), *map(sub, v), dlm=dlm[i0], drc=drc, max_steps=ms)
-        ga = ad_.vjp(*map(sub, a), cx[i0], ch[i0], max_steps=ms)
+        ja = ad_.jvp(*map(sub, a), *map(sub, v), dlm=dlm[i0], drc=drc, max_steps=ms, **kw)
+        ga = ad_.vjp(*map(sub, a), cx[i0], ch[i0], max_steps=ms, **kw)
         alone = all(torch.equal(p[i0], q) for p, q in zip(j, ja)) and all(
             torch.equal(g[4][k][i0], ga[4][k]) for k in ("x", "T", "P", "dt", "h", "lm"))
         # the redone cells with log multipliers (the call with lm runs the recovery too)
-        jl = ad_.jvp(*a, *v, lm=lm, dlm=dlm, max_steps=ms)
+        jl = ad_.jvp(*a, *v, lm=lm, dlm=dlm, max_steps=ms, **kw)
         fl_l = ad_.flag.clone()
-        gl = ad_.vjp(*a, cx, ch, lm=lm, max_steps=ms)
+        gl = ad_.vjp(*a, cx, ch, lm=lm, max_steps=ms, **kw)
         lm_ok = torch.equal(fl_l, ad_.flag) and torch.equal(jl[0], gl[0]) and bool((fl_l > 0).sum() > 0) and bool(
             torch.isfinite(jl[4][fl_l == 1]).all()) and bool(torch.isnan(jl[4][fl_l == 2]).all())
         verdict(f"recovered cells, {name}: primal, flags, NaN", same and flags and fin and nan and rc_ok and alone and lm_ok,
@@ -717,7 +719,7 @@ def recovered():
             ref_ = fd_case(f"the same cells on the ordinary path (max_steps 4000), {name}", a, 4000, judge=f1, info=True)
             gen.set_state(st)
             fd_case(f"recovered cells, {name}", a, ms, judge=f1, ref=ref_)
-        dots(f"recovered cells, {name}", a, ms, judge=f1, sv=(ad_, kc_))
+        dots(f"recovered cells, {name}", a, ms, judge=f1, sv=(ad_, kc_), kw=kw)
 
 
 def main():

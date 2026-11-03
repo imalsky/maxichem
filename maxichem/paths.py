@@ -12,10 +12,10 @@ DATA = Path(os.environ.get("CHEM_DATA") or Path(__file__).resolve().parents[1] /
 QUAL = DATA / "truth/qual"                               # VULCAN truth set (folders QC, QCs, QL, ...; manifest.json)
 DESIGNS = DATA / "benches/designs"                       # test designs: decision/P (panel P's rows, starts and forcing)
 YARD = DATA / "benches/yardstick"                        # yardstick design (design/: recorded starts, rows, saved states)
-AD_REF = DATA / "benches/kincuda_ad/refdata2.npz"        # torch-autograd derivatives of the torch reference call
-LIBREF = DATA / "benches/kincuda/libref2.npz"            # the torch reference call's outputs and rate coefficients on
+AD_REF = DATA / "benches/kincuda_ad/refdata3.npz"        # torch-autograd derivatives of the torch reference call
+LIBREF = DATA / "benches/kincuda/libref3.npz"            # the torch reference call's outputs and rate coefficients on
                                                          # the checks' inputs (tests/libref.py)
-TRACER_REF = DATA / "benches/kintracer/ref3.npz"         # the reduced-tracer layer's reference outputs on the inputs of
+TRACER_REF = DATA / "benches/kintracer/ref4.npz"         # the reduced-tracer layer's reference outputs on the inputs of
                                                          # tests/kintracer_check.py
 KINJAX = DATA / "caches/kinjax"                          # the JAX shim built from kinjax.cc at first use
 

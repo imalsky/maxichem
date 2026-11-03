@@ -13,10 +13,12 @@ of the special law's second k0 term and of k_inf, as kincuda.tables). Outputs: x
 Two contracts, both on the branch the call takes (accept / reject, clamped species, step-control limits):
   frozen (adapt=False): the accepted step sizes held fixed (replay): no derivative through dt, h or the error estimate,
     rejected attempts drop out, h_out has no tangent;
-  adaptive (adapt=True): the step control differentiated as well: ha = min(h, dt - t), h_next = ha fac(err) with
-    fac = 0.9 err^(-1/3) inside its limits, rejected attempts included, the carried h in and out; err as the call
-    kernel's (the RMS over species; on a try before the call's first accepted step max(RMS, max-norm), differentiated
-    through the norm it selects).
+  adaptive (adapt=True): the step control differentiated as well: ha = min(h, dt - t), h_next = ha fac with fac the
+    call kernel's factor, 0.9 err^(-1/3) inside its limits or, on a rejection after a rejection, the secant shrink
+    (0.5 / err)^(1 / min(p, 3)) with p = ln(err_prev / err) / ln(ha_prev / ha), differentiated through both attempts'
+    errors and sizes; rejected attempts included, the carried h in and out; err as the call kernel's (the RMS over
+    species; on a try before the call's first accepted step max(RMS, max-norm), differentiated through the norm it
+    selects).
 Ties of min / max / |.| / clamps follow torch's derivative conventions (half to each side of a tie of min / max, a
 maximum over species shared evenly among the species attaining it, d|a| = 0 at 0, a clamp passes at its bound).
 
@@ -135,7 +137,8 @@ _SRC_AD = r"""
 #define CAPR (2 * CAP)                         // attempts stored per recovered cell (REC_STEPS x max_steps <= CAPR^2)
 #define DNAN __longlong_as_double(0x7ff8000000000000ll)   // derivatives of a cell still failed after the recovery
 #define DMAX $dmax
-#define REC (NS + 3)
+#define REC (NS + 6)                           // a stored attempt: N, h, t, accepted, then the previous attempt's
+                                               // error, size and rejection (the step control's history)
 #define NPG $npg
 #define UROW $urow
 #define LROW $lrow
@@ -632,29 +635,48 @@ template <bool DN> __device__ __forceinline__ double xattempt(double* S, double 
   return attempt(S, c, ha, first, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, sround, jround, lane, myt);
 }
 
-// Step-size factor of the controller after an attempt with error en (accepted ok) and its derivative d fac / d en
-// on the branch taken (0 where a limit holds).
-__device__ __forceinline__ double factor(double en, bool ok, double& dfde) {
+// Step-size factor of the controller after an attempt of size ha with error en (accepted ok; prej, pen, pha: the
+// previous attempt was rejected, its error and size), bitwise the call kernel's step_factor, and its partial
+// derivatives on the branch taken: dfe = d fac / d en, dfh = / d ha, dfp = / d pen, dfq = / d pha (0 where a limit
+// holds or the factor is a constant of its branch). Secant branch: fac = (0.5 / en)^(1 / p), p = min(pe, 3),
+// pe = ln(pen / en) / L, L = ln(pha / ha).
+__device__ __forceinline__ double factor(double en, bool ok, bool prej, double pen, double pha, double ha, double& dfe,
+                                         double& dfh, double& dfp, double& dfq) {
+  const double fac = step_factor(en, ok, prej, pen, pha, ha);
   const bool efin = isfinite(en);
-  double fac = efin ? 0.9 / cbrt(fmax(en, 1e-10)) : 0.1;
-  dfde = (efin && en >= 1e-10) ? -fac / (3.0 * en) : 0.0;
-  if (fac < 0.2 || fac > 5.0) dfde = 0.0;
-  fac = fmin(fmax(fac, 0.2), 5.0);
-  if (!ok) { if (fac > 0.5) dfde = 0.0; fac = fmin(fac, 0.5); }
+  dfe = 0.0; dfh = 0.0; dfp = 0.0; dfq = 0.0;
+  if (!ok && efin && prej && en > 1.0 && pen > 1.0 && pha > ha) {
+    const double L = log(pha / ha), pe = log(pen / en) / L;
+    if (pe > 0.05) {
+      const double p = fmin(pe, 3.0), fs = pow(0.5 / en, 1.0 / p);
+      if (fs >= SECMIN && fs <= 0.5) {
+        dfe = -fs / (p * en);                                  // through the base, p held
+        if (pe <= 3.0) {                                       // through p = pe
+          const double g = -fs * log(0.5 / en) / (p * p);     // d fac / d p
+          dfe -= g / (en * L);
+          dfp = g / (pen * L);
+          dfq = -g * pe / (pha * L);
+          dfh = g * pe / (ha * L);
+        }
+      }
+    }
+  } else if (efin && en >= 1e-10) {
+    const double f0 = 0.9 / cbrt(en);
+    if (f0 >= (ok ? FACACC : FACREJ) && f0 <= FACMAX && (ok || f0 <= 0.5)) dfe = -f0 / (3.0 * en);
+  }
   return fac;
 }
 
 // One attempt with acceptance and step control (the call kernel's loop body; DN: the recover kernel's); returns ok, en =
 // its error, c0 = its Sherman-Morrison factor (its stages and factors stay in place).
 template <bool DN> __device__ __forceinline__ bool fstep(double* S, double (&c)[NT], double* Wd, double& h, double& t,
-    double& nok, double dt, const double* kf, const double* kr, double nd, double rtol, double atol, double& en,
-    double& c0, const Tab& T, const unsigned* __restrict__ sst, const u64* __restrict__ jt,
+    double& nok, bool& prej, double& pen, double& pha, double dt, const double* kf, const double* kr, double nd,
+    double rtol, double atol, double& en, double& c0, const Tab& T, const unsigned* __restrict__ sst, const u64* __restrict__ jt,
     const u64* __restrict__ lu, const int* __restrict__ optr, const u16* __restrict__ didx, int sround, int jround,
     int lane, int myt)
 {
   double *N = S + A_NN, *Y = S + A_Y;
   const double ha = fmin(h, dt - t);
-  double dfde;
   bool ok;
   en = xattempt<DN>(S, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx, sround, jround, lane,
                     myt);
@@ -664,7 +686,10 @@ template <bool DN> __device__ __forceinline__ bool fstep(double* S, double (&c)[
     nok += 1.0;
   }
   __syncwarp();
-  h = ha * factor(en, ok, dfde);
+  h = ha * step_factor(en, ok, prej, pen, pha, ha);
+  prej = !ok;
+  pen = en;
+  pha = ha;
   return ok;
 }
 
@@ -863,6 +888,7 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
   double* Wd = DN ? wscr + wid * NS * NS : nullptr;
   if (lane == 0) kf[2 * NR] = 0.0;                            // the zero rate of the Jacobian's padding words
   double hd[DMAX], tdot[DMAX], dlnd[DMAX];                    // per direction: h, t, ln nd tangents (warp-uniform)
+  double pend[DMAX], phad[DMAX];                              // the previous attempt's error and size tangents
   const int nc = DN ? count[6] : B;
   int q = blockIdx.x * WPB + wib;
   while (q < nc) {
@@ -885,22 +911,27 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
       const double md = hi < dt ? dhi : (hi > dt ? ddt : 0.5 * (dhi + ddt));
       hd[d] = m > 1e-12 ? md : (m < 1e-12 ? 0.0 : 0.5 * md);
       tdot[d] = 0.0;
+      pend[d] = 0.0;
+      phad[d] = 0.0;
     }
     __syncwarp();
-    double h = fmax(m, 1e-12), t = 0.0, nok = 0.0;
+    double h = fmax(m, 1e-12), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
+    bool prej = false;
     int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;
     while (it < max_steps && t < dt * (1.0 - 1e-14)) {
       const double rem = dt - t, ha = fmin(h, rem);
-      double c0, dfde;
+      double c0, dfe, dfh, dfp, dfq;
       bool ok;
       const double en = xattempt<DN>(S, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx, sround,
                                      jround, lane, myt);
-      const double fac = factor(en, ok, dfde);
+      const double fac = factor(en, ok, prej, pen, pha, ha, dfe, dfh, dfp, dfq);
+      // the error's tangent where this factor depends on it, or the next attempt's secant may (a rejection, err > 1)
+      const bool wte = ok || (adapt && (dfe != 0.0 || (!ok && isfinite(en) && en > 1.0)));
       for (int d = 0; d < D; d++) {                           // each direction's tangent on the attempt in place
         const double ddt = adapt ? ddta[(size_t)d * B + cell] : 0.0;
         const double had = !adapt ? 0.0 : (h < rem ? hd[d] : (h > rem ? ddt - tdot[d] : 0.5 * (hd[d] + ddt - tdot[d])));
         double end = 0.0;
-        if (ok || (adapt && dfde != 0.0)) {
+        if (wte) {
           double* ng = Ng + d * NS;
           for (int i = lane; i < NS; i += 32) Nd[i] = ng[i];
           __syncwarp();
@@ -910,7 +941,9 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
           __syncwarp();
         }
         if (ok) tdot[d] += had;
-        hd[d] = adapt ? had * fac + ha * dfde * end : 0.0;
+        hd[d] = adapt ? had * fac + ha * (dfe * end + dfh * had + dfp * pend[d] + dfq * phad[d]) : 0.0;
+        pend[d] = end;
+        phad[d] = had;
       }
       if (ok) {
         for (int i = lane; i < NS; i += 32) N[i] = fmax(Y[i], 0.0);
@@ -919,6 +952,9 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
       }
       __syncwarp();
       h = ha * fac;
+      prej = !ok;
+      pen = en;
+      pha = ha;
       it++;
     }
     p = 0.0;
@@ -1277,9 +1313,10 @@ template <bool DN> __device__ __forceinline__ double sadj(double* S, const doubl
   return -(wsum(ihb) + 2.0 * wsum(ighb)) / (ha * ha);
 }
 
-__device__ __forceinline__ void save(double* rp, const double* N, double h, double t, int lane) {
+__device__ __forceinline__ void save(double* rp, const double* N, double h, double t, bool prej, double pen, double pha,
+                                     int lane) {
   for (int i = lane; i < NS; i += 32) rp[i] = N[i];
-  if (lane == 0) { rp[NS] = h; rp[NS + 1] = t; }
+  if (lane == 0) { rp[NS] = h; rp[NS + 1] = t; rp[NS + 3] = pen; rp[NS + 4] = pha; rp[NS + 5] = prej ? 1.0 : 0.0; }
 }
 
 #define VJP_ARGS                                                                                                   \
@@ -1339,15 +1376,16 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
     if (fin && !cold) rates(S, kf, kr, Tc, nd, lmc, rc, rf, nasa, T, lane);
     __syncwarp();
     const double hi = hin[cell], m0 = fmin(hi, dt), h0 = fmax(m0, 1e-12);
-    double h = h0, t = 0.0, nok = 0.0;
+    double h = h0, t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
+    bool prej = false;
     int na = 0;
     const bool run = dt > 0.0 && fin && !cold;
     double en_l = 0.0, c0_l = 0.0;                            // the last attempt run (its stages are in place)
     // forward: the state before each of the first CP attempts (and whether it was accepted)
     while (run && na < max_steps && t < dt * (1.0 - 1e-14)) {
-      if (na < CP) save(recA + na * REC, N, h, t, lane);
-      const bool ok = fstep<DN>(S, c, Wd, h, t, nok, dt, kf, kr, nd, rtol, atol, en_l, c0_l, T, sst, jt, lu, optr,
-                                didx, sround, jround, lane, myt);
+      if (na < CP) save(recA + na * REC, N, h, t, prej, pen, pha, lane);
+      const bool ok = fstep<DN>(S, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l, c0_l, T, sst, jt,
+                                lu, optr, didx, sround, jround, lane, myt);
       if (na < CP && lane == 0) recA[na * REC + NS + 2] = ok ? 1.0 : 0.0;
       na++;
     }
@@ -1379,15 +1417,16 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
     for (int r = lane; r < 2 * NR; r += 32) lbk[r] = 0.0;
     __syncwarp();
     double hb = (adapt && gh) ? gh[cell] : 0.0, tb = 0.0, dtb = 0.0, lbnd = 0.0;
+    double enc = 0.0, hac = 0.0;          // cotangents of the previous attempt's error and size from a secant factor
     const int st = na <= CP ? 1 : (na + CP - 1) / CP;         // attempts per stored segment
     if (st > 1) {                                             // checkpoints every st attempts
       for (int i = lane; i < NS; i += 32) N[i] = x0[(size_t)cell * NS + perm[i]];
       __syncwarp();
-      h = h0; t = 0.0; nok = 0.0;
+      h = h0; t = 0.0; nok = 0.0; prej = false; pen = 0.0; pha = 0.0;
       for (int j = 0; j < na; j++) {
-        if (j % st == 0) save(recA + (j / st) * REC, N, h, t, lane);
-        fstep<DN>(S, c, Wd, h, t, nok, dt, kf, kr, nd, rtol, atol, en_l, c0_l, T, sst, jt, lu, optr, didx, sround,
-                  jround, lane, myt);
+        if (j % st == 0) save(recA + (j / st) * REC, N, h, t, prej, pen, pha, lane);
+        fstep<DN>(S, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l, c0_l, T, sst, jt, lu, optr,
+                  didx, sround, jround, lane, myt);
       }
     }
     const int seg = st > 1 ? st : na;                         // attempts per reversed segment
@@ -1398,11 +1437,12 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
         __syncwarp();
         for (int i = lane; i < NS; i += 32) N[i] = recA[g * REC + i];
         h = recA[g * REC + NS]; t = recA[g * REC + NS + 1];
+        pen = recA[g * REC + NS + 3]; pha = recA[g * REC + NS + 4]; prej = recA[g * REC + NS + 5] != 0.0;
         __syncwarp();
         for (int j = j0; j < j1; j++) {
-          save(recB + (j - j0) * REC, N, h, t, lane);
-          const bool ok = fstep<DN>(S, c, Wd, h, t, nok, dt, kf, kr, nd, rtol, atol, en_l, c0_l, T, sst, jt, lu, optr,
-                                    didx, sround, jround, lane, myt);
+          save(recB + (j - j0) * REC, N, h, t, prej, pen, pha, lane);
+          const bool ok = fstep<DN>(S, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l, c0_l, T, sst,
+                                    jt, lu, optr, didx, sround, jround, lane, myt);
           if (lane == 0) recB[(j - j0) * REC + NS + 2] = ok ? 1.0 : 0.0;
         }
         rb = recB - j0 * REC;
@@ -1414,7 +1454,7 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
         for (int i = lane; i < NS; i += 32) N[i] = rp[i];
         const double hj = rp[NS], tj = rp[NS + 1], rem = dt - tj, ha = fmin(hj, rem);
         __syncwarp();
-        double c0 = c0_l, en = en_l, dfde;
+        double c0 = c0_l, en = en_l, dfe, dfh, dfp, dfq;
         bool ok = rp[NS + 2] != 0.0;
         if (j < j1 - 1)                                       // else the attempt just run, still in place
           en = xattempt<DN>(S, c, Wd, ha, tj == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx, sround, jround,
@@ -1423,9 +1463,11 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
           #pragma unroll
           for (int k = 0; k < NT; k++) M[TB0 + myt * NT + k] = c[k];
         }
-        const double fac = factor(en, ok, dfde);
-        double hab = adapt ? hb * fac : 0.0;
-        const double enb = adapt ? hb * ha * dfde : 0.0;
+        const double fac = factor(en, ok, rp[NS + 5] != 0.0, rp[NS + 3], rp[NS + 4], ha, dfe, dfh, dfp, dfq);
+        double hab = adapt ? hb * fac + hb * ha * dfh + hac : 0.0;
+        const double enb = adapt ? hb * ha * dfe + enc : 0.0;
+        enc = adapt ? hb * ha * dfp : 0.0;    // to the previous attempt (the next one reversed)
+        hac = adapt ? hb * ha * dfq : 0.0;
         for (int i = lane; i < NS; i += 32) {
           if (ok) { Yb[i] = Y[i] >= 0.0 ? Nb[i] : 0.0; Nb[i] = 0.0; }
           else Yb[i] = 0.0;
@@ -1638,8 +1680,8 @@ class ADSolver:
         self._nw = {k: self.max_blocks[k] * self.wpb[k] for k in ("jvp", "vjp")}
         self._scratch = torch.empty(self._nw["vjp"] * (12 * self.nr + 2), dtype=torch.float64, device=self.dev)
         self._jscr = self._scratch
-        self._rec = torch.empty(self._nw["vjp"] * 2 * cap * (self.ns + 3), dtype=torch.float64, device=self.dev)
-        self._rrec = torch.empty(self._nw["vjp"] * 2 * self.capr * (self.ns + 3), dtype=torch.float64, device=self.dev)
+        self._rec = torch.empty(self._nw["vjp"] * 2 * cap * (self.ns + 6), dtype=torch.float64, device=self.dev)
+        self._rrec = torch.empty(self._nw["vjp"] * 2 * self.capr * (self.ns + 6), dtype=torch.float64, device=self.dev)
         self._wscr = torch.empty(max(self._nw.values()) * self.ns ** 2, dtype=torch.float64, device=self.dev)
         self._st = [g(tab["sst"].ravel(), np.int32), g(tab["jt"].ravel(), np.int64), g(tab["lu"], np.int64),
                     g(tab["optr"])]
@@ -1693,7 +1735,7 @@ class ADSolver:
         return n
 
     def jvp(self, x, T, P, dt, h, dx, dT, dP, ddt, dh, lm=None, dlm=None, rc=None, drc=None, adapt=True, rtol=1e-3,
-            atol=1e-18, max_steps=4000):
+            atol=1e-16, max_steps=4000):
         """The call and its tangent: (x, h, done, accepted steps, dx, dh) for the tangents dx [B, S], dT, dP, ddt,
         dh [B], dlm [B, R] and drc [R, 9] (dlm, drc optional); with a leading axis of D <= DMAX directions on every
         tangent (dx [D, B, S], dT [D, B], ..., dlm [D, B, R], drc [D, R, 9]) the D tangents share one call and come
@@ -1732,7 +1774,7 @@ class ADSolver:
         self._finish(redo)
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
-    def vjp(self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=1e-18, max_steps=4000):
+    def vjp(self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=1e-16, max_steps=4000):
         """The call and the cotangents of its inputs for the cotangents gx [B, S] of x_out and gh [B] of h_out
         (optional): (x, h, done, accepted steps, dict x, T, P, dt, h, lm [B, R] (of each reaction's log multiplier),
         rc [R, 9])."""

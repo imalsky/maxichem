@@ -14,11 +14,17 @@ min(h, dt - t); with q_i = K_4,i / (atol + rtol max(|N_i|, |N'_i|)), err is the 
 while the call has no accepted step (t = 0), when it is max(RMS, max_i |q_i|), the worst species: the first try uses the
 step size carried from the last call, often the whole call, and the gas may have changed abruptly since, so one fast
 species' error must not hide in the mean over all species; a step is accepted when err <= 1, err is finite and no
-species is below -atol (rtol 1e-3, atol 1e-18 by default); accepted states are clamped at 0; the next step is
-0.9 err^(-1/3) times the last with the same err (so a first try rejected by its worst species shrinks by that species'
-error; 0.1 for a non-finite err; within [0.2, 5], at most 0.5 after a rejection); the call
-ends at t >= dt (1 - 1e-14) or after max_steps tries, and returns the mole fractions N / sum N, the next step size, done
-and the accepted steps. The exact Jacobian J = Jn + w 1^T (Jn = d(S v)/dn, w the constant-P term) enters through an LU
+species is below -atol (rtol 1e-3, atol 1e-16 by default; atol also sets the guard's clamping allowance); accepted
+states are clamped at 0. The next step is f times the last try's, f = 0.9 err^(-1/3) with the same err (so a first try
+rejected by its worst species shrinks by that species' error; 0.1 for a non-finite err), within [0.2, 20] after an
+accepted step or a rejected try, at most 0.5 after a rejection; a rejection that follows a rejection
+(both at the same state, both err > 1, the second try shorter) instead fits err ~ h^p to the two tries,
+p = ln(err_1 / err_2) / ln(h_1 / h_2), and aims at err 0.5: f = max((0.5 / err)^(1 / min(p, 3)), 1e-4), or 1e-4 when
+p <= 0.05 (after an abrupt change of the gas the error of a long try falls far more slowly than h^3, so the plain shrink
+takes many tries). A try after a rejection starts from the same state, so it reuses that try's f(N), Jn and w (a copy
+per cell in global memory) and redoes only the factorization and the stages. The call ends at t >= dt (1 - 1e-14) or
+after max_steps tries, and returns the mole fractions N / sum N, the next step size, done and the accepted steps. The
+exact Jacobian J = Jn + w 1^T (Jn = d(S v)/dn, w the constant-P term) enters through an LU
 factor without row exchanges of M0 = I / (gamma h) - Jn on its sparse pattern, in a minimum-degree order, and the
 Sherman-Morrison formula for the rank-one term.
 
@@ -46,7 +52,7 @@ Guard and recovery: after the call a small kernel checks every cell (new state f
 share of the atoms unchanged up to rounding (relative change at most drift) and what the clamping of accepted small
 negatives can add), counts the failures and lists the failed cells; a third kernel recomputes the listed cells from their inputs (x, T, P, dt and the
 starting h, which the call leaves unchanged), one cell per block of 32 W threads: the same rates, S v and Jacobian
-streams, Rodas3 stages, step control and tolerances, with W = I / (gamma h) - J formed densely (no Sherman-Morrison
+streams, Rodas3 stages, step control (with the reuse after a rejection) and tolerances, with W = I / (gamma h) - J formed densely (no Sherman-Morrison
 term; in shared memory when it fits, else in global memory) and factored by the cell's first warp with threshold partial
 pivoting (a row exchange only where the diagonal entry is below PIVTAU = 0.1 of the column's largest; plain partial
 pivoting loses the trace species' accuracy at the scale of atol), and REC_STEPS times the tries. It applies the guard's
@@ -331,6 +337,11 @@ _SRC = r"""
 #define RPD $rpd
 #define PERWR $perwr
 #define PIVTAU 0.1
+#define FACACC 0.2            // step factor (module docstring): at least FACACC after an accepted step, FACREJ after a
+#define FACREJ 0.2            // rejected try, at most FACMAX; the secant shrink at least SECMIN
+#define FACMAX 20.0
+#define SECMIN 1e-4
+#define RSN (2 * NS + NNZ)    // the copy of F, u and -Jn kept for the try after a rejection (doubles per cell)
 // column k of the sparse leading part has L entries in the leading rows (LPRE), L entries in the trailing rows
 // (LTAIL), U entries (UPRE); trailing column K0 + j has U entries in the leading rows (UTAIL(j)); VSA(q), VSB(q): the
 // widest forward and reverse side of round q of NL reactions
@@ -356,6 +367,20 @@ __device__ __forceinline__ double wmax(double v) {
   #pragma unroll
   for (int o = 16; o > 0; o >>= 1) v = fmax(v, __shfl_xor_sync(FULL, v, o));
   return v;
+}
+
+// Step-size factor after a try of size ha with err en, accepted or not (ok); prej, pen, pha: the call's previous try was
+// rejected, its err, its size (module docstring).
+__device__ __forceinline__ double step_factor(double en, bool ok, bool prej, double pen, double pha, double ha) {
+  const bool efin = isfinite(en);
+  double fac = efin ? 0.9 / cbrt(fmax(en, 1e-10)) : 0.1;
+  fac = fmin(fmax(fac, ok ? FACACC : FACREJ), FACMAX);
+  if (!ok && efin && prej && en > 1.0 && pen > 1.0 && pha > ha) {   // secant: err ~ h^pe through the two tries
+    const double pe = log(pen / en) / log(pha / ha);
+    fac = pe > 0.05 ? fmax(pow(0.5 / en, 1.0 / fmin(pe, 3.0)), SECMIN) : SECMIN;
+  }
+  if (!ok) fac = fmin(fac, 0.5);
+  return fac;
 }
 
 // Rate coefficient of the law in row q (_law) at T, ln T, 1 / T, n_tot; three-body n_tot excluded.
@@ -520,8 +545,9 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
   double *v = M + VOFF, *part = v + NR;       // in the trailing block's slots while that block is in registers if
                                               // they fit there (VOFF = TB0), else after the other arrays
   int* nextc = (int*)(K4 + NS);
-  double* kf = scratch + (size_t)(blockIdx.x * CPB + grp) * (2 * NR + 2);
+  double* kf = scratch + (size_t)(blockIdx.x * CPB + grp) * (2 * NR + 2 + RSN);   // per cell slot: rates, the copy
   double* kr = kf + NR;
+  double* rsc = kf + 2 * NR + 2;              // F, u, -Jn of the last fresh evaluation (a retry at the same state)
   if (cl == 0) kf[2 * NR] = 0.0;              // the zero rate of the Jacobian's padding words
   int cell = blockIdx.x * CPB + grp;
   while (cell < B) {
@@ -557,54 +583,64 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
       }
     }
     CSYNC(grp);
-    double h = fmax(fmin(hio[cell], dt), 1e-12), t = 0.0, nok = 0.0;
+    double h = fmax(fmin(hio[cell], dt), 1e-12), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
+    bool prej = false;                          // the last try was rejected (its err pen, its size pha)
     int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;   // no step for non-finite inputs or cold gas
     while (it < max_steps && t < dt * (1.0 - 1e-14)) {
       const double ha = fmin(h, dt - t), igh = 1.0 / (0.5 * ha), ih = 1.0 / ha;
-      const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, T, sst, sround, lane, cl, grp);
-      for (int s = cl; s < NNZ; s += NL) M[s] = 0.0;
-      CSYNC(grp);
-      {   // M = -Jn: lane streams of 32-bit terms (rate index, sign, x2, species a, b, end of slot); slots from jsl
-        const unsigned* jw = (const unsigned*)jt;
-        const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
-        double acc = 0.0;
-        int ne = 0;
-        #pragma unroll 4
-        for (int q = 0; q < jround; q++) {
-          const unsigned w = __ldg(jw + q * NL + cl);   // kr = kf + NR
-          const double pr = kf[w & ${j_km}u] * n[(w >> $j_a) & ${j_sm}u] * n[(w >> $j_b) & ${j_sm}u];
-          const double cf = ((w >> $j_x2) & 1u) ? (((w >> $j_sg) & 1u) ? -2.0 : 2.0)
-                                                : (((w >> $j_sg) & 1u) ? -1.0 : 1.0);
-          acc = fma(cf, pr, acc);
+      if (prej) {                               // the rejected try's state: its F, u and -Jn (all slots: v and the
+        for (int i = cl; i < NS; i += NL) { F[i] = rsc[i]; u[i] = rsc[NS + i]; }   // S v pieces overwrite the
+        for (int s = cl; s < NNZ; s += NL) M[s] = rsc[2 * NS + s];                // trailing block's slots)
+      } else {
+        const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, T, sst, sround, lane, cl, grp);
+        for (int s = cl; s < NNZ; s += NL) M[s] = 0.0;
+        CSYNC(grp);
+        {   // M = -Jn: lane streams of 32-bit terms (rate index, sign, x2, species a, b, end of slot); slots from jsl
+          const unsigned* jw = (const unsigned*)jt;
+          const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
+          double acc = 0.0;
+          int ne = 0;
+          #pragma unroll 4
+          for (int q = 0; q < jround; q++) {
+            const unsigned w = __ldg(jw + q * NL + cl);   // kr = kf + NR
+            const double pr = kf[w & ${j_km}u] * n[(w >> $j_a) & ${j_sm}u] * n[(w >> $j_b) & ${j_sm}u];
+            const double cf = ((w >> $j_x2) & 1u) ? (((w >> $j_sg) & 1u) ? -2.0 : 2.0)
+                                                  : (((w >> $j_sg) & 1u) ? -1.0 : 1.0);
+            acc = fma(cf, pr, acc);
 #if NFIX
-          if ((w >> $j_end) & 1u) {
-            const unsigned d = __ldg(jsl + ne);
-            if (d < NNZ) M[d] = -acc; else Y[d - NNZ] = -acc;
-            acc = 0.0;
-            ne++;
-          }
+            if ((w >> $j_end) & 1u) {
+              const unsigned d = __ldg(jsl + ne);
+              if (d < NNZ) M[d] = -acc; else Y[d - NNZ] = -acc;
+              acc = 0.0;
+              ne++;
+            }
 #else
-          if ((w >> $j_end) & 1u) { M[__ldg(jsl + ne)] = -acc; acc = 0.0; ne++; }
+            if ((w >> $j_end) & 1u) { M[__ldg(jsl + ne)] = -acc; acc = 0.0; ne++; }
 #endif
+          }
         }
-      }
-      CSYNC(grp);
+        CSYNC(grp);
 #if NFIX
-      if (cl == 0) {                            // the extra pieces of long slots, in order
-        const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
-        for (int e = 0; e < NFIX; e++) M[__ldg(fx + e)] += Y[e];
+        if (cl == 0) {                          // the extra pieces of long slots, in order
+          const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
+          for (int e = 0; e < NFIX; e++) M[__ldg(fx + e)] += Y[e];
+        }
+        CSYNC(grp);
+#endif
+        for (int i = cl; i < NS; i += NL) {   // u = w = S v / nd - Jn x
+          double acc = 0.0;
+          const int s1 = T.rowptr[i + 1];
+          for (int s = T.rowptr[i]; s < s1; s++) acc += M[s] * N[T.colof[s]];
+          if (i >= K0)
+            for (int j = 0; j < NT; j++) acc += M[TB0 + (i - K0) * NT + j] * N[K0 + j];
+          u[i] = u[i] + acc / ntot;
+        }
+        CSYNC(grp);
+        for (int i = cl; i < NS; i += NL) { rsc[i] = F[i]; rsc[NS + i] = u[i]; }
+        for (int s = cl; s < NNZ; s += NL) rsc[2 * NS + s] = M[s];
       }
       CSYNC(grp);
-#endif
-      for (int i = cl; i < NS; i += NL) {     // u = w = S v / nd - Jn x; M = M0 = I / (gamma h) - Jn
-        double acc = 0.0;
-        const int s1 = T.rowptr[i + 1];
-        for (int s = T.rowptr[i]; s < s1; s++) acc += M[s] * N[T.colof[s]];
-        if (i >= K0)
-          for (int j = 0; j < NT; j++) acc += M[TB0 + (i - K0) * NT + j] * N[K0 + j];
-        u[i] = u[i] + acc / ntot;
-        M[T.diag[i]] += igh;
-      }
+      for (int i = cl; i < NS; i += NL) M[T.diag[i]] += igh;   // M = M0 = I / (gamma h) - Jn
       CSYNC(grp);
       for (int k = 0; k < K0; k++) {           // LU of the sparse leading columns (updates reach the trailing block)
         const int len = T.blen[k];
@@ -735,10 +771,10 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
         nok += 1.0;
       }
       CSYNC(grp);
-      double fac = efin ? 0.9 / cbrt(fmax(en, 1e-10)) : 0.1;
-      fac = fmin(fmax(fac, 0.2), 5.0);
-      if (!ok) fac = fmin(fac, 0.5);
-      h = ha * fac;
+      h = ha * step_factor(en, ok, prej, pen, pha, ha);
+      prej = !ok;
+      pen = en;
+      pha = ha;
       it++;
     }
     p = 0.0;
@@ -896,9 +932,10 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
   T.smap = (const u16*)(tb + O_SMAP); T.rowptr = (const u16*)(tb + O_ROWPTR); T.diag = (const u16*)(tb + O_DIAG);
   T.colof = tb + O_COLOF; T.rx = tb + O_RX; T.xp = tb + O_XP; T.blen = tb + O_BLEN;
   const int cl = threadIdx.x, lane = cl & 31;
-  double* kf = scratch + (size_t)blockIdx.x * (2 * NR + 2 + (WSH ? 0 : NS * NS));
+  double* kf = scratch + (size_t)blockIdx.x * (2 * NR + 2 + (WSH ? 0 : NS * NS) + RSN);
   double* kr = kf + NR;
   double* Wd = WSH ? smem : kf + 2 * NR + 2;   // the dense matrix W
+  double* rsc = kf + 2 * NR + 2 + (WSH ? 0 : NS * NS);   // F, u, -Jn's slots of the last fresh evaluation
   double *dinv = smem + (WSH ? NS * NS : 0), *n = dinv + NS, *v = n + NS + 1, *N = v + VR, *Y = N + NS, *F = Y + NS,
          *u = F + NS, *K1 = u + NS, *K2 = K1 + NS, *K3 = K2 + NS, *K4 = K3 + NS, *part = K4 + NS;
   int* pr = (int*)(part + NPART);
@@ -939,46 +976,57 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
       }
     }
     CSYNC(0);
-    double h = fmax(fmin(hin[cell], dt), 1e-12), t = 0.0, nok = 0.0;
+    double h = fmax(fmin(hin[cell], dt), 1e-12), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
+    bool prej = false;
     int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;
     while (it < max_steps && t < dt * (1.0 - 1e-14)) {
       const double ha = fmin(h, dt - t), igh = 1.0 / (0.5 * ha), ih = 1.0 / ha;
-      const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, T, sst, sround, lane, cl, 0);
-      for (int s = cl; s < NS * NS; s += NL) Wd[s] = 0.0;
-      CSYNC(0);
-      {   // W = -Jn: the call kernel's term streams, written to the dense positions of the slots
-        const unsigned* jw = (const unsigned*)jt;
-        const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
-        double acc = 0.0;
-        int ne = 0;
-        #pragma unroll 4
-        for (int qq = 0; qq < jround; qq++) {
-          const unsigned w = __ldg(jw + qq * NL + cl);
-          const double pq = kf[w & ${j_km}u] * n[(w >> $j_a) & ${j_sm}u] * n[(w >> $j_b) & ${j_sm}u];
-          const double cf = ((w >> $j_x2) & 1u) ? (((w >> $j_sg) & 1u) ? -2.0 : 2.0)
-                                                : (((w >> $j_sg) & 1u) ? -1.0 : 1.0);
-          acc = fma(cf, pq, acc);
-          if ((w >> $j_end) & 1u) {
-            const unsigned d = __ldg(jsl + ne);
-            if (d < NNZ) Wd[__ldg(didx + d)] = -acc; else Y[d - NNZ] = -acc;
-            acc = 0.0;
-            ne++;
+      if (prej) {                               // the rejected try's state: its F, u and -Jn (every write of the
+        for (int s = cl; s < NS * NS; s += NL) Wd[s] = 0.0;           // Jacobian goes to a slot's dense position)
+        for (int i = cl; i < NS; i += NL) { F[i] = rsc[i]; u[i] = rsc[NS + i]; }
+        CSYNC(0);
+        for (int s = cl; s < NNZ; s += NL) Wd[__ldg(didx + s)] = rsc[2 * NS + s];
+      } else {
+        const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, T, sst, sround, lane, cl, 0);
+        for (int s = cl; s < NS * NS; s += NL) Wd[s] = 0.0;
+        CSYNC(0);
+        {   // W = -Jn: the call kernel's term streams, written to the dense positions of the slots
+          const unsigned* jw = (const unsigned*)jt;
+          const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
+          double acc = 0.0;
+          int ne = 0;
+          #pragma unroll 4
+          for (int qq = 0; qq < jround; qq++) {
+            const unsigned w = __ldg(jw + qq * NL + cl);
+            const double pq = kf[w & ${j_km}u] * n[(w >> $j_a) & ${j_sm}u] * n[(w >> $j_b) & ${j_sm}u];
+            const double cf = ((w >> $j_x2) & 1u) ? (((w >> $j_sg) & 1u) ? -2.0 : 2.0)
+                                                  : (((w >> $j_sg) & 1u) ? -1.0 : 1.0);
+            acc = fma(cf, pq, acc);
+            if ((w >> $j_end) & 1u) {
+              const unsigned d = __ldg(jsl + ne);
+              if (d < NNZ) Wd[__ldg(didx + d)] = -acc; else Y[d - NNZ] = -acc;
+              acc = 0.0;
+              ne++;
+            }
           }
         }
-      }
-      CSYNC(0);
+        CSYNC(0);
 #if NFIX
-      if (cl == 0) {                            // the extra pieces of long slots, in order
-        const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
-        for (int e = 0; e < NFIX; e++) Wd[__ldg(didx + __ldg(fx + e))] += Y[e];
-      }
-      CSYNC(0);
+        if (cl == 0) {                          // the extra pieces of long slots, in order
+          const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
+          for (int e = 0; e < NFIX; e++) Wd[__ldg(didx + __ldg(fx + e))] += Y[e];
+        }
+        CSYNC(0);
 #endif
-      for (int i = cl; i < NS; i += NL) {       // u = w = S v / nd - Jn x (the call kernel's sums, columns in order)
-        double acc = 0.0;
-        for (int j = 0; j < NS; j++)
-          if (T.smap[i * NS + j] != 0xFFFFu) acc += Wd[i * NS + j] * N[j];
-        u[i] = u[i] + acc / ntot;
+        for (int i = cl; i < NS; i += NL) {     // u = w = S v / nd - Jn x (the call kernel's sums, columns in order)
+          double acc = 0.0;
+          for (int j = 0; j < NS; j++)
+            if (T.smap[i * NS + j] != 0xFFFFu) acc += Wd[i * NS + j] * N[j];
+          u[i] = u[i] + acc / ntot;
+        }
+        CSYNC(0);
+        for (int i = cl; i < NS; i += NL) { rsc[i] = F[i]; rsc[NS + i] = u[i]; }
+        for (int s = cl; s < NNZ; s += NL) rsc[2 * NS + s] = Wd[__ldg(didx + s)];
       }
       CSYNC(0);
       for (int s = cl; s < NS * NS; s += NL) {  // W = I / (gamma h) - Jn - w 1^T
@@ -1034,10 +1082,10 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
         nok += 1.0;
       }
       CSYNC(0);
-      double fac = efin ? 0.9 / cbrt(fmax(en, 1e-10)) : 0.1;
-      fac = fmin(fmax(fac, 0.2), 5.0);
-      if (!ok) fac = fmin(fac, 0.5);
-      h = ha * fac;
+      h = ha * step_factor(en, ok, prej, pen, pha, ha);
+      prej = !ok;
+      pen = en;
+      pha = ha;
       it++;
     }
     p = 0.0;
@@ -1246,8 +1294,10 @@ class CudaSolver:
     any cell was below T_MIN; info: the kernel's layout (sizes, warps per cell, leading / trailing split, registers and
     local bytes per thread, cells and warps per block, shared memory per block, resident cells per SM; the recover
     kernel's shared memory, W in shared memory or not, resident blocks; small: batches of 2 up to this size (the SMs)
-    run one cell per block). drift: the network's element-drift allowance (module docstring; default DRIFT). Calls run
-    one at a time on torch's current stream (the queues, the counts and the scratch are shared)."""
+    run one cell per block). stride, stride_rec: the global scratch in doubles per cell slot of the call kernel and per
+    block of the recover kernel (rates, the copy for a retry, the recover kernel's W when not in shared memory). drift:
+    the network's element-drift allowance (module docstring; default DRIFT). Calls run one at a time on torch's current
+    stream (the queues, the counts and the scratch are shared)."""
 
     def __init__(self, net, device, drift=None):
         self.dev = torch.device(device)
@@ -1305,6 +1355,10 @@ class CudaSolver:
             o = ctypes.c_int()
             _check(cu.cuOccupancyMaxActiveBlocksPerMultiprocessor(ctypes.byref(o), one[1], nl, self.smem1), "occupancy")
             self.small, self._one_blocks = prop.multi_processor_count, prop.multi_processor_count * o.value
+        # global scratch (doubles): per cell slot of the call kernel the rates and the copy for a retry (RSN), per
+        # block of the recover kernel the same and W when it is not in shared memory
+        rsn = 2 * self.ns + tab["nnz"]
+        self.stride, self.stride_rec = 2 * self.nr + 2 + rsn, 2 * self.nr + 2 + rsn + (0 if wsh else self.ns ** 2)
         self.info = dict(ns=self.ns, nr=self.nr, nnz=tab["nnz"], k0=tab["k0"], nt=self.ns - tab["k0"], w=self.w,
                          sround=tab["sst"].shape[0], jround=tab["jround"], lu_ops=len(tab["lu"]), alias=_alias(tab),
                          regs=_attr(self._fn, 4), spill_bytes=_attr(self._fn, 3), cpb=self.cpb, wpb=self.wpb,
@@ -1313,17 +1367,16 @@ class CudaSolver:
         f = lambda a, view=None: torch.tensor(a if view is None else np.asarray(a).view(view), device=self.dev)
         self._tabs = [f(tab["perm"]), f(np.frombuffer(blob, np.int32).copy()), f(tab["rc"]), f(tab["rf"]),
                       f(tab["nasa"])]
-        self._scratch = torch.empty(max(self.max_blocks * self.cpb, self._one_blocks) * (2 * self.nr + 2),
+        self._scratch = torch.empty(max(self.max_blocks * self.cpb, self._one_blocks) * self.stride,
                                     dtype=torch.float64, device=self.dev)
-        self._scratch_rec = torch.empty(self.rec_blocks * (2 * self.nr + 2 + (0 if wsh else self.ns ** 2)),
-                                        dtype=torch.float64, device=self.dev)
+        self._scratch_rec = torch.empty(self.rec_blocks * self.stride_rec, dtype=torch.float64, device=self.dev)
         self._streams = [f(tab["sst"].ravel(), np.int32), f(tab["jt"], np.int64), f(tab["lu"], np.int64),
                          f(tab["optr"]), ctypes.c_int(tab["sst"].shape[0]), ctypes.c_int(tab["jround"])]
         self._didx, self._atoms = f(tab["didx"], np.int16), f(tab["atoms"])
         self.count = torch.zeros(10, dtype=torch.int32, device=self.dev)
         self.total = torch.zeros(10, dtype=torch.int64, device=self.dev)
 
-    def launch(self, x, T, P, dt, h, rtol=1e-3, atol=1e-18, max_steps=4000):
+    def launch(self, x, T, P, dt, h, rtol=1e-3, atol=1e-16, max_steps=4000):
         """The kernel, its checks and the recovery, no host sync: (x, h, done, accepted steps, flag) per cell, flag 0
         (the call's result passed the guard), 1 (recomputed, passes) or 2 (recomputed, still fails); the counts in
         self.count. Batches of 2 to self.small cells (the SMs) run one cell per block (the same results)."""
@@ -1351,7 +1404,7 @@ class CudaSolver:
                  self._atoms, *self._streams[4:]])
         return xo, ho, done.bool(), nok, redo
 
-    def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=1e-18, max_steps=4000):
+    def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=1e-16, max_steps=4000):
         """The call: (x, h, done, accepted steps), no host sync; the counts added to self.total on the stream."""
         xo, ho, done, nok, _ = self.launch(x, T, P, dt, h, rtol, atol, max_steps)
         self.total += self.count
