@@ -1668,20 +1668,35 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   0 misses, worst 0.013 dex; panel P stable. Day-night 64,000 states, 0 misses, worst 0.0030 dex. Sulfur boxes:
   dark 0 misses (worst 0.034 dex); lit 29 of 4,095 boxes with a miss (159 states, 127 large; worst 6.86 dex), all at
   354-750 K, mostly S2 and COS; guard 8 recomputed of 385,000, 7 recovered, 1 still failed.
-- The sulfur misses (logs/sulfur_misses3.log; Radau of the generator, rtol 1e-10, atol 1e-30, on 27 of the 29 boxes;
-  2 still running at the time of writing): VULCAN-0D is off from Radau by 0.56-6.86 dex in 19 of the 27; maxichem is
-  off from Radau by more than 0.1 dex in 17 of them (up to 5.5 dex; 0.12-5.5 in the 8 where VULCAN is right). On
-  maxichem's side (box 5932, 519 K, 5.2 bar; logs/sulfur_box5932.log): COS and S2 (about 1e-18 and 1e-24 at 1.1e4 s)
-  are exactly 0 in maxichem's output from 3e5 s on and stay 0, while in Radau COS grows to 3.4e-5 and S2 to 8.7e-10 by
+- The sulfur misses, and absolute tolerances (logs/ of the overnight folder and truth-gen/logs/). Radau of the
+  generator (rtol 1e-10, atol 1e-30, on VULCAN-0D's chemistry functions: it checks VULCAN's integration, not its
+  chemistry) on all 29 miss boxes (sulfur_misses4.log): VULCAN-0D is off from Radau by 0.56-6.86 dex in 19; maxichem
+  is off by more than 0.1 dex in 19 (up to 5.5 dex).
+  VULCAN's side (vulcan_rtol5e-5.log, vulcan_atol1e-10.log): its absolute tolerance on number densities (default
+  1e-2 cm^-3, a mole fraction near 1e-16 at 1e-5 bar) drops the trace sulfur species from its error control; rtol
+  5e-5 changes nothing (153 steps over 1e8 s); atol 1e-10 cm^-3 brings all 27 checked boxes within 0.004 dex of
+  Radau.
+  maxichem's side (box 5932, 519 K, 5.2 bar; sulfur_box5932.log): COS and S2 (about 1e-18 and 1e-24 at 1.1e4 s) are
+  exactly 0 in maxichem's output from 3e5 s on and stay 0, while in Radau COS grows to 3.4e-5 and S2 to 8.7e-10 by
   1e8 s; atol 1e-20 or 1e-25 removes it, rtol 1e-6 with atol 1e-16 does not (the step that zeroes them, presumably an
   accepted value above -atol clamped to 0, was not observed). With atol 1e-20 maxichem is within 0.013 dex of Radau on
-  all 27 boxes (16 gases, at the stored states, max_steps 2e5 in this diagnostic). These are selected boxes, not a
-  survey; Radau runs on the generator's chemistry functions, so it checks VULCAN's integration, not its chemistry. atol 1e-20 elsewhere: NCHO boxes 0 misses, worst 0.069 dex, steps per call
-  3.0 -> 3.8 on the 0-1e8 s chains; sulfur boxes against VULCAN 54 boxes with a miss (VULCAN's own errors show more).
-  Speed (1,382,400 cells, 70-s calls, idle GPU): NCHO_photo 0.346 / 0.349 us dark / lit at atol 1e-16, 0.349 / 0.350
-  at 1e-20; SNCHO_photo on sulfur gas from the truth boxes 0.636 / 0.636 and 0.646 / 0.637. For the author: atol
-  1e-20 as the default (a numerics change: references and checks to redo) and a tighter sulfur truth (VULCAN at a
-  smaller rtol, or Radau) before the sulfur network can be certified.
+  all 29 boxes (16 gases, at the stored states, max_steps 2e5 in this diagnostic).
+  A wider survey: a regeneration of the whole sulfur set with VULCAN atol 1e-10 was stopped after 62 min with no
+  worker done (a dark 417 K box takes more than 490 s at that atol); then the 1,745 lit boxes below 800 K
+  (data/truth_v2/boxes_sncho_atol; stopped after 76 min with 26 of 34 workers done): 1,251 accepted, 81 at the
+  2e6-step cap, 3 forced. maxichem against them (boxes_sncho_atolset_m*.log): atol 1e-16 67 boxes with a miss (48
+  large, worst 6.70 dex, 3.8 steps per call), 1e-20 26 (19, 7.26 dex, 4.8), 1e-25 8 (7, 7.26 dex, 6.0). Radau of the 8
+  worst at 1e-20 (sulfur_vs_radau_atolset.log, the 36 boxes of the set with a Radau solve): maxichem at atol 1e-25
+  within 0.023 dex of Radau on all 36; at 1e-20 eight are off (3.6-6.7 dex); the small-atol VULCAN agrees with Radau
+  within 0.007 dex on 35 and is off by 7.26 dex on box 4991 (1e-5 bar: atol 1e-10 cm^-3 is still a mole fraction near
+  7e-25 there).
+  Cost of a smaller maxichem atol: NCHO boxes stay at 0 misses (worst 0.069 dex at 1e-20, 0.066 at 1e-25) with 3.8 and
+  4.7 steps per call instead of 3.0 on the 0-1e8 s chains; speed (1,382,400 cells, 70-s calls, idle GPU, us per
+  cell-call dark / lit): NCHO_photo 0.346 / 0.349 at 1e-16, 0.349 / 0.350 at 1e-20, 0.354 / 0.349 at 1e-25;
+  SNCHO_photo on sulfur gas from the truth boxes 0.636 / 0.636, 0.646 / 0.637, 0.658 / 0.635.
+  For the author: maxichem's default atol (1e-25 is what lit cool sulfur gas needs; a numerics change: references and
+  checks to redo), and the generator's VULCAN atol (smaller than 1e-10 cm^-3 at low pressure; its cost on cold dark
+  boxes is the open question) before the sulfur network can be certified.
 - Derivative kernels extended (the author's decision 1): photolysis (kf = J exp(lm); tangents and cotangents in J
   itself, so they hold at J = 0); the Troe factor's derivatives (standard and vm11 widths); the collision limit's
   (weights from the pair before the limit: wA = 1 above, 1/2 at the limit; wG = wA times the reverse direction's share
@@ -1696,8 +1711,10 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   class incl. lm != 0, p90 <= 1e-4 with plateau coverage >= 90 %; J at 0 by one-sided Richardson differences; JVP / VJP
   dot products, p99 <= 1e-6 (lm 1e-4), max <= 1e-3; recovered cells; determinism): NCHO_photo 99 of 99, CHO_photo 99 of
   99, SNCHO_photo 97 of 99 (the J tangent on box starts at dt 500 s: p90 2.5e-4 and 3.7e-4 against the 1e-4 bar; p99
-  3e-3). Not done: the JAX layer (refuses until ported), an independent torch-autograd reference for these networks,
-  tests/kincuda_ad_check.py (written for the old 53-species network and refdata3).
+  3e-3). Not done: the JAX layer (refuses until ported; plan with the review's corrections in
+  experiments/2026-11-03_ad/plan_jax.md, estimated at 2-4 working days), an independent torch-autograd reference for
+  these networks (the old one replays the old step control), tests/kincuda_ad_check.py (written for the old 53-species
+  network and refdata3).
 - Reduced tracers removed (the author's decision 2): kintracer.py, the designs, its check and gate (code at 399a347).
   Its method, designs, failed designs, memory and speed costs stay in this file (2026-10-30 to 11-02 entries). A simple
   abundance rule for tracer designs fails (2026-11-03_tracer-rule/): on QT2's 1,056 mixing paths (old network) 30

@@ -28,7 +28,8 @@ network and run over many cells at once.
 
 Any VULCAN-format network up to 254 species can be read, with these rate laws: one or two Arrhenius terms, falloff,
 the Troe factor, efficiencies and explicit reverse laws; at most 3 species on a side. All 11 networks of VULCAN-JAX
-load and run. In a short test (4,096 cells, 21 calls) no cell failed and the element shares moved by at most 4e-11:
+load and run. In a short test of loading and running (4,096 cells from NCHO states, one long dark call, then 20 calls
+with J) no cell failed and the element shares moved by at most 4e-11 over the 20 calls; this is not an accuracy test:
 
 | Network | Species | Thermal reactions | Photolysis branches | Notes |
 | --- | --- | --- | --- | --- |
@@ -121,14 +122,20 @@ Results on the truth data of 2026-11-03 (rtol 1e-3, atol 1e-16, the defaults):
 The guard recomputed 4 of the 6.2 million NCHO box cell-calls (all recovered) and 8 of the 385,000 sulfur ones (7
 recovered, 1 still failed, counted).
 
-The sulfur misses are all in lit boxes at 354-750 K, mostly in S2 and COS. For 27 of the 29 boxes we also solved the
-box with Radau (rtol 1e-10, on the same chemistry as VULCAN-0D). There are two effects. VULCAN-0D itself is off from
-Radau by 0.6-6.9 dex in 19 of the 27 boxes. maxichem is off from Radau by more than 0.1 dex in 17 of them (up to 5.5
-dex). In the box studied in detail, sulfur species near 1e-18 reach exactly zero in maxichem and stay there, while in
-Radau COS grows to about 3e-5; a smaller absolute tolerance removes this. With atol 1e-20, maxichem is within 0.013
-dex of Radau on all 27 boxes (16 gases, at the stored states). These are selected boxes, not a survey; a tighter
-sulfur reference is needed before the sulfur network can be certified, and atol 1e-20 is not yet the default (it is an
-argument of the call).
+The sulfur misses are all in lit boxes at 354-750 K, mostly in S2 and COS. We also solved these 29 boxes with Radau
+(rtol 1e-10, on the same chemistry as VULCAN-0D). Both codes have an absolute-tolerance problem there. VULCAN-0D is off
+from Radau by 0.6-6.9 dex in 19 boxes: its default atol (1e-2 molecules cm^-3, a mole fraction near 1e-16 at 1e-5 bar)
+ignores the trace sulfur species whose growth sets S2 and COS; with atol 1e-10 VULCAN is within 0.004 dex of Radau
+(27 boxes checked). maxichem is off from Radau by more than 0.1 dex in 19 boxes (up to 5.5 dex): in the box studied in
+detail, sulfur species near 1e-18 reach exactly zero and stay there, while in Radau COS grows to about 3e-5. With atol
+1e-20, maxichem is within 0.013 dex of Radau on all 29 boxes (16 gases, at the stored states). These are selected
+boxes. A first survey with the smaller VULCAN atol (1,251 of the 1,745 lit sulfur boxes below 800 K; the rest of
+the run was stopped for time) gives maxichem misses in 67 boxes at atol 1e-16, 26 at 1e-20 and 8 at 1e-25. Radau of
+the 36 of these boxes that have one: maxichem at atol 1e-25 is within 0.023 dex of Radau on all 36 (at 1e-20 eight
+are still off, up to 6.7 dex), and the small-atol VULCAN is off in one (7.3 dex, at 1e-5 bar). So lit cool sulfur gas
+needs atol near 1e-25 in maxichem and an even smaller one in VULCAN at the lowest pressures. On NCHO, atol 1e-25 keeps
+0 misses on the 131,072 boxes (worst 0.066 dex) with 4.7 steps per call instead of 3.0 on the 0-1e8 s chains. The
+sulfur network is not certified yet; atol is an argument of the call (default 1e-16).
 
 ## Speed
 
@@ -142,6 +149,7 @@ boxes' J, so half of the cells are lit:
 | NCHO_photo with atol 1e-20, dark / lit | 69 | 0.349 / 0.350 |
 | SNCHO_photo, dark / lit (sulfur gas from the truth boxes) | 88 | 0.636 / 0.636 |
 | SNCHO_photo with atol 1e-20, dark / lit | 88 | 0.646 / 0.637 |
+| NCHO_photo / SNCHO_photo with atol 1e-25, dark / lit | 69 / 88 | 0.354 / 0.349, 0.658 / 0.635 |
 
 Gas that is mixed far from its last state before every call needs more steps. On such test beds (measured on
 2026-11-01 with the older 53-species network) a call took 2.2-2.3 us per cell-call.
