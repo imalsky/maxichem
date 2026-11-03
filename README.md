@@ -104,8 +104,9 @@ first seven, 1e-8 for H, OH, O, 1e-6 for H2 and N2). The target domain is 1e-5 t
 0.1 to 300 times solar, C/O 0.1 to 1, with time steps of 1 to 500 s.
 
 - All species: no misses on the development's VULCAN-0D test sets, the two largest of which hold 13.5 million and
-  6.26 million scored states (worst error 0.033 dex on the latter; measured with the earlier step rule), except one
-  start of the 395,114-row yardstick: a 300 K gas far from equilibrium, CH4 0.67 dex off in its first call (17 rows).
+  6.26 million scored states (worst error 0.033 dex on the latter; measured with the earlier step rule); on the
+  395,114 rows of mini-chem's yardstick none, worst 0.035 dex (one start's VULCAN run, atomic hydrogen at 300 K, was
+  redone with a shorter first step: VULCAN's default first step had frozen a CH4 error of 0.66 dex into it).
 - G31: no path with a miss on the main test domain (worst error 0.094 dex); in 1000-day runs (with the earlier step
   rule) it stays within 0.002 dex of the all-species call. Known weak spots: carbon-rich gas (C/O 1 to 2) that keeps
   mixing (up to 1.26 dex), and a few cells at 300 times solar metallicity at 0.33 dex in the first calls after an
@@ -139,7 +140,7 @@ The checks and benches read stored references and VULCAN-0D truth sets that are 
     benches/kincuda/libref3.npz        reference outputs and rate coefficients of the torch reference solver
     benches/kincuda_ad/refdata3.npz    reference derivatives (torch autograd)
     benches/kintracer/ref4.npz         reference outputs of the reduced-tracer call
-    benches/kintest/quick_ref3.npz     a saved quick run of bench/kintest.py
+    benches/kintest/quick_ref4.npz     a saved quick run of bench/kintest.py
     truth/qual/                        VULCAN-0D truth paths (QC, QCs, QL, QLc, QH, QHs, twins)
 
 Each check stops with a message naming the missing files when they are absent. The stored references are tied to the

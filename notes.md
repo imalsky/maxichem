@@ -1484,8 +1484,23 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   solution (worst of 12 gases). Cause: VULCAN's first step is far too long for the first femtoseconds of the H
   recombination at 35 bar; its error estimate skips species whose new value is <= 0 and its clip sets small negatives
   to 0 (CH4 is 0 at its first output, 1e-14 s); the wrong CH4 then freezes at 300 K. The 17 rows are a reference error:
-  against the corrected VULCAN run maxichem is within 0.008 dex, so the yardstick has no maxichem miss. The stored
-  reference is unchanged (the author's call); the same default first step was used for every VULCAN truth set.
+  against the corrected VULCAN run maxichem is within 0.008 dex, so the yardstick has no maxichem miss.
+- Reference corrected (author's go, 11-02 evening; V): VULCAN rerun of panel job 865 with its stored settings and only
+  the first step changed (dttry 1e-18 s, dt_min 1e-20 s; 3,848 steps, end_case 2, to 1.01e8 s); the design's truth
+  formula reproduces the stored truth from the stored run exactly (0 difference), then the 918 saved states of the 17
+  t0 = 0 rows take the corrected run's values (CH4 up to 0.661 dex lower) in data/benches/yardstick/design/
+  truth_saved.npz (original kept in experiments/2026-11-02_yard17/backup/, sha256 in truth_sha256.txt). The parent's
+  230 restart rows keep their start states and truth (states of the stored run continued by it: valid tests of a call).
+  kintest quick on the corrected truth: yardstick 395,114 rows 0 misses, worst 0.035 dex; only those 17 rows changed
+  (worst error -0.66; maxichem's states identical); saved as data/benches/kintest/quick_ref4.npz (the quick reference
+  from now on). mini-chem on the same rows: 15.21 % with a miss, 5.99 % large (unchanged to the shown digits).
+- Scan of the stored dense VULCAN runs for the same signature (scan.py; a species present above 1e-25 at t = 0, exactly
+  0 at VULCAN's first output, later above 1e-12 and its floor): 3,818 yardstick panel runs: 4 (runs 865, 1401, 1809,
+  2333); maxichem's worst on the t0 = 0 rows of the two other design parents 0.002 and 0.001 dex (harmless; 2333 is not
+  a design parent); the six Fig. 4 boxes: none. The qual and QT sets store only call-end states (one VULCAN box per
+  call), so the signature cannot be read there; maxichem matches them (0 misses, worst 0.022 dex on qual) and their
+  tolerance reruns (rtol 5e-4 vs 5e-3, default first step) passed: qual 26 / 26 (worst 0.018 dex), QT 26 / 26 (0.014),
+  QT2 26 / 26 (0.0072).
 
 ## 3 Author decisions and requirements (dated)
 
@@ -1768,7 +1783,8 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   don't do this".
 
 - 2026-11-02 ~18:0x: the yardstick's 17 missed rows: "can you retest those cases? Figure it out"; then "push stuff"
-  (5 commits pushed, 9ff3f2a..7c298ac).
+  (5 commits pushed, 9ff3f2a..7c298ac). Later: "1. push 2. yes 3 yes": e4039e3 pushed; parent 705's yardstick reference
+  replaced by the corrected VULCAN run; the stored VULCAN runs scanned.
 
 ## 4 Data
 
