@@ -22,8 +22,9 @@ One call, per cell (inside, specific moles n_i = q_i / m_i, mol per gram of gas;
     solving sum_h a_rh n_h = b_r on the dual. Newton steps: Jacobi-scaled, at most 30 in lam (natural-log units), each
     followed by a line search on the budget-scaled residual sum_r ((sum_h a_rh n_h - b_r) / b_r)^2 (Armijo, 1e-4; the
     longest step length that passes). A row with a zero budget removes the species that hold it; a row nobody holds is
-    left to the fix. IT1 iterations with the step lengths 1, 0.5, 0.25, 0.1; a cell whose largest relative budget
-    residual is then still above RTOL takes up to IT2 more, in blocks of BLK, with the step lengths 2^-k (k < 30),
+    left to the fix. Up to IT1 iterations with the step lengths 1, 0.5, 0.25, 0.1, stopping once the largest relative
+    budget residual is at most RTOL with finite densities, then one more iteration; a cell whose residual is still
+    above RTOL after the IT1 iterations takes up to IT2 more, in blocks of BLK, with the step lengths 2^-k (k < 30),
     stopping after the first block that ends below RTOL. A cell still above RTOL (the residual measure can stall when
     the consistent answer is far from the memory, e.g. a hidden budget near one species' atom ratio) then minimises
     the convex dual objective sum_h n_h - sum_r b_r lam_r: up to P3IT damped Newton steps (Jacobi-scaled, no step cap;
@@ -197,13 +198,26 @@ __device__ __forceinline__ void ndir(const Cell& c, const double* n, const doubl
 }
 
 // iters Newton iterations on the dual: Jacobi scaling, step cap DCAP, line search over the step lengths (phase 1:
-// LS1; phase 2: 2^-l, l < 30), the longest that passes the Armijo test on the budget-scaled residual (none: no step)
-__device__ void newton(const Cell& c, double* lam, int iters, int phase2) {
+// LS1; phase 2: 2^-l, l < 30), the longest that passes the Armijo test on the budget-scaled residual (none: no step);
+// with stop, the iterations end once the iterate passes resid()'s test
+__device__ void newton(const Cell& c, double* lam, int iters, int phase2, int stop) {
   double n[NSL];
   for (int it = 0; it < iters; ++it) {
     dens(c, lam, n);
     double r[M], d[M];
     for (int k = 0; k < M; ++k) r[k] = (rowsum(c, n, k) - c.b[k]) * c.act[k];
+    if (stop) {                             // this iterate already at RTOL (resid()'s test): stop
+      bool fin = true;
+#pragma unroll
+      for (int q = 0; q < NSL; ++q) fin = fin && isfinite(n[q]);
+      fin = __all_sync(FULL, fin);
+      double res = 0.0;
+      for (int k = 0; k < M; ++k) {
+        const double v = fabs(r[k]) / c.s[k];
+        res = (isnan(v) || v > res) ? v : res;
+      }
+      if (fin && !isnan(res) && res <= $RTOL) break;
+    }
     ndir(c, n, r, d);
     double dmax = 0.0;
     for (int e = 0; e < M; ++e) dmax = fmax(dmax, fabs(d[e]));
@@ -342,15 +356,19 @@ extern "C" __global__ void prepare(const double* __restrict__ C, const double* _
     }
     double lam[M];
     for (int k = 0; k < M; ++k) lam[k] = 0.0;
-    newton(c, lam, $IT1, 0);
+    newton(c, lam, $IT1, 0, 1);
     double res = resid(c, lam, n);
     const bool need = res > $RTOL;
     if (need)
       for (int it = 0; it < $IT2; it += $BLK) {
-        newton(c, lam, $BLK, 1);
+        newton(c, lam, $BLK, 1, 0);
         res = resid(c, lam, n);
         if (!(res > $RTOL)) break;
       }
+    if (!need) {                                                  // converged in phase 1: one more iteration
+      newton(c, lam, 1, 0, 0);
+      res = resid(c, lam, n);
+    }
     const bool p3 = res > $RTOL;                                  // the dual objective, from lam and from 0
     if (p3) {
       double best[M], l[M], bres = res;

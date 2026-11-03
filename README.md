@@ -10,8 +10,8 @@ Every call can also be differentiated (tangent and adjoint), in PyTorch or in JA
   thermodynamics, at constant T and P within a call: dx/dt = (S v - x sum(S v)) / n_tot, with n_tot = P / kT.
   Element conservation, positivity and the thermodynamic equilibrium hold by construction.
 - **Integrator.** Rodas3 (order 3, L-stable) with the exact Jacobian, a sparse LU factorization without row exchanges in
-  a minimum-degree order, adaptive steps (rtol 1e-3, atol 1e-18 in mole fraction) and each cell's step size carried to
-  its next call.
+  a minimum-degree order, adaptive steps (rtol 1e-3, atol 1e-16 in mole fraction; a secant step shrink after repeated
+  rejections, which reuse the rejected try's Jacobian) and each cell's step size carried to its next call.
 - **Robustness.** After each call a guard kernel flags cells with a non-finite state, an unfinished call or an element
   drift, and a recovery kernel redoes them on the GPU (dense LU with threshold pivoting, ten times the step budget). A
   call never waits for the host; the counts are read on demand.
@@ -103,18 +103,20 @@ CH4, NH3, HCN, C2H2, H, OH, O, H2, N2) differs from VULCAN by more than 0.1 dex 
 first seven, 1e-8 for H, OH, O, 1e-6 for H2 and N2). The target domain is 1e-5 to 100 bar, 300 to 3000 K, metallicity
 0.1 to 300 times solar, C/O 0.1 to 1, with time steps of 1 to 500 s.
 
-- All species: no misses on any of the development's VULCAN-0D test sets, the two largest of which hold 13.5 million
-  and 6.26 million scored states (worst error 0.033 dex on the latter).
-- G31: no path with a miss on the main test domain (worst error 0.094 dex); in 1000-day runs it stays within 0.002 dex
-  of the all-species call. Known weak spots: carbon-rich gas (C/O 1 to 2) that keeps mixing (up to 1.26 dex), and a few
-  cells at 300 times solar metallicity at 0.33 dex in the first calls after an equilibrium start. The per-cell memory
-  is required (without it the errors reach about 6 dex).
-- Speed, on an RTX 6000 Ada (fp64 at 1/64 of its fp32 rate) with no other job. The kernel alone takes about 0.23-0.31
-  us per cell-call at large batches with the inputs on the GPU when the gas is not mixed between calls (1.1-1.4 steps
-  per call; measured before a step-control change that takes about 1.2 times the steps). With the gas mixed between
-  cells before every call, as in a GCM, the steps per call and the cost rise about tenfold: the whole call took 1.9-4.8
-  us per cell-call on mixing test beds of 28,800-131,072 cells, and 3.55 us per cell-call on 2.46 million cells (14.2
-  accepted steps per cell and call on average). The reduced-tracer call adds 0.4-1.5 us per cell-call.
+- All species: no misses on the development's VULCAN-0D test sets, the two largest of which hold 13.5 million and
+  6.26 million scored states (worst error 0.033 dex on the latter; measured with the earlier step rule), except one
+  start of the 395,114-row yardstick: a 300 K gas far from equilibrium, CH4 0.67 dex off in its first call (17 rows).
+- G31: no path with a miss on the main test domain (worst error 0.094 dex); in 1000-day runs (with the earlier step
+  rule) it stays within 0.002 dex of the all-species call. Known weak spots: carbon-rich gas (C/O 1 to 2) that keeps
+  mixing (up to 1.26 dex), and a few cells at 300 times solar metallicity at 0.33 dex in the first calls after an
+  equilibrium start. The per-cell memory is required (without it the errors reach about 6 dex).
+- Speed, on an RTX 6000 Ada (fp64 at 1/64 of its fp32 rate) with no other job. In a coupled GCM run (snapy, a C48 x 100
+  hot Jupiter, 1.38 million cells, G31 every 70-s step) the whole reduced-tracer call takes 0.37 us per cell-call with
+  its gather and scatter (projection 0.15, chemistry 0.21): the gas changes little between calls and a cell takes about
+  one step per call.
+  The all-species kernel takes about 0.24 us per cell-call at large batches when the gas is not mixed between calls
+  (1.08 steps per call). On mixing test beds, where every cell's gas is mixed far from its last state before each call,
+  the all-species call takes 2.2-2.3 us per cell-call (69,120 to 2.46 million cells, about 14 tries per cell and call).
 
 ## Tests and the data they need
 
@@ -134,10 +136,10 @@ The checks and benches read stored references and VULCAN-0D truth sets that are 
 
     benches/yardstick/design/          recorded starts, rows and saved states (units, rows, saved, truth_saved .npz)
     benches/designs/decision/P/        test panel P (rows, starts, forcing .npz)
-    benches/kincuda/libref2.npz        reference outputs and rate coefficients of the torch reference solver
-    benches/kincuda_ad/refdata2.npz    reference derivatives (torch autograd)
-    benches/kintracer/ref3.npz         reference outputs of the reduced-tracer call
-    benches/kintest/quick_ref2.npz     a saved quick run of bench/kintest.py
+    benches/kincuda/libref3.npz        reference outputs and rate coefficients of the torch reference solver
+    benches/kincuda_ad/refdata3.npz    reference derivatives (torch autograd)
+    benches/kintracer/ref4.npz         reference outputs of the reduced-tracer call
+    benches/kintest/quick_ref3.npz     a saved quick run of bench/kintest.py
     truth/qual/                        VULCAN-0D truth paths (QC, QCs, QL, QLc, QH, QHs, twins)
 
 Each check stops with a message naming the missing files when they are absent. The stored references are tied to the

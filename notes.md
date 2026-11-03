@@ -1339,6 +1339,122 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   same source term and an independently converged coupled reference before it can be judged. V3 is the candidate
   numerics change if the 1.55x is wanted; adopting it means regenerating LIBREF, AD_REF, TRACER_REF and quick_ref2 and
   the full checks (author's call).
+
+### 2026-11-01 (night) to 2026-11-02 06:1x: the V3 step rule (not committed), live-gas speed, source coupling
+- Request (author, 11-01 ~20:15): adopt V3 + reuse as the production numerics (task 1); research the source coupling
+  (task 2, no production change); overnight plan approved 11-02 ~04:5x (no commits). Records: experiments/
+  2026-11-01_v3-adopt/, 2026-11-01_source-coupling/, 2026-11-02_projection-exit/, 2026-11-02_coupling-test/,
+  2026-11-02_v3f/ (each with log.txt); outside reviews of the plan, the results (twice), the task-2 design and results.
+- Task 1, in the working tree, NOT committed (V): kincuda.py's call and recover kernels (secant shrink after a second
+  rejection at one state, floor 1e-4; factor limits [0.2, 20] after an accepted try, [1e-4, 20] after a rejected one;
+  atol 1e-16; a rejected try reuses rhs, Jn and u, bitwise), the derivative kernels (the factor's partials; the step
+  history in the tangent and in adjoint records of NS + 6), the JAX layer (13-int geometry), README; references
+  regenerated with patched copies of the external generators (libref3, libref3_SNCHO, refdata3, kintracer ref4,
+  quick_ref3). The call kernel is bitwise the tested variant (40 bed calls x 8,640 cells; a token diff of the generated
+  sources); the recover kernel's new rule was never in the tested copy (checks only: recovered cells vs a 40,000-try
+  call 4.5e-10 dex). A latent NaN in the torch reference's reverse mode (unused secant factor at p <= 0.05) was fixed in
+  the generator copy; refdata3 is unaffected.
+- Check criteria changed by the author's choice (11-01 ~22:4x; tests/ in the working tree): single-call parity allows
+  one cell-call above 1e-6 dex per case and none above 1e-5; cold-start central-difference bar 3e-5; 1000 K h-pair floor
+  71 (55 of 64 cells now carry h >= dt); tracer end state 1e-6 relative + 1e-16. With them (V): parity 20/20, tracer
+  9/9, JAX 28/28, SNCHO 15/15, kintest quick 0 misses on the qual paths (the yardstick's known 300 K trajectory
+  unchanged), no path moved > 0.01 dex; QTe every-call block vs VULCAN 0 misses, worst 0.0180 (old 0.0153); jump stress
+  worst 0.0133 (0.0106); G31 gate 0 misses, worst 0.021. AD 43/44: the recovered-cell cold-start central-difference
+  case fails, and with the old code it fails on 3 of 4 other direction seeds too (a pre-existing, seed-sensitive check).
+  The 'starting step alone' dot test passes at p99, but its maximum rose from 1e-10 to 2-5e-2 on two 300 K cells whose
+  derivatives are not computable in fp64 (an independent torch autograd's own forward and reverse modes disagree there
+  by up to 2x); the cause is the plain shrink floor 1e-4, not the secant, the cap or atol.
+- V3F = V3 with the plain factor floored at 0.2 after a rejection (secant floor kept) (V; experiments/2026-11-02_v3f,
+  references regenerated there, not installed): bed 2.287 vs 2.282 us per cell-call, 14.43 vs 14.41 tries, local worst
+  0.0054 vs 0.0051; jump stress 0.0133 and QTe 0.0180 both; every check as V3, plus parity within the original 1e-6
+  criterion and the dot-test maximum 7.6e-8; the same recovered-cell failure. The second results review prefers V3F.
+- Speed (V, idle GPU1, us per cell-call, 52bdf63 -> V3): bed all species 3.601 -> 2.250 (69,120 cells), 3.555 -> 2.214
+  (2.46 M); G31 4.021 -> 2.606, 3.970 -> 2.544. Live gas (the coupled C48 x 100 hot Jupiter, 1.38 M cells, G31 every
+  70 s step): 0.577 / 0.577 / 0.585 (old / V3 / source form) on a 40-step restart; 0.582 -> 0.577 on 8 recorded calls
+  replayed. Live cells take 1.03-1.08 tries per call, so the step rule barely matters there; the tracer projection
+  (0.36 us, 62 %) dominates.
+- Projection early exit (V, research copy): stopping a cell's Newton iterations once its residual is at RTOL, in phase
+  1 only (cells that need phase 2 run as before): on the replay set the projection 0.360 -> 0.111 us and the G31 call
+  0.576 -> 0.327 (1.76x); with one polishing iteration 0.364 (1.58x); 12 gases within 5e-12 dex of production;
+  kintracer_check 9/9 and the G31 gate (kill gate, 776 panel paths: 0 misses, worst 0.021) with and without the polish.
+  The any-phase exit fails the far-from-memory case (6e-6 / 3e-5 vs 1e-6). Earlier ring-bed result: notes above, 11-01.
+- Task 2 (V): (a) over the coupled day the per-call median jump (the bed's all-species metric) is 1.9e-4 dex, the
+  per-call p99 0.034 (bed median 0.073). The 1,174 reconstruction defects of the day: in a 260-step rerun all 270 are
+  negative carried species (C2, N, O2, -1e-41 to -6e-23 of the cell's moles) arriving with the transported tracers near
+  the model top (450-3,700 Pa); no element is off (worst 2.5e-16). (b) A coupling test with a positive continuous
+  transport L = (T - I) / dt from the bed and Strang splitting with tight chemistry as the reference: the reference
+  converges at first order (1024 vs 2048 substeps differ by up to 0.23 dex at the worst cell, p99 4e-3); srcu has
+  smaller worst local errors than the jump (2.82 -> 2.50 dex on the bed, 1.78 -> 0.90 with the coefficients x 0.1) and
+  fewer cell-calls > 0.1 dex locally, but not in every statistic (trajectory share > 0.1 dex 4.5 vs 4.3 % on the bed);
+  Strang with 1-4 substeps is worse than both; tight and production forms agree (the error is the coupling). The bed's
+  jump tail cannot be scaled to the live one (p99 1.9-6.6 dex vs 0.034), so the live coupling choice stays open; it
+  needs replays of live neighbourhoods against a jointly refined reference. (c) A VULCAN-0D pilot with the source term:
+  about 35 core-min of compute but about half a day to give the fast driver per-call stepping; not run. (d) A
+  source-aware recovery prototype (source and loss in the recover kernel): recovered cells match a 40,000-try call to
+  6e-11 dex, against 3.4 dex without it. A GCM would need the pre-transport state per cell, an outflow fraction (retention or from the jump),
+  positive transported tracers, a source-aware recovery with a budget guard, and truth with the same source term. On
+  live gas the source form saves no time.
+- For the author: commit V3, V3F or neither (live gain ~1 %; bed and cold starts 1.55x); the recovered-cell
+  central-difference check; whether to pursue the projection early exit (a projection numerics change: reviews, a new
+  TRACER_REF); nothing from task 2 adopted.
+### 2026-11-02 (afternoon): V3F and the projection early exit adopted; speed ideas; GCM tracer cost
+- Request (author, 11-02 ~16:1x): "go with the best version that works in a realistic scenario ... super fast in a GCM
+  and always accurate"; out-of-the-box and machine-learning ideas from outside opinions. Records: experiments/
+  2026-11-02_adopt/ (log.txt), 2026-11-02_speed-ideas/ (three independent idea reports), 2026-11-02_fast-proj/,
+  2026-11-02_figs/. Supersedes the previous entry's open decisions (V3F chosen; the early exit adopted, with no new
+  tracer reference: the reference has its own torch projection, so the exit does not change it).
+- Plan review (outside): go with changes: V3F over V3; the exit test is resid()'s own decision and warp-uniform; take
+  the polishing iteration (after an exit at RTOL a design with sum rows can show a ~1.8e-10 sum-row defect; no shipped
+  design has sum rows); add odd-input coverage, a live A/B, a timing of the GCM-facing call. Results review: commit
+  after documentation fixes (done: README's accuracy claims qualified, the coupled timing with gather / scatter).
+- Adopted (V): V3F (kincuda.py: the plain step factor after a rejected try floored at 0.2; the secant shrink keeps
+  1e-4) with V3F's references (libref3, libref3_SNCHO, refdata3, ref4, quick_ref3; V3's set kept in experiments/
+  2026-11-01_v3-adopt/ref_v3_files/); the projection's phase-1 Newton iterations stop once the iterate passes
+  resid()'s test, then one more iteration (phase 2 and the dual-objective steps unchanged). The projected states are
+  bitwise the tested research build on 8 recorded live calls.
+- Checks on the final tree (V, GPU1 alone): kincuda_check 20/20; kintest quick vs quick_ref3: 2,440 qual paths 0 misses,
+  worst 0.022, every path change 0.0000; the yardstick's only misses are the known 17 rows of one 300 K equilibrium-far
+  start (CH4 0.666 dex at call 1; 0.667 with the old code); SNCHO 15/15; kincuda_ad_check 43/44 (the pre-existing
+  recovered-cell cold-start central-difference case); kinjax_check 28/28; kintracer_check 9/9; G31 gate: kill gate
+  passed, 776 panel paths of up to 17,280 calls 0 misses, worst 0.022 dex, defects 0, chemistry failures 0. Odd inputs
+  (200,000 live cells against the 52bdf63 projection: strong mixing, each row zeroed, zero memory, non-finite and
+  negative tracers, a test design with two sum rows): identical status and defect flags, states within 1.3e-10 relative.
+- Speed (V, idle GPU1, coupled C48 x 100 hot Jupiter, 1.38 M cells, G31 every 70-s step): 8 recorded calls replayed,
+  kernel intervals 0.5796 -> 0.3616 us per cell-call (projection 0.3601 -> 0.1465, chemistry 0.2118 -> 0.2076; layer
+  counts identical; 12 gases within 0.0020 dex of 52bdf63). Live A/B, 300 steps from one snapshot (passive chemistry, T
+  and P bitwise equal across runs), GCM-facing call with gather / scatter: 0.585 (52bdf63) / 0.580 (V3F alone) / 0.368
+  (final). Final state, species above 1e-12: final vs 52bdf63 <= 3.3e-3 dex, final vs V3F alone <= 2.2e-3 (rounding
+  differences that change the step-size history of a few cells: 80 cells with h differing by > 0.01 dex); 0 cells > 0.01
+  dex; flags of final vs V3F alone identical. Species between 1e-16 and 1e-12 move by up to 0.69 dex with V3F (atol
+  1e-16; 480 cells > 0.01 dex). A 1,000-day sign-off of the new tree is outstanding.
+- Speed ideas (three independent reports, read against these notes and the VULCAN-JAX notes): machine learning does
+  not pay inside the call on live gas: a cell takes about one Rosenbrock try per call, and verifying a learned guess
+  costs about a try (a 2026 study's gate returned 96.8-99.7 % of cells to the solver). Ranked levers: (1) the projection
+  kernel, latency-bound at one warp per cell: one thread per cell and densities in product form (M exponentials
+  instead of one per hidden species); (2) reusing the factored matrix across calls (tried before: 1.18-1.34x at large
+  batches; the author: "probably don't do this", stopped before a build); (3) previous-lambda starts; (4) chemistry lane
+  packing and trimming redundant fp64 work (est. 8-12 %); a GH200 timing first (never measured; the package from 10-31
+  exists). Not recommended: surrogates, tabulation (ISAT), cached rate coefficients (T changes every call), fp32 LU.
+- One thread per cell projection (V, research copy experiments/2026-11-02_fast-proj/mx): the phase-1 iterations, the
+  exit, the polish, the fix and the outputs in a kernel generated per design with the row weights as literals and the
+  densities as p_h prod_k exp(lam_k)^a_kh; cells with non-finite inputs, a product-form range overflow risk
+  (sum_k |lam_k| max a_kh > 600), phase 2 or a polished residual above RTOL go to the warp kernel, which redoes them as
+  production. Replay: projection 0.1466 -> 0.0385 us, whole call 0.3623 -> 0.2543 (1.43x); 12 gases within 1.9e-12 dex,
+  projected states within 7e-15 relative of production; the cells sent to the warp kernel = the cells needing phase 2
+  (347-392 per call); with the kernel off the copy is bitwise production. kintracer_check 9/9; G31 gate: kill gate
+  passed, panels 0 misses, worst 0.022, defects 0; odd inputs: identical flags, <= 7.7e-15 relative.
+- GCM tracer transport (V from the runs' logs; read-only look at snapy, nothing changed): one hot-Jupiter step costs
+  dynamics 0.35 s without tracers and 1.08 s with 31 (the spin-up and coupled-day records), so moving the 31 tracers
+  (~0.73 s) costs more than the chemistry (0.5 s). snapy runs, every RK stage and for all tracers, a chain of whole-array
+  fp64 operations (reconstruction, upwind flux on the hydro mass flux, covariance term, positivity limiter, halo
+  exchanges); by arithmetic and memory traffic it runs ~20-50x above this card's limits (I). Levers (GCM code, not
+  maxichem): a fused tracer kernel, fp32 tracer reconstruction, transport once per step with stage-averaged mass fluxes,
+  PLM reconstruction (measured 11-01: 53 tracers 2.70 -> 2.20 s), fewer tracers.
+- Figures (author's request): experiments/2026-11-02_figs/: the mini-chem paper's six Fig. 4 boxes (VULCAN, maxichem,
+  mini-chem; worst floored error over six gases for t >= 1e-3 s: maxichem 0.0003-0.0149 dex, mini-chem 0.21-5.3 dex),
+  and the yardstick's worst error per row (calls 1-200: rows with a miss mini-chem 15.21 % / large 5.99 %, maxichem
+  0.004 % / 0).
+
 ## 3 Author decisions and requirements (dated)
 
 - 2026-06-09 (gate 2 of the paper plan): held-out open-loop rollouts at fixed dt 6.4 s for K >= 100 steps plus 0.5 s and
@@ -1613,6 +1729,11 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   sulfur network to <= 30; ML in either place (designing offline what the GCM carries, or inside each call), whichever
   measurably helps; closed campaigns' records packed into archives, not deleted; about 24 h, then a stopping point.
   Campaign: experiments/2026-10-31_refresh/_build (log.txt).
+
+- 2026-11-02 ~16:1x: "Can you go with the best version that works in a realistic scenario? I really care about this
+  being SUPER fast in a gcm and always accurate"; then: rewrite the projection kernel (one thread per cell) and look into
+  large speedups of the GCM's tracer routine without doing them yet; reusing the factored matrix across calls: "probably
+  don't do this".
 
 ## 4 Data
 
