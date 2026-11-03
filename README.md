@@ -103,7 +103,8 @@ counts = solver.check()                             # guard counts; raises if a 
 
 Accuracy is judged against VULCAN-0D, misses first. A miss is a stored state where one of 12 gases (H2O, CO, CO2, CH4,
 NH3, HCN, C2H2, H, OH, O, H2, N2) differs from VULCAN by more than 0.1 dex above a per-gas floor (1e-10 for the first
-seven, 1e-8 for H, OH and O, 1e-6 for H2 and N2). The truth data come from VULCAN-0D with corrections to its step
+seven, 1e-8 for H, OH and O, 1e-6 for H2 and N2); on the sulfur network also H2S, SO2, COS and S2 (floor 1e-10). The
+truth data come from VULCAN-0D with corrections to its step
 control and the network data (see notes.md), run at rtol 5e-4. The domain is 300 to 3000 K, 1e-5 to 100 bar,
 metallicity 0.1 to 300 times solar, C/O 0.1 to 2, with and without photolysis.
 
@@ -118,17 +119,22 @@ Results on the truth data of 2026-11-03 (rtol 1e-3, atol 1e-16, the defaults):
 | SNCHO_photo: lit half | 192,465 | in 29 boxes (159 states) | 6.9 dex |
 
 The guard recomputed 4 of the 6.2 million NCHO box cell-calls (all recovered) and 8 of the 385,000 sulfur ones (7
-recovered, 1 still failed, counted). The sulfur misses are all in lit boxes at 354-750 K, mostly in S2 and COS. For 27 of the 29 boxes an independent tight
-solve (Radau, rtol 1e-10) shows two effects. VULCAN-0D itself is off by 0.6-6.9 dex in 19 of them. maxichem is off
-by up to 5.5 dex in 17 of them: a trace sulfur species falls below the absolute tolerance (1e-16), is set to zero, and
-cannot grow back, while in Radau it grows by many orders of magnitude. With atol 1e-20 maxichem is within 0.013 dex
-of Radau on all 27 boxes. A smaller atol costs little in GCM-like calls (see Speed). The sulfur truth set needs a
-tighter reference before it can certify the sulfur network.
+recovered, 1 still failed, counted).
+
+The sulfur misses are all in lit boxes at 354-750 K, mostly in S2 and COS. For 27 of the 29 boxes we also solved the
+box with Radau (rtol 1e-10, on the same chemistry as VULCAN-0D). There are two effects. VULCAN-0D itself is off from
+Radau by 0.6-6.9 dex in 19 of the 27 boxes. maxichem is off from Radau by more than 0.1 dex in 17 of them (up to 5.5
+dex). In the box studied in detail, sulfur species near 1e-18 reach exactly zero in maxichem and stay there, while in
+Radau COS grows to about 3e-5; a smaller absolute tolerance removes this. With atol 1e-20, maxichem is within 0.013
+dex of Radau on all 27 boxes (16 gases, at the stored states). These are selected boxes, not a survey; a tighter
+sulfur reference is needed before the sulfur network can be certified, and atol 1e-20 is not yet the default (it is an
+argument of the call).
 
 ## Speed
 
-On an RTX 6000 Ada with no other job, at a GCM-sized batch (1,382,400 cells), with 70-s calls on gas that changes little
-between calls (about one step per call):
+On an RTX 6000 Ada with no other job, at a GCM-sized batch (1,382,400 cells: the states of 4,096 truth boxes at 1e4 s,
+repeated), with 70-s calls on gas that changes little between calls (about one step per call). "Lit" replays the
+boxes' J, so half of the cells are lit:
 
 | Network | Species | us per cell-call |
 | --- | --- | --- |
@@ -147,9 +153,10 @@ x and h with respect to x, T, P, dt, h, the photolysis rates J, per-cell rate mu
 parameters, with the step sizes frozen or with the step control differentiated. They repeat the call's arithmetic, so
 their result is bitwise the call's. They take networks up to 96 species with photolysis, the Troe factor and the
 collision limit (every VULCAN-JAX network). They are checked on CHO_photo, NCHO_photo and SNCHO_photo against finite
-differences of the call and by dot products between the two kernels (a development check, not yet in tests/). Not yet
-done: an independent reference for these networks, and the JAX layer (`KinJax`), which refuses to run until it is
-ported.
+differences of the call and by dot products between the two kernels (a development check, not yet in tests/): every
+case passes on CHO_photo and NCHO_photo; on SNCHO_photo two cases (the J tangent on box starts at dt 500 s) are just
+above their bar. Not yet done: an independent reference for these networks, and the JAX layer (`KinJax`), which
+refuses to run until it is ported.
 
 The GCM advects every species. An earlier reduced-tracer call (31 advected tracers for the old 53-species network) was
 removed; notes.md keeps its method and results.
@@ -181,7 +188,7 @@ refuses a saved run made on other truth data (a digest of the scored truth).
 
     maxichem/kinvulcan.py    reader of VULCAN-format networks and NASA-9 files (VulcanNetwork)
     maxichem/kincuda.py      the call as generated CUDA kernels (CudaSolver)
-    maxichem/kincuda_ad.py   tangent and adjoint kernels (ADSolver; networks up to 64 species, no Troe law)
+    maxichem/kincuda_ad.py   tangent and adjoint kernels (ADSolver; networks up to 96 species)
     maxichem/kinjax.py       the JAX layer (KinJax), with the FFI shim kinjax.cc
     maxichem/paths.py        data locations (CHEM_DATA, VULCAN_THERMO)
     tests/, bench/           the checks and the benches

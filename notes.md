@@ -1625,12 +1625,13 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
 - Collision limit (C30; VULCAN-JAX, the truth generator, the torch reference and maxichem): for each thermal pair,
   q = the larger direction's two-body-equivalent rate (k with M folded in, times n_tot^(molecules - 2), directions of
   two or more molecules); if q > 1e-9 cm3/s both directions are scaled by 1e-9 / q, so K_eq and the equilibrium are
-  kept. In NCHO_photo it acts on the reverses of CH + M (below 563 K at 1 bar, 655 K at 100 bar) and C2H + M (895 K,
-  1828 K), on NH + M (<= 4x, <= 351 K) and on the forward fits of NCO + NH2 (<= 2x, >= 1880 K) and CN + C2H6 (<= 1.2x,
-  >= 2890 K). A regularization ceiling, not a measured rate. Rates agree across codes: VULCAN-JAX vs the torch
-  reference within 1e-6 relative (96 T, P points), the generator vs the torch reference within 8.6e-14 (NCHO_photo, 48
-  points) and 8.5e-14 (SNCHO_photo; its condensation line S8 -> S8_l_s, absent from maxichem, never acts in the boxes:
-  S8_l_s stays 0).
+  kept. In NCHO_photo it acts somewhere in 300-3000 K, 1e-5-100 bar on CH + M, C2H + M, NH + M, NCO + NH2 and
+  CN + C2H6 (overnight/log.txt 05:28); the CH + M reverse is capped below 563 K at 1 bar (655 K at 100 bar), the C2H + M
+  reverse below 895 K (1828 K) (a continuous solve in reviews/plan2.answer.txt, item 4). A regularization ceiling, not
+  a measured rate. Rates agree across codes: VULCAN-JAX vs the torch reference within 1e-6 relative (96 T, P points),
+  the generator vs the torch reference within 8.6e-14 (NCHO_photo) and 8.5e-14 (SNCHO_photo; 48 points each,
+  truth-gen/logs/rates_vs_ref_*.log). The generator's SNCHO network has a condensation line S8 -> S8_l_s that maxichem
+  skips; it never acts in the boxes (S8_l_s stays 0).
 - maxichem: default network VULCAN-JAX's NCHO_photo_network.txt (69 species, 390 thermal reactions, 48 photolysis
   branches); photolysis adopted (CudaSolver photo=True: J per cell and branch, fixed within a call; bad J counted, not
   stepped); the CH3OH law with Visscher & Moses 2011's broadening (the "vm11" width, as VULCAN-JAX and the generator);
@@ -1646,10 +1647,10 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   data/benches/kintest/quick_ref5.npz, the first on the new truth).
 - Truth generator (outside the repository): VULCAN-0D b3ccf4f on VULCAN-JAX's data with the same step-control
   corrections, the CH3OH broadening, the collision limit and k_B = 1.380649e-16; fast path bitwise equal to the
-  corrected stock path (20 boxes, after the limit); first step 1e-18 s, dt_min 1e-24 s (a species the first steps
-  create needed steps near 1e-21 s at 75 bar); step cap 2e5. VULCAN's rtol 5e-4: at 5e-3 one pilot box of 4,096 kept
-  a 4.1-dex CO error, and the boxes nearest a miss were off by 0.09-0.10 dex; at 5e-4 VULCAN agrees with Radau (0.016
-  dex) and with maxichem (0.020) on NCHO. Merge: an atomic publication (the manifest lists the shards and replaces the
+  corrected stock path (20 boxes, after the limit); first step 1e-18 s, dt_min 1e-24 s (a pilot box stalled at the
+  old 1e-20); step cap 2e5. VULCAN's rtol 5e-4: at 5e-3 one pilot box of 4,096 kept a 4.1-dex CO error against Radau
+  (truth-gen/logs/radau_box276.log); at 5e-4 that box agreed with Radau within 0.016 dex and with maxichem within
+  0.020 (console output; no log kept). Merge: an atomic publication (the manifest lists the shards and replaces the
   old one in one rename) that keeps earlier outcomes for boxes not run again (a toy test passes). A paths worker now
   exits 1 on an error and resumes only an output whose job and build digests match.
 - Truth data (data/truth_v2/; the old-network sets moved to old_network/): boxes_ncho: a scrambled Sobol design of
@@ -1657,7 +1658,8 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   a 1-D model layer times 10^U(-3, 1); starts: unreacted gas, a reheated, mixed or scrambled 1e8-s state, or 10 % of H2
   split into H), 48 stored states 0-1e8 s: all 131,072 accepted (worst element drift 9.9e-8); qual_ncho: the recorded
   forcing and mixes of the old qual panels replayed (904 paths: QC 512 x 1,000 calls, QCs 64, twins/QC 128, QH 64 x
-  1,000 holds, QHs 32, twins/QH 32, QL 64 x 3,500 holds, QLc 8 x 3,000 calls; 0 errors, 0 forced); daynight_ncho: 64
+  up to 1,000 holds, QHs 32, twins/QH 32, QL 64 x up to 3,500 holds, QLc 8 x up to 3,000 calls, as long as the old
+  paths are; 0 errors, 0 forced); daynight_ncho: 64
   QC paths x 1,000 calls with J = J_ref s max(0, sin(2 pi t / 1 day + phase)); boxes_sncho: 8,192 boxes on
   SNCHO_photo, 8,191 accepted (box 6602, 2676 K: element drift 1.2e-6 > 1e-6, left out). 18 boxes stopped at the
   2e5-step cap; rerun with 2e6 (13) or 2e7 (5, up to 2,959,228 steps): all finished (the manifests list them).
@@ -1668,10 +1670,13 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   354-750 K, mostly S2 and COS; guard 8 recomputed of 385,000, 7 recovered, 1 still failed.
 - The sulfur misses (logs/sulfur_misses3.log; Radau of the generator, rtol 1e-10, atol 1e-30, on 27 of the 29 boxes;
   2 still running at the time of writing): VULCAN-0D is off from Radau by 0.56-6.86 dex in 19 of the 27; maxichem is
-  off from Radau by more than 0.1 dex in 17 of them (up to 5.5 dex; 0.12-5.5 in the 8 where VULCAN is right). Cause on
-  maxichem's side (box 5932, 519 K, 5.2 bar): COS and S2 fall below atol (1e-16) near 1e4 s and are clamped to 0; in
-  Radau they grow from there to 1e-5 by 1e8 s. With atol 1e-20 maxichem is within 0.013 dex of Radau on all 27 boxes
-  (rtol 1e-6 with atol 1e-16 does not help). atol 1e-20 elsewhere: NCHO boxes 0 misses, worst 0.069 dex, steps per call
+  off from Radau by more than 0.1 dex in 17 of them (up to 5.5 dex; 0.12-5.5 in the 8 where VULCAN is right). On
+  maxichem's side (box 5932, 519 K, 5.2 bar; logs/sulfur_box5932.log): COS and S2 (about 1e-18 and 1e-24 at 1.1e4 s)
+  are exactly 0 in maxichem's output from 3e5 s on and stay 0, while in Radau COS grows to 3.4e-5 and S2 to 8.7e-10 by
+  1e8 s; atol 1e-20 or 1e-25 removes it, rtol 1e-6 with atol 1e-16 does not (the step that zeroes them, presumably an
+  accepted value above -atol clamped to 0, was not observed). With atol 1e-20 maxichem is within 0.013 dex of Radau on
+  all 27 boxes (16 gases, at the stored states, max_steps 2e5 in this diagnostic). These are selected boxes, not a
+  survey; Radau runs on the generator's chemistry functions, so it checks VULCAN's integration, not its chemistry. atol 1e-20 elsewhere: NCHO boxes 0 misses, worst 0.069 dex, steps per call
   3.0 -> 3.8 on the 0-1e8 s chains; sulfur boxes against VULCAN 54 boxes with a miss (VULCAN's own errors show more).
   Speed (1,382,400 cells, 70-s calls, idle GPU): NCHO_photo 0.346 / 0.349 us dark / lit at atol 1e-16, 0.349 / 0.350
   at 1e-20; SNCHO_photo on sulfur gas from the truth boxes 0.636 / 0.636 and 0.646 / 0.637. For the author: atol
@@ -1696,14 +1701,18 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
 - Reduced tracers removed (the author's decision 2): kintracer.py, the designs, its check and gate (code at 399a347).
   Its method, designs, failed designs, memory and speed costs stay in this file (2026-10-30 to 11-02 entries). A simple
   abundance rule for tracer designs fails (2026-11-03_tracer-rule/): on QT2's 1,056 mixing paths (old network) 30
-  tracers give 16 paths with a miss (0.81 dex), 36 tracers 2 (0.17), 36 + HCO + HNCO 0 (0.062): HCO and HNCO hold about
-  1e-4 of their elements but matter after mixing. Learned designs were tried before and tied or lost (section 1).
+  tracers give 16 paths with a miss (0.81 dex), 36 tracers 2 (0.17), 36 + HCO + HNCO 0 (0.062): HCO and HNCO hold small
+  element shares but matter after mixing. Learned designs were tried before and tied or lost (section 1).
 - Legacy removal (deletion list reviewed): the Auto-Chem code, its .venv and .git removed after a bundle and a full tar
   (restore checked: references and commits identical); duplicate data and superseded references removed; the
   training-data generator archived.
-- Kintest: the box panel refuses a set whose manifest lists boxes not run, failed runs, bad states or element drift;
-  quarantined boxes are reported; the paths must be exactly those of jobs.json; b_set is a digest of the scored truth
-  and the build stamp; non-finite truth (NaN, +-inf) is a failure, never the floor.
+- Kintest: the box panel refuses a set whose manifest lists boxes not run, failed runs, bad states or element drift,
+  whose shards do not hold every design box exactly once (accepted or quarantined), or whose shards differ in species,
+  stops or photolysis lines; quarantined boxes are reported; the paths must be exactly those of jobs.json, once each,
+  each as long as its job asked; b_set and q_set are digests of the scored truth and forcing (boxes and build stamp;
+  paths), and a paired run refuses a reference with other digests; negative or non-finite truth is a failure, never
+  the floor; the run exits 1 on a miss, an unfinished call or a non-finite or negative state. Paired check of the new
+  reference against a second run: no path or box changed (logs/kintest_quick_paired.log).
 
 ## 3 Author decisions and requirements (dated)
 

@@ -24,8 +24,10 @@ steps; the guard's counts of every call (CudaSolver.fallback).
          5 h unless --force.
   --save out.npz  per-path summaries, the 12 gases of every cell every 1,000 (quick) / 10,000 (full) ticks and at the
                   end, the per-box results, timings (refuses to overwrite).
-  --ref ref.npz   paired comparison with a saved run of the same tier: per path the change of the worst error and the
-                  largest state change, counts above 0.01 / 0.03 dex, steps per call, unfinished calls, latency.
+  --ref ref.npz   paired comparison with a saved run of the same tier and the same truth (b_set, q_set: digests of the
+                  scored truth and forcing): per path the change of the worst error and the largest state change,
+                  counts above 0.01 / 0.03 dex, steps per call, unfinished calls, latency.
+Exit status 1 when a path or box has a miss, or a call is unfinished or leaves a non-finite or negative state.
     python bench/kintest.py quick|full [--save out.npz] [--ref ref.npz] [--force]
 """
 import argparse
@@ -55,20 +57,33 @@ NEVER = 1 << 62
 
 
 def floored(x):
-    """Floored log10 of the scored gases' mole fractions (last axis = the 12 gases); a non-finite value stays NaN (a
-    failure when scored)."""
-    return np.maximum(np.log10(np.maximum(np.where(np.isfinite(x), x, np.nan), 1e-300)), FLOOR)
+    """Floored log10 of the scored gases' mole fractions (last axis = the 12 gases); a negative or non-finite value is
+    NaN (a failure when scored)."""
+    return np.maximum(np.log10(np.maximum(np.where(np.isfinite(x) & (x >= 0), x, np.nan), 1e-300)), FLOOR)
 
 
 def check_jobs():
-    """Stops unless the truth paths on disk are exactly those that paths.QUAL's jobs.json lists (a missing path would
-    shrink the coverage without notice)."""
+    """Stops unless the truth paths on disk are exactly those that paths.QUAL's jobs.json lists, once each, and each
+    holds the rows its job asked for (min(n, the source's rows after the start)): a missing or short path would shrink
+    the coverage without notice."""
     jobs = json.loads((paths.QUAL / "jobs.json").read_text())
-    want = {j["out"].split(f"/{paths.QUAL.name}/", 1)[-1] for j in jobs}
+    rel = [j["out"].split(f"/{paths.QUAL.name}/", 1)[-1] for j in jobs]
+    want = set(rel)
     have = {str(f.relative_to(paths.QUAL)) for f in paths.QUAL.rglob("*.npz")}
-    if want != have:
-        raise SystemExit(f"{paths.QUAL}: {len(want - have)} of {len(want)} listed truth paths missing "
-                         f"{sorted(want - have)[:3]}, {len(have - want)} not listed {sorted(have - want)[:3]}")
+    if want != have or len(want) != len(rel):
+        raise SystemExit(f"{paths.QUAL}: {len(rel) - len(want)} duplicate jobs, {len(want - have)} of {len(want)} listed "
+                         f"truth paths missing {sorted(want - have)[:3]}, {len(have - want)} not listed "
+                         f"{sorted(have - want)[:3]}")
+    short = []
+    for j, r in zip(jobs, rel):
+        z = np.load(paths.QUAL / r)
+        hold = "saved_h" in z.files
+        s0 = int(z["h0"] if hold else z["k0"]) if str(z["kind"]) == "twin" else 0
+        rows = len(z["saved_h"]) if hold else len(z["x_call"])
+        if rows != min(int(j["n"]), len(np.load(j["src"])["T"]) - s0):
+            short.append(r)
+    if short:
+        raise SystemExit(f"{paths.QUAL}: {len(short)} truth paths shorter than their jobs, e.g. {short[:3]}")
 
 
 def load_paths(dirs, sp, gi, hold):
@@ -216,12 +231,20 @@ def boxes(solver, net, sp, gh, gi, fl, cap, dev):
     man = json.loads((paths.BOXES / "manifest.json").read_text())
     shards = [paths.BOXES / f for f in man.get("shards", [])]
     bad = {k: len(man.get(k, [])) for k in ("errors", "bad_states", "drift_over_1e-6")}
-    if man.get("pending", 1) or any(bad.values()) or sum(len(np.load(f)["box"]) for f in shards) != man["accepted"]:
+    ids = np.concatenate([np.load(f)["box"] for f in shards]) if shards else np.zeros(0, int)
+    cover = np.zeros(man["boxes"], int)
+    np.add.at(cover, np.concatenate([ids, np.asarray(man.get("quarantine", []), int)]), 1)
+    if man.get("pending", 1) or any(bad.values()) or len(ids) != man["accepted"] or (cover != 1).any():
         raise SystemExit(f"{paths.BOXES}: not complete (manifest: {man.get('pending')} boxes not run, {bad}, "
-                         f"{man['accepted']} accepted)")
+                         f"{man['accepted']} accepted; shards hold {len(ids)} boxes, design boxes not held exactly once "
+                         f"(accepted or quarantined) {int((cover != 1).sum())})")
     print(f"boxes: {man['accepted']:,} of {man['boxes']:,} accepted, {len(man['quarantine'])} quarantined (left out)")
     z0 = np.load(shards[0])
-    assert [str(q) for q in z0["species"]] == sp
+    for f in shards:
+        z = np.load(f)
+        if [str(q) for q in z["species"]] != sp or not np.array_equal(z["stops"], z0["stops"]) or \
+                not np.array_equal(z["lines"], z0["lines"]):
+            raise SystemExit(f"{f}: species, stops or photolysis lines differ from the paths' and the other shards'")
     stops, lines = z0["stops"], [str(q) for q in z0["lines"]]
     col = [lines.index(f"{q['absorber']},{q['branch']}") for q in net.photo]
     keys = ("box", "X", "T", "P", "J", "lit", "kind")
@@ -267,8 +290,8 @@ def boxes(solver, net, sp, gh, gi, fl, cap, dev):
     torch.cuda.synchronize()
     B["b_s"], B["b_cellcalls"] = time.time() - t0, R * nc
     h = hashlib.sha256(json.dumps(man["stamp"], sort_keys=True).encode())
-    for k in keys:
-        h.update(np.ascontiguousarray(Z[k]).tobytes())
+    for a in [Z[k] for k in keys] + [stops, np.array(lines), np.array(sp)]:
+        h.update(np.ascontiguousarray(a).tobytes())
     B["b_set"] = np.array(f"{man['network']} rtol {man.get('rtol')} {R} boxes sha256 {h.hexdigest()[:16]}")
     B["fallback_boxes"] = np.array([fb.get(q, 0) for q in KEYS_FB])
     box_report(B, Z, stops)
@@ -501,7 +524,7 @@ def report(blocks, R, L, S):
 
 def compare(new, ref):
     """Paired comparison of two runs of the same tier (mappings as written by --save)."""
-    for k in ("tier", "id", "block_of", "b_box", "b_set"):
+    for k in ("tier", "id", "block_of", "b_box", "b_set", "q_set"):
         assert np.array_equal(np.asarray(new[k]), np.asarray(ref[k])), f"runs differ in {k}: not comparable"
     assert np.array_equal(new["snap_tick"], ref["snap_tick"])
     lat = lambda z: (1e3 * float(z["loop_s"]) / int(z["ticks"]), 1e6 * float(z["b_s"]) / int(z["b_cellcalls"]))  # noqa
@@ -558,6 +581,14 @@ def main():
           f"{time.time() - t_all:.0f} s", flush=True)
     Y = boxes(solver, net, sp, gi, gi_t, fl, 32768 if quick else None, dev)
     blocks = make_blocks(a.tier, sp, gi)
+    qh = hashlib.sha256()                                 # the paths' truth and forcing, for paired runs
+    for b in blocks:
+        for c in b.cells:
+            for v in (c["T"], c["P"], c["dt"], c["x0"], c["rows"], c["truth"]):
+                if v is not None:
+                    qh.update(np.ascontiguousarray(v).tobytes())
+            for at, fr, y in c["mix"]:
+                qh.update(np.array([at, fr]).tobytes() + np.ascontiguousarray(y).tobytes())
     S = assemble(blocks, net, dev)
     ticks = max(b.stride * (b.end - 1) + 1 for b in blocks)
     print(f"{len(blocks)} blocks, {S['N']:,} cells, {ticks:,} ticks; set up in {time.time() - t_all:.0f} s", flush=True)
@@ -565,7 +596,7 @@ def main():
     solver.check()                                                      # raises if any cell was below 300 K
     R = results(blocks, S)
     report(blocks, R, L, S)
-    R.update(L, **Y, tier=np.array(a.tier))
+    R.update(L, **Y, tier=np.array(a.tier), q_set=np.array(qh.hexdigest()[:16]))
     print(f"wall time {time.time() - t_all:.0f} s (boxes {Y['b_s']:.0f} s, loop {L['loop_s']:.0f} s)", flush=True)
     if a.save:
         Path(a.save).parent.mkdir(parents=True, exist_ok=True)
@@ -573,6 +604,11 @@ def main():
         print(f"saved {a.save}")
     if ref is not None:
         compare(R, ref)
+    tr = R["truth_block"][R["block_of"]]
+    fail = int((np.where(tr, R["worst"], 0.0) > MISS).sum() + (Y["b_worst"] > MISS).sum() + R["unfinished"].sum()
+               + R["nonfinite"].sum() + R["negative"].sum() + Y["b_unfinished"].sum() + Y["b_nonfinite"].sum())
+    if fail:
+        sys.exit(f"FAIL: {fail} paths or boxes with a miss, unfinished calls, non-finite or negative states")
 
 
 if __name__ == "__main__":
