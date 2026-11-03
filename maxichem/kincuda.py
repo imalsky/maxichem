@@ -4,11 +4,18 @@ side, |S| <= 2).
 
 The cell's threads compute its rate coefficients from T and P (NASA-9 Gibbs energies, low range below 1000 K; each
 reaction's law from the network: one or two Arrhenius k0 terms, falloff, Troe factor, efficiency; reverse rates from the
-equilibrium constants or an explicit reverse law; n_tot folded into the three-body coefficients), then integrate the
+equilibrium constants or an explicit reverse law; n_tot folded into the three-body coefficients; the collision limit: a
+direction of two or three molecules may not exceed K_COLL = 1e-9 cm3/s as a bimolecular-equivalent rate (k n_tot^(m - 2),
+M folded in), so where one does, both directions of the reaction are scaled by K_COLL / q (the larger direction's q):
+their ratio, and so the equilibrium, is kept; this bounds rate fits extrapolated far from their range, such as the
+reverses of CH + M -> C + H + M and C2H + M -> C2 + H + M at low T), then integrate the
 constant-T, P reactor dN/dt = (sum N / n_tot) S v (N: molecules per starting molecule, n = n_tot N / sum N) over dt
 with Rodas3 (4 stages, order 3, L-stable, stiffly accurate; gamma = 1/2) in the form W = I / (gamma h) - J,
 K_i = W^-1 (f(Y_i) + sum_j C_ij K_j / h), Y_i = N + sum_j A_ij K_j: Y_2 = N (stage 2 reuses f(N)), Y_3 = N + 2 K_1,
 Y_4 = N + 2 K_1 + K_3; C_21 = 4, C_3j = (1, -1), C_4j = (1, -1, -8/3); N' = N + 2 K_1 + K_3 + K_4, error estimate K_4.
+The stage right-hand sides are written as explicit fma, f + (4 / h) K_1, f + (K_1 - K_2) / h and
+f + (K_1 - K_2 - 8/3 K_3) / h (fma(-8/3, K_3, K_1 - K_2)), so that every kernel that repeats the call's arithmetic
+(the recover kernel, kincuda_ad) gets the same bits whatever the compiler contracts.
 Step control: the first try is max(min(h, dt), 1e-12) with h the cell's step size carried from its last call, each try
 min(h, dt - t); with q_i = K_4,i / (atol + rtol max(|N_i|, |N'_i|)), err is the RMS (mean_i q_i^2)^(1/2), except
 while the call has no accepted step (t = 0), when it is max(RMS, max_i |q_i|), the worst species: the first try uses the
@@ -39,11 +46,9 @@ cell's 32 W lanes, with descriptor bit widths set by the network's sizes; the re
 in batches of consecutive independent pivots. The four stage solves run from one copy of the triangular solve: stage 1
 solves K1 on the first warp and M0^-1 w on the second, each stage ends with the Sherman-Morrison update on the first
 warp. Cells per block: as many as the shared memory (per-cell arrays plus one copy of the small tables per block), the
-named barriers and the registers (without spilling) allow; a batch of 2 to CudaSolver.small cells (the number of
-SMs) runs a one-cell-per-block build instead, one cell per SM rather than a few SMs holding several (a lone cell has
-an SM either way; two one-cell blocks on an SM run slower than one block with both). The cells per block change no
-arithmetic. Persistent cells take work from an atomic queue, so no cell waits for the stiffest one. Results do not
-depend on the batch size or order.
+named barriers and the registers (without spilling) allow; the cells per block change no arithmetic. Persistent cells
+take work from an atomic queue, so no cell waits for the stiffest one. Results do not depend on the batch size or
+order.
 
 The CUDA source is generated from the network at construction and compiled once with NVRTC through ctypes (the library
 of torch's CUDA wheels); the kernel runs on torch's current stream.
@@ -82,6 +87,7 @@ from . import kinvulcan as KV
 T_MIN = 300.0   # K: the solver's domain starts here (colder cells are counted, not stepped)
 DRIFT = 1e-6    # default drift allowance (NCHO): relative change of an element's share left to rounding
 REC_STEPS = 10  # the recovery's tries, in units of the call's max_steps (40,000 at the default 4,000)
+K_COLL = 1e-9   # cm3 s^-1: no thermal rate may exceed this as a bimolecular-equivalent rate (module docstring)
 COUNTS = ("bad_input", "cold", "nonfinite", "unfinished", "drift", "recomputed", "recovered", "still_failed")
 
 
@@ -129,7 +135,8 @@ def _bits(n):
 
 def _law(r):
     """Kernel row of a rate law: ln A0, B0, C0, ln A1, B1, C1 (second k0 term), ln A_inf, B_inf, C_inf, Troe a, T3, T1,
-    T2, efficiency; flags: 1 falloff, 2 second k0 term, 64 Troe, 128 efficiency."""
+    T2, efficiency; flags: 1 falloff, 2 second k0 term, 64 Troe, 128 efficiency, 512 the Troe factor's "vm11" width
+    (log10 F = log10 Fc / (1 + (log10 Pr / (0.75 - 1.27 log10 Fc))^2), kinvulcan.SPECIAL)."""
     ln = lambda a: np.log(a) if a > 0 else -np.inf
     if r["kind"] == 2:
         a0, a1, ai = (r["A"], r["B"], r["C"]), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0)
@@ -141,25 +148,30 @@ def _law(r):
         raise ValueError(f"negative Arrhenius prefactor in {r.get('eq', r)}: the kernel takes ln A")
     row = [ln(a0[0]), a0[1], a0[2], ln(a1[0]), a1[1], a1[2], ln(ai[0]), ai[1], ai[2],
            *r.get("troe", (0.0, 1.0, 1.0, 0.0)), r.get("eff", 1.0)]
-    fl = int(r["kind"] in (3, 6)) | int("A1" in r) << 1 | int("troe" in r) << 6 | int("eff" in r) << 7
+    fl = int(r["kind"] in (3, 6)) | int("A1" in r) << 1 | int("troe" in r) << 6 | int("eff" in r) << 7 \
+        | int(r.get("width") == "vm11") << 9
     return row, fl
 
 
-def tables(net, w):
+def tables(net, w, photo=False):
     """The kernel's tables from a VulcanNetwork (rate laws in the reaction dicts) for w >= 2 warps per cell: species
     order, rate laws, S v and Jacobian term streams, LU pattern and update operations (species in the kernel's order:
-    perm[i] = network index of row i), descriptor bit widths."""
-    S = np.asarray(net.S)
+    perm[i] = network index of row i), descriptor bit widths. photo: the network's photolysis branches (net.photo) follow
+    the thermal reactions as reactions nrt..nr-1, irreversible (no reverse side, no reverse Jacobian terms), their
+    forward rate coefficient the call's per-cell input J."""
+    reac = net.reac + (net.photo if photo else [])
+    S = np.hstack([np.asarray(net.S), np.asarray(net.Sp)]) if photo else np.asarray(net.S)
     ns, nr = S.shape
+    nrt = len(net.reac)
     nl = 32 * w
-    re = [list(r["re"]) for r in net.reac]
-    pr = [list(r["pr"]) for r in net.reac]
+    re = [list(r["re"]) for r in reac]
+    pr = [list(r["pr"]) for r in reac]
     if ns > 254 or max(len(q) for q in re + pr) > 3 or np.abs(S).max() > 2:
         raise ValueError("the kernel holds at most 254 species, 3 species per side, |S| <= 2")
     live = [r for r in range(nr) if np.any(S[:, r] != 0)]
     dv = {}                                   # d v_r / d n_q: (sign, rate index (kf r, kr nr + r), other species)
     for r in live:
-        for side, k, sgn in ((re[r], r, 1.0), (pr[r], nr + r, -1.0)):
+        for side, k, sgn in ((re[r], r, 1.0), (pr[r], nr + r, -1.0))[:1 if r >= nrt else 2]:
             for m in range(len(side)):
                 dv.setdefault((r, side[m]), []).append((sgn, k, side[:m] + side[m + 1:]))
     jn = {}                                   # entry (p, q) of Jn: (S[p, r], (r, q))
@@ -189,19 +201,22 @@ def tables(net, w):
             slot[(i, j)] = tb0 + (i - k0) * nt + j - k0
     nnz = len(slot)
     # reactions: species slots (padding ns: n[ns] = 1, g[ns] = 0), rate laws (rows nr + r: explicit reverse laws)
-    rev = any("rev" in r for r in net.reac)
+    rev = any("rev" in r for r in reac)
     rx = np.full((nr, 6), ns, np.uint8)
     rc = np.zeros((2 * nr if rev else nr, 14))
     rf = np.zeros(len(rc), np.int32)
-    for j, r in enumerate(net.reac):
+    for j, r in enumerate(reac):
         rx[j, :len(re[j])] = [pos[q] for q in re[j]]
+        if j >= nrt:                          # photolysis: no reverse side, no law (kf = J, kr = 0 in the kernel)
+            continue
         rx[j, 3:3 + len(pr[j])] = [pos[q] for q in pr[j]]
         rc[j], rf[j] = _law(r)
-        rf[j] |= (r["kind"] in (3, 5, 6)) << 2 | (len(pr[j]) - len(re[j]) + 4) << 3 | ("rev" in r) << 8
+        rf[j] |= (r["kind"] in (3, 5, 6)) << 2 | (len(pr[j]) - len(re[j]) + 4) << 3 | ("rev" in r) << 8 \
+            | len(re[j]) << 10 | len(pr[j]) << 12
         if "rev" in r:
             rc[nr + j], rf[nr + j] = _law(r["rev"])
-    law = sorted({"troe" for r in net.reac if "troe" in r or "troe" in r.get("rev", {})}
-                 | {"eff" for r in net.reac if "eff" in r or "eff" in r.get("rev", {})} | ({"rev"} if rev else set()))
+    law = sorted({"troe" for r in reac if "troe" in r or "troe" in r.get("rev", {})}
+                 | {"eff" for r in reac if "eff" in r or "eff" in r.get("rev", {})} | ({"rev"} if rev else set()))
     if not {"troe", "eff"} & set(law):
         rc = rc[:, :9]
     # widest forward and reverse side of each round of nl reactions
@@ -295,7 +310,7 @@ def tables(net, w):
     didx = np.zeros(nnz, np.uint16)           # dense position of each slot (recovery)
     for (i, j), s in slot.items():
         didx[s] = i * ns + j
-    return dict(ns=ns, nr=nr, nnz=nnz, k0=k0, tb0=tb0, w=w, P=P, perm=np.array(perm, np.int32), rx=rx, rc=rc, rf=rf,
+    return dict(ns=ns, nr=nr, nrt=nrt, nj=nr - nrt, nnz=nnz, k0=k0, tb0=tb0, w=w, P=P, perm=np.array(perm, np.int32), rx=rx, rc=rc, rf=rf,
                 law=law, nasa=nasa, npart=npart, xp=np.array(xp, np.uint8), sst=sst, jt=jt, jround=jround,
                 jsmax=jsmax, nfix=len(fix), lu=np.array(lu, np.uint64), optr=optr, blen=blen, vs=vs, smap=smap,
                 rowptr=rowptr, colof=colof, diag=diag, didx=didx, atoms=np.asarray(net.atoms, float), wd=w_)
@@ -384,6 +399,12 @@ __device__ __forceinline__ double step_factor(double en, bool ok, bool prej, dou
 }
 
 // Rate coefficient of the law in row q (_law) at T, ln T, 1 / T, n_tot; three-body n_tot excluded.
+// The collision limit: q, the larger of the two directions' bimolecular-equivalent rates (k, M folded in, times
+// nd^(molecules - 2), for directions of two or three molecules); if q > K_COLL both directions take K_COLL / q.
+#define COLL(fl, kf, kr, nd) do { const int mf_ = ((fl) >> 10) & 3, mr_ = ((fl) >> 12) & 3; \
+    const double q_ = fmax(mf_ >= 2 ? (kf) * (mf_ == 3 ? (nd) : 1.0) : 0.0, mr_ >= 2 ? (kr) * (mr_ == 3 ? (nd) : 1.0) : 0.0); \
+    if (q_ > $kcoll) { const double c_ = $kcoll / q_; (kf) *= c_; (kr) *= c_; } } while (0)
+
 __device__ __forceinline__ double law(const double* q, int fl, double Tc, double lT, double iT, double nd) {
   double k = exp(q[0] + q[1] * lT - q[2] * iT);
   if (fl & 2) k += exp(q[3] + q[4] * lT - q[5] * iT);
@@ -523,7 +544,7 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
     double* __restrict__ noko, int* __restrict__ count, int B, double rtol, double atol, int max_steps,
     const int* __restrict__ perm, const unsigned* __restrict__ blob, const double* __restrict__ rc,
     const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, const unsigned* __restrict__ sst,
-    const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, int sround, int jround)
+    const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, int sround, int jround$jarg)
 {
   extern __shared__ double smem[];
   unsigned* tb32 = (unsigned*)(smem + CPB * PERC);
@@ -556,7 +577,7 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
     CSYNC(grp);
     double p = 0.0;
     for (int i = lane; i < NS; i += 32) p += N[i];
-    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
+$jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
     if (fin && !cold) {   // rate coefficients; three-body ones times nd
       const double lT = log(Tc), iT = 1.0 / Tc, lKT = log(KBOLTZ * Tc / P0BAR);
       double* g = v;                          // G / RT of each species
@@ -573,13 +594,14 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
       if (cl == 0) g[NS] = 0.0;
       CSYNC(grp);
       for (int r = cl; r < NR; r += NL) {
-        const int fl = rf[r];                 // law flags (law()), 4 three-body, (dmu + 4) << 3, 256 explicit reverse
+        ${jrate}const int fl = rf[r];                 // law flags (law()), 4 three-body, (dmu + 4) << 3, 256 explicit reverse
         const double k = law(rc + RCW * r, fl, Tc, lT, iT, nd);
         const u8* x = T.rx + 6 * r;
         const double dg = g[x[3]] + g[x[4]] + g[x[5]] - g[x[0]] - g[x[1]] - g[x[2]];
         const double c3 = (fl & 4) ? nd : 1.0;
         kf[r] = k * c3;
         kr[r] = $kr;
+        COLL(fl, kf[r], kr[r], nd);
       }
     }
     CSYNC(grp);
@@ -708,9 +730,9 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
         double* Ks = st == 1 ? K1 : (st == 2 ? K2 : (st == 3 ? K3 : K4));
         if (st > 1) {
           for (int i = cl; i < NS; i += NL)
-            Ks[i] = st == 2 ? F[i] + 4.0 * ih * K1[i]
-                            : (st == 3 ? F[i] + ih * (K1[i] - K2[i])
-                                       : F[i] + ih * (K1[i] - K2[i] - (8.0 / 3.0) * K3[i]));
+            Ks[i] = st == 2 ? fma(4.0 * ih, K1[i], F[i])
+                            : (st == 3 ? fma(ih, K1[i] - K2[i], F[i])
+                                       : fma(ih, fma(-8.0 / 3.0, K3[i], K1[i] - K2[i]), F[i]));
           CSYNC(grp);
         }
         if (cl < (st == 1 ? 64 : 32)) {
@@ -792,7 +814,7 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
 // state, 8 unfinished call, 16 element drift (0: passed).
 __device__ int check_cell(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
                           const double* __restrict__ dta, const double* xout, int done, double nok,
-                          const double* __restrict__ atoms, double atol, int cell)
+                          const double* __restrict__ atoms, double atol, int cell$jarg)
 {
   double e0[NEL], e1[NEL], p = 0.0;   // atoms of each element in the input and the new state
   #pragma unroll
@@ -805,7 +827,7 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
     #pragma unroll
     for (int e = 0; e < NEL; e++) { e0[e] += atoms[i * NEL + e] * a; e1[e] += atoms[i * NEL + e] * b; }
   }
-  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
+${jchk1}  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
   if (Tc < TMIN) return 1;
   if (!(isfinite(p) && isfinite(Tc) && isfinite(nd) && isfinite(dta[cell]))) return 2;
   double s0 = 0.0, s1 = 0.0;
@@ -824,11 +846,11 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
 extern "C" __global__ void guard(const double* __restrict__ x0, const double* __restrict__ Ta,
     const double* __restrict__ Pa, const double* __restrict__ dta, const double* __restrict__ xout,
     const int* __restrict__ doneo, const double* __restrict__ noko, const double* __restrict__ atoms,
-    int* __restrict__ redo, int* __restrict__ list, int* __restrict__ count, int B, double atol)
+    int* __restrict__ redo, int* __restrict__ list, int* __restrict__ count, int B, double atol$jarg)
 {
   const int cell = blockIdx.x * blockDim.x + threadIdx.x;
   if (cell >= B) return;
-  const int c = check_cell(x0, Ta, Pa, dta, xout, doneo[cell], noko[cell], atoms, atol, cell);
+  const int c = check_cell(x0, Ta, Pa, dta, xout, doneo[cell], noko[cell], atoms, atol, cell$jpass);
   int r = 0;
   if (c == 1) atomicAdd(count + 2, 1);
   else if (c == 2) atomicAdd(count + 1, 1);
@@ -919,7 +941,7 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
     double* noko, int* redo, const int* __restrict__ list, int* count, double rtol, double atol, int max_steps,
     const int* __restrict__ perm, const unsigned* __restrict__ blob, const double* __restrict__ rc,
     const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, const unsigned* __restrict__ sst,
-    const u64* __restrict__ jt, const u16* __restrict__ didx, const double* __restrict__ atoms, int sround, int jround)
+    const u64* __restrict__ jt, const u16* __restrict__ didx, const double* __restrict__ atoms, int sround, int jround$jarg)
 {
   const int nfl = count[6];
   if ((int)blockIdx.x >= nfl) return;
@@ -949,7 +971,7 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
     CSYNC(0);
     double p = 0.0;
     for (int i = lane; i < NS; i += 32) p += N[i];
-    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
+$jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
     if (fin && !cold) {   // rate coefficients, as the call kernel
       const double lT = log(Tc), iT = 1.0 / Tc, lKT = log(KBOLTZ * Tc / P0BAR);
       double* g = v;
@@ -966,13 +988,14 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
       if (cl == 0) g[NS] = 0.0;
       CSYNC(0);
       for (int r = cl; r < NR; r += NL) {
-        const int fl = rf[r];
+        ${jrate}const int fl = rf[r];
         const double k = law(rc + RCW * r, fl, Tc, lT, iT, nd);
         const u8* x = T.rx + 6 * r;
         const double dg = g[x[3]] + g[x[4]] + g[x[5]] - g[x[0]] - g[x[1]] - g[x[2]];
         const double c3 = (fl & 4) ? nd : 1.0;
         kf[r] = k * c3;
         kr[r] = $kr;
+        COLL(fl, kf[r], kr[r], nd);
       }
     }
     CSYNC(0);
@@ -1039,7 +1062,7 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
         dense_lu(Wd, dinv, pr, lane);
         // Rodas3 stages (gamma = 1/2), as the call kernel
         dense_solve(Wd, dinv, pr, K1, lane);
-        for (int i = lane; i < NS; i += 32) K2[i] = F[i] + 4.0 * ih * K1[i];
+        for (int i = lane; i < NS; i += 32) K2[i] = fma(4.0 * ih, K1[i], F[i]);
         __syncwarp();
         dense_solve(Wd, dinv, pr, K2, lane);
         for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i];
@@ -1047,7 +1070,7 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
       CSYNC(0);
       rhs(Y, F, nullptr, n, v, part, kf, kr, nd, T, sst, sround, lane, cl, 0);
       if (cl < 32) {
-        for (int i = lane; i < NS; i += 32) K3[i] = F[i] + ih * (K1[i] - K2[i]);
+        for (int i = lane; i < NS; i += 32) K3[i] = fma(ih, K1[i] - K2[i], F[i]);
         __syncwarp();
         dense_solve(Wd, dinv, pr, K3, lane);
         for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i] + K3[i];
@@ -1055,7 +1078,7 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
       CSYNC(0);
       rhs(Y, F, nullptr, n, v, part, kf, kr, nd, T, sst, sround, lane, cl, 0);
       if (cl < 32) {
-        for (int i = lane; i < NS; i += 32) K4[i] = F[i] + ih * (K1[i] - K2[i] - (8.0 / 3.0) * K3[i]);
+        for (int i = lane; i < NS; i += 32) K4[i] = fma(ih, fma(-8.0 / 3.0, K3[i], K1[i] - K2[i]), F[i]);
         __syncwarp();
         dense_solve(Wd, dinv, pr, K4, lane);
       }
@@ -1096,7 +1119,7 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
     CSYNC(0);
     if (cl == 0) {
       hio[cell] = h; doneo[cell] = dn; noko[cell] = nok;
-      const int c = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell);
+      const int c = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell$jpass);
       redo[cell] = c ? 2 : 1;
       atomicAdd(count + (c ? 8 : 7), 1);
       *nextq = gridDim.x + atomicAdd(count + 9, 1);
@@ -1166,7 +1189,8 @@ _TROE = """  if (fl & 1) {
     k = k / (1.0 + pr);
     if (fl & 64) {   // Troe factor (a, T3, T1, T2 = q[9..12])
       const double fc = log10((1.0 - q[9]) * exp(-Tc / q[10]) + q[9] * exp(-Tc / q[11]) + exp(-q[12] / Tc));
-      const double x = log10(pr) - 0.4 - 0.67 * fc, y = x / (0.75 - 1.27 * fc - 0.14 * x);
+      const double x = (fl & 512) ? log10(pr) : log10(pr) - 0.4 - 0.67 * fc;
+      const double y = (fl & 512) ? x / (0.75 - 1.27 * fc) : x / (0.75 - 1.27 * fc - 0.14 * x);
       k *= exp10(fc / (1.0 + y * y));
     }
   }
@@ -1191,12 +1215,19 @@ def source(tab, cpb, wsh=True, drift=None):
         _field("VSA", tab["vs"][0]), _field("VSB", tab["vs"][1])])
     law = tab["law"]
     falloff = (_TROE if "troe" in law else _FALLOFF) + (_EFF if "eff" in law else "")
+    nj, nrt = tab["nj"], tab["nrt"]
+    bad = "q >= 0.0 ? 0.0 * q : __longlong_as_double(0x7ff8000000000000ull)"   # NaN unless 0 <= J < inf
+    jslots = dict(jarg="", jpass="", jchk="", jchk1="", jrate="") if not nj else dict(
+        jarg=", const double* __restrict__ Jin", jpass=", Jin",
+        jchk=f"    for (int b = lane; b < {nj}; b += 32) {{ const double q = Jin[(size_t)cell * {nj} + b]; p += {bad}; }}\n",
+        jchk1=f"  for (int b = 0; b < {nj}; b++) {{ const double q = Jin[(size_t)cell * {nj} + b]; p += {bad}; }}\n",
+        jrate=f"if (r >= {nrt}) {{ kf[r] = Jin[(size_t)cell * {nj} + r - {nrt}]; kr[r] = 0.0; continue; }}\n        ")
     j_a = w["k"] + 2
     return string.Template(_SRC).substitute(
         ns=ns, nr=tab["nr"], nnz=tab["nnz"], tb0=tab["tb0"], npart=tab["npart"], k0=k0, nt=nt,
         rp=max(1, -(-k0 // 32)), rcw=tab["rc"].shape[1], cpb=cpb, w=tab["w"], perc=_perc(tab),
         voff=tab["tb0"] if _alias(tab) else tab["nnz"] + 10 * ns + 3, tbytes=len(blob), jsmax=tab["jsmax"],
-        nfix=tab["nfix"], masks=masks, falloff=falloff, kr=_KREV if "rev" in law else _KR,
+        nfix=tab["nfix"], masks=masks, falloff=falloff, kr=_KREV if "rev" in law else _KR, kcoll=repr(K_COLL),
         sv_r=m(w["r"]), sv_sg=w["r"], sv_x2=w["r"] + 1, sv_dst=w["r"] + 2, sv_pm=m(w["part"]),
         sv_end=w["r"] + 2 + w["part"],
         j_km=m(w["k"]), j_sg=w["k"], j_x2=w["k"] + 1, j_a=j_a, j_b=j_a + w["s"], j_sm=m(w["s"]),
@@ -1204,7 +1235,7 @@ def source(tab, cpb, wsh=True, drift=None):
         nel=tab["atoms"].shape[1], etot=repr(float(tab["atoms"].sum())), tmin=repr(T_MIN),
         drift=repr(float(DRIFT if drift is None else drift)),
         kb=repr(KV.KB), p0=repr(KV.P0), wsh=int(wsh), vr=max(tab["nr"], ns + 1), rpd=-(-ns // 32),
-        perwr=_perw_rec(tab, wsh), **{f"o_{k}": v for k, v in offs.items()})
+        perwr=_perw_rec(tab, wsh), **jslots, **{f"o_{k}": v for k, v in offs.items()})
 
 
 _CUDA = []
@@ -1285,7 +1316,7 @@ def _attr(fn, a):
 
 
 class CudaSolver:
-    """CudaSolver(net, device, drift=None)(x, T, P, dt, h) -> (x, h, done, accepted steps): the call of the module
+    """CudaSolver(net, device, drift=None, photo=False)(x, T, P, dt, h, J=None) -> (x, h, done, accepted steps): the call of the module
     docstring for x [B, S] mole fractions in the network's species order, T [B] K, P [B] dyn cm^-2, dt [B] s and
     starting step sizes h [B] (float64 CUDA tensors), with the cells the guard flags recomputed on the device (see the
     module docstring); no host sync. count: the last call's counts (device int32 [10]: queue, then COUNTS, then the
@@ -1293,23 +1324,30 @@ class CudaSolver:
     fallback: the last call's counts as a dict (reads them from the device); check(): the totals as a dict, raises if
     any cell was below T_MIN; info: the kernel's layout (sizes, warps per cell, leading / trailing split, registers and
     local bytes per thread, cells and warps per block, shared memory per block, resident cells per SM; the recover
-    kernel's shared memory, W in shared memory or not, resident blocks; small: batches of 2 up to this size (the SMs)
-    run one cell per block). stride, stride_rec: the global scratch in doubles per cell slot of the call kernel and per
+    kernel's shared memory, W in shared memory or not, resident blocks). stride, stride_rec: the global scratch in doubles per cell slot of the call kernel and per
     block of the recover kernel (rates, the copy for a retry, the recover kernel's W when not in shared memory). drift:
-    the network's element-drift allowance (module docstring; default DRIFT). Calls run one at a time on torch's current
-    stream (the queues, the counts and the scratch are shared)."""
+    the network's element-drift allowance (module docstring; default DRIFT). photo: the network's photolysis branches
+    (net.photo) enter the call, each an irreversible first-order reaction absorber -> products with the rate J n_absorber;
+    the call then takes J [B, len(net.photo)] (s^-1, float64 on the device of x, columns in net.photo's order; None =
+    0), held constant within the call like T and P; a row with a negative or non-finite J is a bad input (the cell is
+    not stepped and is counted; a cell below T_MIN is counted as cold whatever its J). With photo=False (default) the
+    kernels are those of the thermal network alone. Calls run one at a time on torch's current stream (the queues, the
+    counts and the scratch are shared)."""
 
-    def __init__(self, net, device, drift=None):
+    def __init__(self, net, device, drift=None, photo=False):
+        if photo and (not net.photo or net.photo_missing):
+            raise ValueError("photo=True needs a network with photolysis branches whose species are all in its species "
+                             f"list (branches {len(net.photo)}, missing species {net.photo_missing})")
         self.dev = torch.device(device)
         self.drift = float(DRIFT if drift is None else drift)
         torch.zeros(1, device=self.dev)                       # torch's context is current from here on
         prop = torch.cuda.get_device_properties(self.dev)
         optin = prop.shared_memory_per_block_optin
         fit = lambda t: (optin - len(_blob(t)[0])) // (8 * _perc(t))     # cells per block the shared memory holds
-        tab = tables(net, 2)
+        tab = tables(net, 2, photo)
         if warps(fit(tab)) != 2:
-            tab = tables(net, warps(fit(tab)))
-        self.ns, self.nr, self.w = tab["ns"], tab["nr"], tab["w"]
+            tab = tables(net, warps(fit(tab)), photo)
+        self.ns, self.nr, self.w, self.nj = tab["ns"], tab["nr"], tab["w"], tab["nj"]
         nl = 32 * self.w
         blob, _ = _blob(tab)
         if fit(tab) < 1:
@@ -1320,7 +1358,7 @@ class CudaSolver:
         # barriers (15) allow them and the compiler fits them in the registers without more local memory
         arch = f"{prop.major}{prop.minor}"
         top = min(1024 // nl, 15, fit(tab))
-        one = _load(source(tab, 1, wsh, self.drift), arch)    # one cell per block (small batches)
+        one = _load(source(tab, 1, wsh, self.drift), arch)    # one cell per block: its registers size the packing
         regs, local = -(-_attr(one[1], 4) // 8) * 8, _attr(one[1], 3)   # registers (allocation unit 8), local bytes
         self.cpb = max(1, min(top, prop.regs_per_multiprocessor // (nl * regs)))
         mod = _load(source(tab, self.cpb, wsh, self.drift), arch) if self.cpb > 1 else one
@@ -1347,28 +1385,21 @@ class CudaSolver:
                 raise RuntimeError("the kernel does not fit on this device")
             occ.append(o.value)
         self.max_blocks, self.rec_blocks = (prop.multi_processor_count * o for o in occ)
-        # batches of up to one cell per SM run the one-cell build (the same arithmetic: only the packing differs); its
-        # launches never exceed its resident blocks (the scratch holds them), whatever small is set to
-        self._one, self.small, self._one_blocks, self.smem1 = one, 0, 0, 8 * _perc(tab) + len(blob)
         if mod is not one:
-            _check(cu.cuFuncSetAttribute(one[1], 8, self.smem1), "shared memory")
-            o = ctypes.c_int()
-            _check(cu.cuOccupancyMaxActiveBlocksPerMultiprocessor(ctypes.byref(o), one[1], nl, self.smem1), "occupancy")
-            self.small, self._one_blocks = prop.multi_processor_count, prop.multi_processor_count * o.value
+            _check(cu.cuModuleUnload(one[0]), "unload")
         # global scratch (doubles): per cell slot of the call kernel the rates and the copy for a retry (RSN), per
         # block of the recover kernel the same and W when it is not in shared memory
         rsn = 2 * self.ns + tab["nnz"]
         self.stride, self.stride_rec = 2 * self.nr + 2 + rsn, 2 * self.nr + 2 + rsn + (0 if wsh else self.ns ** 2)
-        self.info = dict(ns=self.ns, nr=self.nr, nnz=tab["nnz"], k0=tab["k0"], nt=self.ns - tab["k0"], w=self.w,
+        self.info = dict(ns=self.ns, nr=self.nr, nj=self.nj, nnz=tab["nnz"], k0=tab["k0"], nt=self.ns - tab["k0"], w=self.w,
                          sround=tab["sst"].shape[0], jround=tab["jround"], lu_ops=len(tab["lu"]), alias=_alias(tab),
                          regs=_attr(self._fn, 4), spill_bytes=_attr(self._fn, 3), cpb=self.cpb, wpb=self.wpb,
                          smem=self.smem, blob=len(blob), cells_per_sm=self.cpb * occ[0], rec_smem=self.smem_rec,
-                         rec_w_shared=wsh, rec_blocks=self.rec_blocks, drift=self.drift, small=self.small)
+                         rec_w_shared=wsh, rec_blocks=self.rec_blocks, drift=self.drift)
         f = lambda a, view=None: torch.tensor(a if view is None else np.asarray(a).view(view), device=self.dev)
         self._tabs = [f(tab["perm"]), f(np.frombuffer(blob, np.int32).copy()), f(tab["rc"]), f(tab["rf"]),
                       f(tab["nasa"])]
-        self._scratch = torch.empty(max(self.max_blocks * self.cpb, self._one_blocks) * self.stride,
-                                    dtype=torch.float64, device=self.dev)
+        self._scratch = torch.empty(self.max_blocks * self.cpb * self.stride, dtype=torch.float64, device=self.dev)
         self._scratch_rec = torch.empty(self.rec_blocks * self.stride_rec, dtype=torch.float64, device=self.dev)
         self._streams = [f(tab["sst"].ravel(), np.int32), f(tab["jt"], np.int64), f(tab["lu"], np.int64),
                          f(tab["optr"]), ctypes.c_int(tab["sst"].shape[0]), ctypes.c_int(tab["jround"])]
@@ -1376,37 +1407,45 @@ class CudaSolver:
         self.count = torch.zeros(10, dtype=torch.int32, device=self.dev)
         self.total = torch.zeros(10, dtype=torch.int64, device=self.dev)
 
-    def launch(self, x, T, P, dt, h, rtol=1e-3, atol=1e-16, max_steps=4000):
+    def launch(self, x, T, P, dt, h, rtol=1e-3, atol=1e-16, max_steps=4000, J=None):
         """The kernel, its checks and the recovery, no host sync: (x, h, done, accepted steps, flag) per cell, flag 0
         (the call's result passed the guard), 1 (recomputed, passes) or 2 (recomputed, still fails); the counts in
-        self.count. Batches of 2 to self.small cells (the SMs) run one cell per block (the same results)."""
+        self.count. J: the photolysis rates (photo=True only)."""
         if not all(a.is_cuda and a.dtype == torch.float64 for a in (x, T, P, dt, h)) or x.shape[1] != self.ns:
             raise ValueError(f"x [B, {self.ns}], T, P, dt, h [B]: float64 CUDA tensors")
         B = x.shape[0]
         x, T, P, dt, h = (a.contiguous() for a in (x, T, P, dt, h))
+        if not self.nj:
+            if J is not None:
+                raise ValueError("this solver has no photolysis (built with photo=False)")
+            jx = []
+        elif J is None:
+            jx = [torch.zeros(B, self.nj, dtype=torch.float64, device=self.dev)]
+        elif J.device == x.device and J.dtype == torch.float64 and tuple(J.shape) == (B, self.nj):
+            jx = [J.contiguous()]
+        else:
+            raise ValueError(f"J [B, {self.nj}]: a float64 tensor on the device of x")
         xo, ho = torch.empty_like(x), h.clone()
         done, redo, lst = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(3))
         nok = torch.empty(B, dtype=torch.float64, device=self.dev)
-        fn, cpb, smem, mb = ((self._one[1], 1, self.smem1, self._one_blocks) if 1 < B <= self.small else
-                             (self._fn, self.cpb, self.smem, self.max_blocks))
-        nb = max(1, min(-(-B // cpb), mb))
+        nb = max(1, min(-(-B // self.cpb), self.max_blocks))
         self.count.zero_()
         stream = torch.cuda.current_stream(self.dev).cuda_stream
-        _launch(fn, nb, 32 * self.w * cpb, smem, stream,
+        _launch(self._fn, nb, 32 * self.w * self.cpb, self.smem, stream,
                 [x, T, P, dt, ho, xo, done, nok, self.count, ctypes.c_int(B), ctypes.c_double(rtol),
-                 ctypes.c_double(atol), ctypes.c_int(max_steps), *self._tabs, self._scratch, *self._streams])
+                 ctypes.c_double(atol), ctypes.c_int(max_steps), *self._tabs, self._scratch, *self._streams, *jx])
         _launch(self._guard, -(-B // 128) or 1, 128, 0, stream,
                 [x, T, P, dt, xo, done, nok, self._atoms, redo, lst, self.count, ctypes.c_int(B),
-                 ctypes.c_double(atol)])
+                 ctypes.c_double(atol), *jx])
         _launch(self._rec, max(1, min(B, self.rec_blocks)), 32 * self.w, self.smem_rec, stream,
                 [x, T, P, dt, h, xo, ho, done, nok, redo, lst, self.count, ctypes.c_double(rtol), ctypes.c_double(atol),
                  ctypes.c_int(REC_STEPS * max_steps), *self._tabs, self._scratch_rec, *self._streams[:2], self._didx,
-                 self._atoms, *self._streams[4:]])
+                 self._atoms, *self._streams[4:], *jx])
         return xo, ho, done.bool(), nok, redo
 
-    def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=1e-16, max_steps=4000):
+    def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=1e-16, max_steps=4000, J=None):
         """The call: (x, h, done, accepted steps), no host sync; the counts added to self.total on the stream."""
-        xo, ho, done, nok, _ = self.launch(x, T, P, dt, h, rtol, atol, max_steps)
+        xo, ho, done, nok, _ = self.launch(x, T, P, dt, h, rtol, atol, max_steps, J)
         self.total += self.count
         return xo, ho, done, nok
 

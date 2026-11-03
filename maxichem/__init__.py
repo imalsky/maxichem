@@ -1,13 +1,11 @@
-"""maxichem: VULCAN's C-H-N-O gas-phase chemistry as a batched GPU 0-D solver for exoplanet GCMs (README.md).
+"""maxichem: VULCAN chemical networks, with photolysis, as a batched GPU 0-D solver for exoplanet GCMs (README.md).
 
 The classes load on first use, so importing the package imports neither torch nor JAX:
-    VulcanNetwork (kinvulcan), CudaSolver (kincuda), ADSolver (kincuda_ad), TracerSolver (kintracer),
-    KinJax (kinjax; needs JAX).
+    VulcanNetwork (kinvulcan), CudaSolver (kincuda), ADSolver (kincuda_ad), KinJax (kinjax; needs JAX).
 """
 import importlib
 
-_HOME = {"VulcanNetwork": "kinvulcan", "CudaSolver": "kincuda", "ADSolver": "kincuda_ad", "TracerSolver": "kintracer",
-         "KinJax": "kinjax"}
+_HOME = {"VulcanNetwork": "kinvulcan", "CudaSolver": "kincuda", "ADSolver": "kincuda_ad", "KinJax": "kinjax"}
 __all__ = list(_HOME)
 
 

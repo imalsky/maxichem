@@ -8,22 +8,27 @@ advances its own state from the same inputs.
     1e-6 H2 N2) <= 1e-6 dex on all but one cell-call in 100,000 (at least one per case) and <= 1e-5 dex on every
     cell-call (the reference's batched arithmetic rounds differently), accepted-step counts identical on all but
     <= 1e-4 of the cell-calls, no non-finite state, no unfinished call, no cell recomputed by the guard.
+    The network is VULCAN-JAX's NCHO_photo_network.txt (thermal part; photolysis in the photolysis cases). The
+    recorded starts are 53-species states mapped onto its 69 species by name (the others start at 0).
     - yardstick cold calls: 4,096 recorded starts at their T, P, dt 1 and 500 s, starting step 1e-10 s;
     - scrambled starts: the same kind of starts, each species times 10^(sigma N(0, 1)), sigma 0 / 1 / 2 dex, at
       dt 0.01 / 1 / 50 / 500 s;
     - a 2,000-call chain: decision panel P's 256 paths x 4 offsets (1,024 cells), T, P and dt of the recorded forcing
-      every call (mixing events not applied), step sizes carried from call to call.
+      every call (mixing events not applied), step sizes carried from call to call;
+    - photolysis (CudaSolver photo=True): the cold starts and the sigma-1 scrambled starts at dt 1 and 500 s with the
+      J of 1-D-model layers stored in the reference (the reference adds the branches by its own parser), the cold
+      starts at dt 500 s with J = 0 against the thermal reference, a lit cell forced to fail (max_steps 10) and
+      recomputed on the device, a lit 300-call panel-P chain (1,024 cells), and bad J (negative, NaN, inf: counted,
+      not stepped, returned as the normalized input, the other cells bitwise unchanged; a cell below 300 K with a bad J counted cold).
 (b) Guard and recovery. A cell with a NaN input is counted, not recomputed, and left non-finite; a cell forced to fail
     (max_steps 10 for a cold start at dt 500 s among the reference's settled cells) and, with the rounding allowance
     DRIFT set to 0, the cells whose element shares move by more than the clamping allowance are recomputed on the
     device: within 1e-6 dex of the reference call with the recovery's tries (REC_STEPS x max_steps; the reference is
     not bitwise the kernel: its sums run in another order), counted as recovered or still failed, the other cells
     bitwise those of a solver that flags none; a cell below 300 K is counted and check() raises.
-(c) Layouts: one cell per block and the packed cells per block (forced through CudaSolver.small) bitwise equal (x, h,
-    done, steps, flag, counts) on the yardstick cold calls, the scrambled starts, a forced-recovery case (max_steps 30)
-    and a 300-call panel-P chain; 128 cells alone (one cell per block, the automatic choice for small batches) bitwise
-    the same cells inside 8,192 (packed), and 8,192 cells in a permuted order bitwise the same per cell.
-    python tests/kincuda_check.py <VULCAN thermo folder: NCHO_thermo_network.txt, NASA9/>
+(c) Batch size and order: 128 cells and one cell alone bitwise the same cells inside 8,192, and 8,192 cells in a
+    permuted order bitwise the same per cell (x, h, done, steps, flag).
+    python tests/kincuda_check.py <VULCAN-JAX thermo folder: NCHO_photo_network.txt, NASA9/>
 (about 1 min on an idle GPU). Exit 0 = every case PASS."""
 import argparse
 import sys
@@ -104,26 +109,42 @@ class Tally:
                           f"recomputed by the guard {self.redo}")
 
 
+SP53 = [str(s) for s in np.load(YARD / "units.npz")["species53"]]
+SP = []                                                  # the network's species (main)
+
+
+def mapped(x53):
+    """53-species states onto the network's species by name (the others 0), renormalized."""
+    x = np.zeros((len(x53), len(SP)))
+    for j, q in enumerate(SP):
+        if q in SP53:
+            x[:, j] = x53[:, SP53.index(q)]
+    return x / x.sum(1, keepdims=True)
+
+
 def yardstick(B, seed, sigma):
-    """B recorded starts (x, T, P), each species scaled by 10^(sigma N(0, 1)), renormalized."""
+    """B recorded starts (x, T, P) mapped onto the network, each species scaled by 10^(sigma N(0, 1)), renormalized."""
     u, r = np.load(YARD / "units.npz"), np.load(YARD / "rows.npz")
     row_of_unit = {int(q): i for i, q in enumerate(r["unit"])}
     rng = np.random.default_rng(seed)
     units = rng.choice(len(u["t0"]), B, replace=True)
     idx = np.array([row_of_unit[int(q)] for q in units])
-    x = u["x53"][units]
+    x = mapped(u["x53"][units])
     if sigma:
         x = x * 10.0 ** (sigma * rng.standard_normal(x.shape))
-    return tt(x / x.sum(1, keepdims=True)), tt(r["T"][idx]), tt(r["P_barye"][idx])
+        x = x / x.sum(1, keepdims=True)
+    return tt(x), tt(r["T"][idx]), tt(r["P_barye"][idx])
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("vulcan_thermo", help="folder with NCHO_thermo_network.txt and NASA9/")
+    ap.add_argument("vulcan_thermo", help="VULCAN-JAX's thermo folder (NCHO_photo_network.txt and NASA9/)")
     a = ap.parse_args()
-    sp = [str(s) for s in np.load(YARD / "units.npz")["species53"]]
-    nf, nasa = f"{a.vulcan_thermo}/NCHO_thermo_network.txt", f"{a.vulcan_thermo}/NASA9"
-    net = KV.VulcanNetwork(nf, nasa, species=sp)
+    nf, nasa = f"{a.vulcan_thermo}/NCHO_photo_network.txt", f"{a.vulcan_thermo}/NASA9"
+    net = KV.VulcanNetwork(nf, nasa)
+    sp = list(net.species)
+    SP[:] = sp
+    assert [str(q) for q in LR.load()["species"]] == sp, "the reference's species order differs from the reader's"
     sig = LR.netsig(nf, nasa, sp)
     gi = [sp.index(g) for g in GASES]
     t0 = time.time()
@@ -147,12 +168,12 @@ def main():
             t.add(gi, tensors(LR.entry(f"call/scr{sigma:g}_{dt:g}", sig, *args)), kc(*args), kc)
             t.verdict(f"scrambled starts sigma {sigma:g} dex, dt {dt:g} s")
     r, s, F = (np.load(PANEL / f"{f}.npz") for f in ("rows", "starts", "forcing"))
-    assert [str(q) for q in s["species53"]] == sp
+    assert [str(q) for q in s["species53"]] == SP53
     B, NC = 1024, 2000
     path, of = np.arange(B) % 256, (np.arange(B) // 256) * 1500
     Tc, Pc, dc = (np.stack([np.asarray(q, np.float64)[path, of + k] for k in range(NC)])
                   for q in (F["T"], F["Pbar"] * 1e6, F["dt"]))
-    xb = tt(s["x53"][r["unit"][path]] / s["x53"][r["unit"][path]].sum(1, keepdims=True))
+    xb = tt(mapped(s["x53"][r["unit"][path]]))
     hb = full(B, 1e-10)
     R = tensors(LR.entry("chain", sig, xb, hb, Tc, Pc, dc))
     t, tb = Tally(frac=1e-5, cap=1e-5), 0.0
@@ -164,6 +185,70 @@ def main():
         xb, hb = rb[:2]
     t.verdict(f"panel P chain, {NC} calls x {B} cells (the kernel on its own state; ms per call kernel "
               f"{tb / NC * 1e3:.2f}, GPU may be shared)")
+
+    # photolysis
+    kp = KC.CudaSolver(net, dev, photo=True)
+    J = tt(LR.arrays("photo")["J"])
+    B = J.shape[0]
+    for name, seed, sigma in (("cold", 0, 0.0), ("scr1", 11, 1.0)):
+        x0, T, P = yardstick(B, seed, sigma)
+        for dt in (1.0, 500.0):
+            t = Tally()
+            args = (x0, T, P, full(B, dt), full(B, 1e-10))
+            t.add(gi, tensors(LR.entry(f"photo/{name}{dt:g}", sig, *args, J)), kp(*args, J=J), kp)
+            t.verdict(f"photolysis, {name} starts, dt {dt:g} s")
+    x0, T, P = yardstick(B, 0, 0.0)
+    args = (x0, T, P, full(B, 500.0), full(B, 1e-10))
+    t = Tally()
+    t.add(gi, tensors(LR.entry("call/cold500", sig, *args)), kp(*args, J=torch.zeros_like(J)), kp)
+    t.verdict("photolysis with J = 0 against the thermal reference, cold starts, dt 500 s")
+    i = torch.tensor([7], device=dev)                    # a lit cell forced to fail and recomputed on the device
+    y, _, d, n, flag = kp.launch(x0[i], T[i], P[i], full(1, 500.0), full(1, 1e-10), max_steps=10, J=J[i])
+    fb = dict(kp.fallback)
+    R = tensors(LR.entry("photo/forced", sig, x0[i], T[i], P[i], full(1, 500.0), full(1, 1e-10), J[i],
+                         np.array(10 * KC.REC_STEPS)))
+    e = float(floored(y[:, gi], R["x"]).max())
+    ok = (fb["unfinished"] == 1 and fb["recomputed"] == 1 and e <= TOL and bool(torch.equal(n, R["steps"]))
+          and bool(torch.equal(d, R["done"])))
+    verdict("photolysis: forced failure (max_steps 10) recomputed", ok,
+            f"counts {fb}; {e:.1e} dex from the reference call with {10 * KC.REC_STEPS} tries, finished {bool(d[0])}")
+    Bc, NC = 1024, 300                                   # a lit 300-call chain (panel P's paths and forcing)
+    r, s, F = (np.load(PANEL / f"{f}.npz") for f in ("rows", "starts", "forcing"))
+    path, of = np.arange(Bc) % 256, (np.arange(Bc) // 256) * 1500
+    Tc, Pc, dc = (np.stack([np.asarray(q, np.float64)[path, of + k] for k in range(NC)])
+                  for q in (F["T"], F["Pbar"] * 1e6, F["dt"]))
+    xb, hb = tt(mapped(s["x53"][r["unit"][path]])), full(Bc, 1e-10)
+    Jc = J[:Bc]                                           # rows i % L of the layers, as the reference
+    R = tensors(LR.entry("photo/chain", sig, xb, hb, Tc, Pc, dc, Jc))
+    t = Tally()
+    for k in range(NC):
+        rb = kp(xb, tt(Tc[k]), tt(Pc[k]), tt(dc[k]), hb, J=Jc)
+        t.add(gi, {q: v[k] for q, v in R.items()}, rb, kp)
+        xb, hb = rb[:2]
+    t.verdict(f"photolysis: lit chain, {NC} calls x {Bc} cells")
+    xs = x0[:64].clone()                                  # bad photolysis rates: counted, not stepped (x normalized)
+    Jb = J[:64].clone()
+    Jb[3, 0], Jb[5, 1], Jb[9, 2] = -1.0, float("nan"), float("inf")
+    Tb = T[:64].clone()
+    Tb[11] = 250.0
+    Jb[11, 0] = float("nan")                             # a cold cell with a bad J: counted cold
+    y, _, d, _ = kp(xs, Tb, P[:64], full(64, 1.0), full(64, 1e-10), J=Jb)
+    fb = dict(kp.fallback)
+    good = torch.ones(64, dtype=torch.bool, device=dev)
+    good[[3, 5, 9, 11]] = False
+    yr, _, dr, _ = kp(xs[good], Tb[good], P[:64][good], full(int(good.sum()), 1.0), full(int(good.sum()), 1e-10),
+                      J=Jb[good])
+    ok = (fb["bad_input"] == 3 and fb["cold"] == 1 and not bool(d[[3, 5, 9, 11]].any())
+          and bool(torch.allclose(y[[3, 5, 9]], xs[[3, 5, 9]] / xs[[3, 5, 9]].sum(1, keepdim=True), rtol=1e-14, atol=0))
+          and bool(torch.equal(y[good], yr))
+          and bool(torch.equal(d[good], dr)))
+    verdict("photolysis: bad J counted, cold precedence", ok,
+            f"counts {fb}; rows 3, 5, 9 (J -1, NaN, inf) not finished and returned as the normalized input, row 11 (250 K, NaN J) cold; "
+            f"the other 60 cells bitwise those of a batch without them")
+    try:
+        kp.check()
+    except ValueError:
+        pass                                             # the cold cell above: check() raises, as intended
 
     # (b) guard
     B = 64
@@ -198,8 +283,8 @@ def main():
             f"with those tries, {int(nr)} accepted steps, finished {bool(dr)}, flag {int(flag[7])})")
 
     kz = KC.CudaSolver(net, dev, drift=0.0)          # every rounding change of an element share is flagged (at atol
-    x0, T, P = yardstick(256, 2, 1.0)                # 1e-18: the default's clamping allowance covers rounding drift)
-    args = (x0, T, P, full(256, 500.0), full(256, 1e-10))
+    x0, T, P = yardstick(4096, 2, 1.0)               # 1e-18: the default's clamping allowance covers rounding drift)
+    args = (x0, T, P, full(4096, 500.0), full(4096, 1e-10))
     y, _, _, _, flag = kz.launch(*args, atol=1e-18)
     fb = dict(kz.fallback)
     yk, _, _, _, flag0 = kc.launch(*args, atol=1e-18)                   # the same call, nothing flagged
@@ -222,40 +307,7 @@ def main():
         verdict("guard: T < 300 K raises in check()", kc.fallback["cold"] == 1 and not bool(d[0]),
                 f"cell 0 not stepped; ValueError: {e}")
 
-    # (c) layouts
-    small, bad = kc.small, []
-
-    def both(*a, **kw):
-        out = []
-        for lim in (0, 1 << 40):                                          # packed, then one cell per block
-            kc.small = lim
-            out.append((kc.launch(*a, **kw), kc.count.tolist()[1:9]))
-        kc.small = small
-        return all(torch.equal(p, q) for p, q in zip(out[0][0], out[1][0])) and out[0][1] == out[1][1]
-
-    B = 4096
-    cases = []
-    x0, T, P = yardstick(B, 0, 0.0)
-    cases += [(f"cold dt {dt:g}", (x0, T, P, full(B, dt), full(B, 1e-10)), {}) for dt in (1.0, 500.0)]
-    cases.append(("forced recovery", (x0, T, P, full(B, 500.0), full(B, 1e-10)), dict(max_steps=30)))
-    for sigma in (0.0, 1.0, 2.0):
-        x0, T, P = yardstick(B, int(10 + sigma), sigma)
-        cases += [(f"scrambled {sigma:g} dt {dt:g}", (x0, T, P, full(B, dt), full(B, 1e-10)), {})
-                  for dt in (0.01, 1.0, 50.0, 500.0)]
-    bad = [n for n, a, kw in cases if not both(*a, **kw)]
-    B = 1024
-    path = np.arange(B) % 256
-    xa = tt(s["x53"][r["unit"][path]] / s["x53"][r["unit"][path]].sum(1, keepdims=True))
-    st, chain = [(xa, full(B, 1e-10)), (xa, full(B, 1e-10))], True
-    for k in range(300):                                     # the panel-P chain's paths, offsets and forcing
-        fo = (tt(Tc[k]), tt(Pc[k]), tt(dc[k]))
-        o = []
-        for i, lim in enumerate((0, 1 << 40)):
-            kc.small = lim
-            o.append(kc.launch(st[i][0], *fo, st[i][1]))
-        kc.small = small
-        chain = chain and all(torch.equal(p, q) for p, q in zip(*o))
-        st = [q[:2] for q in o]
+    # (c) batch size and order
     x0, T, P = yardstick(8192, 7, 1.0)
     a = (x0, T, P, full(8192, 50.0), full(8192, 1e-10))
     big, sel = kc.launch(*a), torch.arange(0, 8192, 64, device=dev)
@@ -263,13 +315,12 @@ def main():
     shuf = kc.launch(*(q[perm] for q in a))
     inv = torch.empty_like(perm)
     inv[perm] = torch.arange(8192, device=dev)
-    alone = 128 <= kc.small < 8192 and all(torch.equal(p[sel], q)
-                                           for p, q in zip(big, kc.launch(*(q[sel] for q in a))))
+    alone = all(torch.equal(p[sel], q) for p, q in zip(big, kc.launch(*(q[sel] for q in a))))
+    one = all(torch.equal(p[sel[:1]], q) for p, q in zip(big, kc.launch(*(q[sel[:1]] for q in a))))
     order = all(torch.equal(p, q[inv]) for p, q in zip(big, shuf))
-    verdict("layouts: one cell per block and packed", not bad and chain and alone and order,
-            f"{len(cases)} cases x 4096 cells bitwise equal except {bad or 'none'}; 300-call chain x {B} cells "
-            f"{chain}; 128 cells alone (one cell per block, small = {kc.small} cells) bitwise inside 8,192 (packed) "
-            f"{alone}; 8,192 cells permuted bitwise {order}")
+    verdict("batch size and order", alone and one and order,
+            f"128 cells alone bitwise inside 8,192 {alone}; one cell alone bitwise {one}; 8,192 cells permuted "
+            f"bitwise {order}")
 
     print(f"{sum(results)} of {len(results)} cases PASS", flush=True)
     sys.exit(0 if all(results) else 1)

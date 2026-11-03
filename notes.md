@@ -162,6 +162,11 @@ section reference renumbered; nothing removed.
 
 ## 1 Current state (2026-11-01, end of the refresh campaign): the physical solver and its reduced-tracer call
 
+Superseded in part by the 2026-11-03 entry (section 2): the default network is now VULCAN-JAX's NCHO_photo (69
+species, photolysis), the reduced-tracer call is removed (the GCM advects every species), the rates have a collision
+limit, the truth data are data/truth_v2/, and the derivative kernels take every VULCAN-JAX network. The text below is
+the state of 2026-11-01.
+
 ### What the author wants (section 3, 2026-10-31 ~22:1x)
 A 0-D chemistry model inside a GCM, fast, accurate over the realistic domain (no rare misses of orders of magnitude),
 with the GCM advecting at most ~30 tracers (fewer ideal), ML in the final model where it measurably helps, and later
@@ -1502,6 +1507,204 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   tolerance reruns (rtol 5e-4 vs 5e-3, default first step) passed: qual 26 / 26 (worst 0.018 dex), QT 26 / 26 (0.014),
   QT2 26 / 26 (0.0072).
 
+### 2026-11-02 (night): what a full VULCAN-0D solver still needs; photolysis as per-cell input rates (research copy)
+- Request (author, 11-02 ~20:0x): "work on getting everything for a full vulcan 0d solver done, like if photochemistry
+  or transport is still needed". Records: experiments/2026-11-02_photo/ (log.txt; mx/ is the research copy, the diff in
+  _build/photo.patch); VULCAN runs in the VULCAN tree's experiments/2026-11-02_photo_vulcan/. Nothing changed in
+  maxichem/.
+- Gap analysis (V, VULCAN-0D b3ccf4f read only; outside review agrees): thermal kinetics done. Photolysis is the one
+  missing physics input: VULCAN-0D computes J from a two-stream flux through a column, which a box lacks, so J enters
+  as a per-cell input (the author's 10-31 interface). Transport does not exist in a 0-D box (GCM's job, author 10-31).
+  Condensation in VULCAN-0D is a test stub (H2O -> H2O_l_s, rate capped at 1e-6, and NH3 -> NH3_l; no shipped network
+  has a condensation section): GCM cloud scheme, not built. No ion chemistry in VULCAN-0D. Not supported by the reader:
+  remove_list (VULCAN switches reaction directions off by id) and the "2*OH" token of CHO_photo_network.txt.
+- Implementation (research copy): the reader reads the "# photo" lines into net.photo / net.Sp (absorber its sole
+  reactant, atoms balanced, unique absorber-branch pairs; species that only photolysis names are not added, they go to
+  photo_missing and photo=True then refuses). CudaSolver(net, device, photo=True) appends the branches as reactions
+  after the thermal ones, irreversible (kf = J per cell, kr = 0, no reverse Jacobian terms), in the call, recover and
+  guard kernels; the call takes J [B, branches] (s^-1; None = 0); a negative or non-finite J makes the cell a bad input
+  (not stepped, counted). photo=False generates the same CUDA source as before. Derivative kernels, JAX and the
+  reduced-tracer call are not extended (the G31 design is for the 53-species network; NCHO_photo has 55).
+- Tests on VULCAN-0D's NCHO_photo (55 species, 305 thermal reactions, 35 branches) (V, logs/ of the folder):
+  (a) photo=False sources byte-identical for NCHO_thermo, NCHO_photo and SNCHO (36 builds). (b) photo=True with J = 0
+  vs photo=False: identical steps and done in every cell; recorded starts 4e-12 dex, scrambled 2.1e-9, a 200-call chain
+  2.4e-7 (C4H2 at 6e-29; scored gases 3.1e-8): the pre-declared 1e-9 bar failed (rounding of the changed LU order and
+  stream sums); within the parity checks' 1e-6. Bad J (negative, +-inf, NaN, columns up to 34): 12 of 12 counted, not
+  stepped. (c) Against an independent reference (the torch reference's thermal rates and right-hand side plus
+  separately written photolysis terms, Radau rtol 1e-10): 287 boxes from the layers of three VULCAN 1-D photochemical
+  runs (HD 189733b, HD 209458b, WASP-39b; their T, P, composition, J x 10^U(-1, 1)), 192 dark qual states switched to
+  lit, 24 day / night chains of 100 calls: 0 misses, worst 0.0004 dex; photolysis moves 13.5 % of the dark-to-lit boxes
+  by > 0.1 dex (up to 3.2). (d) Against VULCAN-0D with imposed J (its chem_funs regenerated for NCHO_photo, J set after
+  rev_rate, use_photo off before the integrator, first step 1e-18 s, landing on 1, 3, ..., 1e8 s): 36 boxes (12 1-D
+  layers, 12 dark-to-lit, 12 with J = 0), maxichem chains of dt 1, 100 and 500 s: 0 misses, worst 0.0004 dex; VULCAN
+  rtol 5e-3 vs 5e-4 within 0.0044 dex; Radau vs VULCAN within 0.0004 dex; the gas moves up to 4 dex; a dark chain is off
+  the lit VULCAN runs by > 0.1 dex in 17 % of lit boxes (up to 1.65). (e) Speed (idle GPU, 65,536 qual states, dt
+  100 s, settled calls): photo=False 0.213, photo=True J = 0 0.213, lit 0.258 us per cell-call.
+- Weak spot (V): lit gas at 300-320 K. In (e) 32 cells (300-325 K, 3e-3-2e-2 bar) needed 2,000-30,000 accepted steps
+  for their first lit 100-s call (the independent Radau: ~2,500 at rtol 1e-10, 130-215 at 1e-6); the recovery finished
+  30 of them (within 1e-4 dex of Radau), 2 still failed (partial states, counted). It takes CH4 and NH3 photolysis
+  together (without CH4 or without NH3 photolysis: median 43 / 26 steps); trace atomic N sets the error and goes below
+  -atol on the rejected tries; larger atol makes it worse (1e-14 / 1e-12: 2 / 14 of the 32 cells unfinished after the
+  recovery). It persists for J x 1e-3 to 10 and dt 10-500 s, and in the second lit call; dark and dusk calls are easy.
+  A T-P map from equilibrium starts (J of HD 209458b's layers): 300-320 K up to 13,553 accepted steps in the first lit
+  call and 15,735 in the second (1 bar), irregular in T (305 K at most 293); 325-1500 K at most 78.
+- Outside review of the plan (ended on a capacity error) and of the results (same thread): the photolysis formulation
+  and the kernel changes are sound (no packing, signature or Jacobian defect); the imposed-J VULCAN driver is faithful;
+  verdict "not yet" for production because of the 300-320 K cells; made from it: the reader no longer adds
+  photolysis-only species (the first version changed CHO_photo_lowT from 35 to 37 species), J must be on the device of
+  x, duplicate absorber-branch lines refused, a cold cell with bad J documented as counted cold, the reference's solver
+  status no longer hidden (rerun: no Radau failure; (c) and (d) unchanged). Its correction: NCHO_photo's thermal part
+  has 15 more reaction entries than the default (9 for O_1 / CH2_1, 3 reverse-direction duplicates, 3 same-direction
+  duplicates; the default's laws all present), not 12 plus 2 changed laws. Its remedies for the weak spot, in order:
+  capture matched rejected steps (stages, N budget, Jacobian, solve residuals) to separate discretization from
+  arithmetic; rejection-aware step growth; ROS2 as a rare-cell recovery; a nonlinear implicit recovery.
+- For the author: adopt photolysis into maxichem/ (the photo=False path is unchanged), or first fix the 300-320 K lit
+  cells; a VULCAN imposed-J truth set beyond the 36-box pilot; a photolysis-aware tracer design.
+
+### 2026-11-02 (late night): why lit cells at 300-320 K are hard, and a fix (research copy)
+- Request (author, 11-02 ~21:2x): "investigate and determine exactly what makes this hard, and if its possible to fix".
+  Records: experiments/2026-11-02_hardcell/ (log.txt, logs/); VULCAN runs in the VULCAN tree's
+  experiments/2026-11-02_photo_vulcan/out_hard/. Nothing changed in maxichem/.
+- Cause (V, logs named in log.txt): the network's CN + M -> C + N + M (A 4.2e-10, 71,000 K) gets its reverse from the
+  equilibrium constant; at 300 K C + N + M -> CN + M is 3.0e-7 cm^6 s^-1, 3e21 times a three-body collision limit
+  (130x smaller at 325 K, 1e4x at 350 K). VULCAN computes the same rate. CH4 photolysis makes atomic C, NH3 photolysis
+  atomic N, and the two titrate each other. One accepted step (0.34 -> 6.2 ms) takes C (4.5e-26) and N (3.9e-27) to
+  -8e-24 / -1.3e-22, far below atol 1e-16, so neither the error norm nor the -atol test sees it; the clamp sets both
+  to exactly 0. At
+  C = N = 0 the titration's Jacobian entries vanish (1e-9 s^-1 against -3.9e10 with the exact values), so every later
+  try is blind to it in its linear solves but meets it in the stage evaluations, which drive N negative: only tries of
+  1e-5-1e-4 s pass, with repeated erasure and regrowth of C and N, until near 1 s. From the exact state, tries of
+  1e-2 s pass. ("3e21 times" is against an assumed 1e-28 cm^6 s^-1 benchmark; the fit is from 4,060-6,060 K
+  shock-tube data in argon, Tsang 1992.) Without the CN + M line the hard cells take 45-52 steps (scored gases move
+  <= 1e-4 dex). VULCAN (2x step growth,
+  1e-18 s first step) takes 695-2,558 steps on 8 such cells, within 2e-4 dex of Radau.
+- Fix (research kernel option): also reject a try in which a species that was above zero falls below -0.5 times its
+  value. Hard cells 5,249 / 20,006 steps (median / max, 2 failed) -> 55 / 66, none failed, <= 1.4e-4 dex from Radau; a
+  1,593-cell lit grid (300-1500 K, 1e-4-10 bar, J x 0.01-10) max 20,008 steps and up to 18 failures per call -> max 252,
+  none; first lit call of 65,536 qual states (dt 500 s) 114 -> 3.95 us per cell-call. Thermal NCHO: VULCAN quick bench
+  0 misses, no path moved > 0.01 dex, same steps, 1.00x; mixing bed 2.245 -> 2.264 us per cell-call, same accuracy.
+  SNCHO scrambled-start stress (8,192 cells x 20 calls, against a tight solve): the kernel today has local errors up to
+  1.31 dex (5 cell-calls > 0.1 dex, the same clamp mechanism); threshold 0.5: worst 0.175 (1); 0.1: 0.071 (0); 0: 0.066
+  (0). Threshold 0 costs +7 % on the NCHO bed; 0.1 not yet timed. Not adopted: no growth after a rejection, clamping to
+  a fraction of the old value, larger atol; capping over-fast rate pairs (keeping K) works but changes the scored gases
+  by up to 0.028 dex.
+- Outside review (V, _build/ in the experiment folder): the mechanism is convincing; the patch is not ready: the derivative
+  kernels (kincuda_ad.py:520, 615) and through them JAX keep the old acceptance test, so their primal would diverge from
+  the call; 0.5 is not justified as a general default (SNCHO favours 0.1 or 0); the SNCHO result needs an independent
+  reference; regression cases (zero starts, subnormals, forced recovery) and new torch references are needed; raise the
+  over-fast reverse rates with the network's author.
+- Network route (V, logs/scan_nets.log, fixed_tests.log, kintest_quick_*.log, vulcan_fixed.log): VULCAN's own NCHO
+  networks (VULCAN 3, in VULCAN-JAX) removed CN + M -> C + N + M, CN + C2H2 -> C2H + HCN and CN + C2H4 -> C2H3 + HCN and
+  reversed N + CO -> CN + O and NH2 + NH2 -> N2H3 + H in 8.2020; VULCAN-0D's files predate that. Over-fast directions
+  (two-reactant coefficient at 1 bar > 1e-8 cm^3 s^-1, all at 300 K): VULCAN-0D NCHO 7 (CN + M 7e21x, NH2 + NH2 5e6x,
+  CH + M 6e4x, N + CO 3e4x, CN + C2H2 2e4x, NH3 + CH 3e3x, C2H + M 3e3x); VULCAN 3 NCHO 4 (CH + M, NH3 + CH, C2H + M,
+  NCO + HCN 15x); VULCAN 3 SNCHO also S + CN 6e4x. A copy of VULCAN-0D's networks with the five 2020 corrections (VULCAN
+  tree, nets_fixed/): with today's solver the 32 cells take 49 / 59 steps, the 1,593-cell grid at most 142, the
+  first lit call 3.80 us per cell-call, maxichem within 0.0004 dex of VULCAN on the corrected network. But it is
+  different chemistry: against the current truth, yardstick 1.48 % of rows with a miss (0.26 % large, worst 4.6 dex HCN
+  at 2309 K, 5e-5 bar), qual 165 of 2,440 paths; CN + M removal alone 0.06 % (worst 3.1 dex), the other four edits
+  1.45 %; VULCAN corrected vs original on the photochemistry pilot up to 0.16 dex. Adopting it means regenerating every
+  truth set and reference and re-qualifying G31. Summary and all edits: experiments/2026-11-02_hardcell/fixes.md.
+
+### 2026-11-03 (night to 09:2x): VULCAN-JAX's NCHO_photo as default, the collision limit, new truth data, reduced tracers removed, derivative kernels extended
+- Requests (author): 11-03 ~03:1x: a complete setup in which maxichem replaces the GCM's chemistry step, under about
+  1 us per cell-call, for every network up to the sulfur ones; remove GPU code that saves only hundredths or tenths of
+  a microsecond; fix the remaining gaps; make all the truth data; remove legacy code; plan and review first;
+  simplified technical English (rules put into CLAUDE.md). ~05:08: "1) extend [the derivative and JAX layers] 2) drop
+  reduce tracer code, but keep all notes so I can build it in the future 3) fix the ch and ch2 stuff 4) push to github
+  when neded". Records: experiments/2026-11-03_overnight/ (log.txt, logs/, reviews/), 2026-11-03_truth-gen/,
+  2026-11-03_ad/, 2026-11-03_tracer-rule/.
+- VULCAN-JAX (its ledger C29-C31; e32dc86, be9f785, 5f352cc pushed earlier; 8b30242 pushed with this entry): step
+  control (the error estimate counts a species the step creates, a value below nega_cut rejects the step, a retry
+  restores ymix and the element losses, the dt_min fallback keeps the state); data: NH3 + CH removed; HNCO + M; NCO +
+  HCN and S + CN rewritten in their exothermic directions (Tsang 1992; UMIST 2022); N(2D) thermo; CS, CS2, COS, HCS
+  masses; C31: the C3 network's `C2H + C -> C3H + H` written `C2H + C -> C3 + H` (Hickson et al. 2016, the row's
+  reference). CH + M and C2H + M were first removed (their low-T reverse rates are super-collisional), then put back:
+  removing them moved maxichem by more than 0.1 dex in 34 of 45,027 truth boxes at T >= 1000 K (worst 1.92 dex, C2H2,
+  1325 K, 0.048 bar, dark). Normal tier 324 passed, 66 skipped; audit PASS.
+- Collision limit (C30; VULCAN-JAX, the truth generator, the torch reference and maxichem): for each thermal pair,
+  q = the larger direction's two-body-equivalent rate (k with M folded in, times n_tot^(molecules - 2), directions of
+  two or more molecules); if q > 1e-9 cm3/s both directions are scaled by 1e-9 / q, so K_eq and the equilibrium are
+  kept. In NCHO_photo it acts on the reverses of CH + M (below 563 K at 1 bar, 655 K at 100 bar) and C2H + M (895 K,
+  1828 K), on NH + M (<= 4x, <= 351 K) and on the forward fits of NCO + NH2 (<= 2x, >= 1880 K) and CN + C2H6 (<= 1.2x,
+  >= 2890 K). A regularization ceiling, not a measured rate. Rates agree across codes: VULCAN-JAX vs the torch
+  reference within 1e-6 relative (96 T, P points), the generator vs the torch reference within 8.6e-14 (NCHO_photo, 48
+  points) and 8.5e-14 (SNCHO_photo; its condensation line S8 -> S8_l_s, absent from maxichem, never acts in the boxes:
+  S8_l_s stays 0).
+- maxichem: default network VULCAN-JAX's NCHO_photo_network.txt (69 species, 390 thermal reactions, 48 photolysis
+  branches); photolysis adopted (CudaSolver photo=True: J per cell and branch, fixed within a call; bad J counted, not
+  stepped); the CH3OH law with Visscher & Moses 2011's broadening (the "vm11" width, as VULCAN-JAX and the generator);
+  K_COLL in the call and recover kernels; the reader refuses unbalanced reactions and lists duplicates (rates add, as
+  in VULCAN); the small-batch one-cell-per-block launch path removed (it gained only at <= 142 cells); the Rodas3
+  stage inputs written as explicit fma (the compiler had contracted F + 4 ih K1 differently in the call kernel and the
+  derivative kernels on NCHO_photo, which broke their bitwise primal parity; F and K1 were equal, the stage input
+  differed by 1 ulp in 9 of 69 rows). All 11 VULCAN-JAX networks load and run (4,096 cells, 21 calls: 0 unfinished,
+  0 failed, element shares within 3.8e-11). The quick-start example runs.
+- Checks after the last kernel change (the fma): kincuda_check 28 of 28 (new reference libref6 on NCHO_photo with the
+  limit: recorded starts mapped by species name; photolysis calls, a lit 300-call chain, lit recovery, bad J and cold
+  precedence); SNCHO parity 15 of 15 (libref6_SNCHO); kintest quick 0 misses (new reference run
+  data/benches/kintest/quick_ref5.npz, the first on the new truth).
+- Truth generator (outside the repository): VULCAN-0D b3ccf4f on VULCAN-JAX's data with the same step-control
+  corrections, the CH3OH broadening, the collision limit and k_B = 1.380649e-16; fast path bitwise equal to the
+  corrected stock path (20 boxes, after the limit); first step 1e-18 s, dt_min 1e-24 s (a species the first steps
+  create needed steps near 1e-21 s at 75 bar); step cap 2e5. VULCAN's rtol 5e-4: at 5e-3 one pilot box of 4,096 kept
+  a 4.1-dex CO error, and the boxes nearest a miss were off by 0.09-0.10 dex; at 5e-4 VULCAN agrees with Radau (0.016
+  dex) and with maxichem (0.020) on NCHO. Merge: an atomic publication (the manifest lists the shards and replaces the
+  old one in one rename) that keeps earlier outcomes for boxes not run again (a toy test passes). A paths worker now
+  exits 1 on an error and resumes only an output whose job and build digests match.
+- Truth data (data/truth_v2/; the old-network sets moved to old_network/): boxes_ncho: a scrambled Sobol design of
+  131,072 boxes (T 300-3000 K and P 1e-5-100 bar log-uniform, metallicity 0.1-300x, C/O 0.1-2; half lit with the J of
+  a 1-D model layer times 10^U(-3, 1); starts: unreacted gas, a reheated, mixed or scrambled 1e8-s state, or 10 % of H2
+  split into H), 48 stored states 0-1e8 s: all 131,072 accepted (worst element drift 9.9e-8); qual_ncho: the recorded
+  forcing and mixes of the old qual panels replayed (904 paths: QC 512 x 1,000 calls, QCs 64, twins/QC 128, QH 64 x
+  1,000 holds, QHs 32, twins/QH 32, QL 64 x 3,500 holds, QLc 8 x 3,000 calls; 0 errors, 0 forced); daynight_ncho: 64
+  QC paths x 1,000 calls with J = J_ref s max(0, sin(2 pi t / 1 day + phase)); boxes_sncho: 8,192 boxes on
+  SNCHO_photo, 8,191 accepted (box 6602, 2676 K: element drift 1.2e-6 > 1e-6, left out). 18 boxes stopped at the
+  2e5-step cap; rerun with 2e6 (13) or 2e7 (5, up to 2,959,228 steps): all finished (the manifests list them).
+- Accuracy (rtol 1e-3, atol 1e-16; experiments/2026-11-03_overnight/logs/): NCHO boxes 6,160,384 states, 0 misses,
+  worst 0.076 dex (CH4, 487 K, lit); guard 4 recomputed of 6.2 M cell-calls, all recovered. Paths 1,016,411 states,
+  0 misses, worst 0.013 dex; panel P stable. Day-night 64,000 states, 0 misses, worst 0.0030 dex. Sulfur boxes:
+  dark 0 misses (worst 0.034 dex); lit 29 of 4,095 boxes with a miss (159 states, 127 large; worst 6.86 dex), all at
+  354-750 K, mostly S2 and COS; guard 8 recomputed of 385,000, 7 recovered, 1 still failed.
+- The sulfur misses (logs/sulfur_misses3.log; Radau of the generator, rtol 1e-10, atol 1e-30, on 27 of the 29 boxes;
+  2 still running at the time of writing): VULCAN-0D is off from Radau by 0.56-6.86 dex in 19 of the 27; maxichem is
+  off from Radau by more than 0.1 dex in 17 of them (up to 5.5 dex; 0.12-5.5 in the 8 where VULCAN is right). Cause on
+  maxichem's side (box 5932, 519 K, 5.2 bar): COS and S2 fall below atol (1e-16) near 1e4 s and are clamped to 0; in
+  Radau they grow from there to 1e-5 by 1e8 s. With atol 1e-20 maxichem is within 0.013 dex of Radau on all 27 boxes
+  (rtol 1e-6 with atol 1e-16 does not help). atol 1e-20 elsewhere: NCHO boxes 0 misses, worst 0.069 dex, steps per call
+  3.0 -> 3.8 on the 0-1e8 s chains; sulfur boxes against VULCAN 54 boxes with a miss (VULCAN's own errors show more).
+  Speed (1,382,400 cells, 70-s calls, idle GPU): NCHO_photo 0.346 / 0.349 us dark / lit at atol 1e-16, 0.349 / 0.350
+  at 1e-20; SNCHO_photo on sulfur gas from the truth boxes 0.636 / 0.636 and 0.646 / 0.637. For the author: atol
+  1e-20 as the default (a numerics change: references and checks to redo) and a tighter sulfur truth (VULCAN at a
+  smaller rtol, or Radau) before the sulfur network can be certified.
+- Derivative kernels extended (the author's decision 1): photolysis (kf = J exp(lm); tangents and cotangents in J
+  itself, so they hold at J = 0); the Troe factor's derivatives (standard and vm11 widths); the collision limit's
+  (weights from the pair before the limit: wA = 1 above, 1/2 at the limit; wG = wA times the reverse direction's share
+  of the larger, 1/2 at a tie; the Arrhenius cotangent takes the pre-limit part); the 14-column rate table (its 9
+  Arrhenius columns differentiated); the adjoint's photolysis products (kincuda.tables leaves them out of rx); tsolve
+  with two leading rows per lane; gather descriptors widened (species 7, rate 12, destination 9 bits; the old 6-bit
+  species field could not hold a 64-species network's padding index); input dtype and device checks. Limits: 64
+  leading rows (96 species), 2,047 reactions; explicit reverse laws refused. Plan and code reviewed
+  (experiments/2026-11-03_ad/review_plan.answer.txt, review_code.answer.txt: no formula or index error found; the
+  criticisms of the test design were taken into dev_check2.py). Development check dev_check2.py (states from truth
+  boxes mapped by species name; primal bitwise CudaSolver's; adaptive tangents against central differences per input
+  class incl. lm != 0, p90 <= 1e-4 with plateau coverage >= 90 %; J at 0 by one-sided Richardson differences; JVP / VJP
+  dot products, p99 <= 1e-6 (lm 1e-4), max <= 1e-3; recovered cells; determinism): NCHO_photo 99 of 99, CHO_photo 99 of
+  99, SNCHO_photo 97 of 99 (the J tangent on box starts at dt 500 s: p90 2.5e-4 and 3.7e-4 against the 1e-4 bar; p99
+  3e-3). Not done: the JAX layer (refuses until ported), an independent torch-autograd reference for these networks,
+  tests/kincuda_ad_check.py (written for the old 53-species network and refdata3).
+- Reduced tracers removed (the author's decision 2): kintracer.py, the designs, its check and gate (code at 399a347).
+  Its method, designs, failed designs, memory and speed costs stay in this file (2026-10-30 to 11-02 entries). A simple
+  abundance rule for tracer designs fails (2026-11-03_tracer-rule/): on QT2's 1,056 mixing paths (old network) 30
+  tracers give 16 paths with a miss (0.81 dex), 36 tracers 2 (0.17), 36 + HCO + HNCO 0 (0.062): HCO and HNCO hold about
+  1e-4 of their elements but matter after mixing. Learned designs were tried before and tied or lost (section 1).
+- Legacy removal (deletion list reviewed): the Auto-Chem code, its .venv and .git removed after a bundle and a full tar
+  (restore checked: references and commits identical); duplicate data and superseded references removed; the
+  training-data generator archived.
+- Kintest: the box panel refuses a set whose manifest lists boxes not run, failed runs, bad states or element drift;
+  quarantined boxes are reported; the paths must be exactly those of jobs.json; b_set is a digest of the scored truth
+  and the build stamp; non-finite truth (NaN, +-inf) is a failure, never the floor.
+
 ## 3 Author decisions and requirements (dated)
 
 - 2026-06-09 (gate 2 of the paper plan): held-out open-loop rollouts at fixed dt 6.4 s for K >= 100 steps plus 0.5 s and
@@ -1785,6 +1988,18 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
 - 2026-11-02 ~18:0x: the yardstick's 17 missed rows: "can you retest those cases? Figure it out"; then "push stuff"
   (5 commits pushed, 9ff3f2a..7c298ac). Later: "1. push 2. yes 3 yes": e4039e3 pushed; parent 705's yardstick reference
   replaced by the corrected VULCAN run; the stored VULCAN runs scanned.
+- 2026-11-02 ~20:0x: "in the meantime, can you work on getting everything for a full vulcan 0d solver done? like if
+  photochemistry or transport is still needed": photolysis as per-cell rates built and tested in a research copy (not
+  adopted); transport and condensation stay with the GCM (author 10-31).
+- 2026-11-02 ~21:2x: "investigate and determine exactly what makes this hard, and if its possible to fix" (the 300-320 K
+  lit cells): cause found and a step-acceptance fix tested in a research copy (not adopted). Then "make a .md called
+  fixes" with the edits (experiments/2026-11-02_hardcell/fixes.md) and "I think this should be a fix to the vulcan
+  version ... Can I just fix this, regen stuff, and have everything work?" (network route tested, not adopted).
+- 2026-11-03 ~03:1x: a complete maxichem as the GCM's chemistry step, under about 1 us per cell-call, for every network
+  up to the sulfur ones, even at some cost in speed; small-gain GPU code removed; tracers reduced only if a clean,
+  simple method exists; plans and complicated code reviewed first; simplified technical English everywhere. ~05:08:
+  "1) extend [the derivative and JAX layers] 2) drop reduce tracer code, but keep all notes so I can build it in the
+  future 3) fix the ch and ch2 stuff 4) push to github when neded".
 
 ## 4 Data
 

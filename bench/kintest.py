@@ -1,5 +1,6 @@
-"""Fast test runner for the GPU chemistry solver (maxichem/kincuda.py): the qual truth set, decision panel P and the mini-chem
-yardstick in one process on one GPU, misses first.
+"""Fast test runner for the GPU chemistry solver (maxichem/kincuda.py) on VULCAN-JAX's NCHO_photo network: the VULCAN truth
+boxes (paths.BOXES), the VULCAN truth paths (paths.QUAL) and decision panel P in one process on one GPU, misses first.
+The solver runs with photolysis (photo=True): the boxes with their J, the paths with J = 0.
 
 Every panel is a block of cells with its own forcing (T, P, dt per call), mixes (x <- (1 - f) x + f y before a call),
 kick-twin starts and VULCAN truth. One loop of ticks: a block's call j runs on tick j * stride; its paths that have not
@@ -9,23 +10,27 @@ GPU (read back every 1,000 ticks): per path the worst floored error against VULC
 gas, stored states with a miss (> 0.1 dex) / large miss (> 1 dex), unfinished calls, non-finite and negative states,
 the largest change of an element ratio (to H) since the path's start (reported on paths without mixes), accepted
 steps; the guard's counts of every call (CudaSolver.fallback).
-  quick  the yardstick's segment rows, calls 1-200 (saved states up to call 200 scored), in chunks; then 33,776 ticks:
-         QC + QCs + QC kick twins (704 paths, 10,000 calls, T, P and dt every call, every state scored); QH + QHs + QH
-         kick twins, one call per 1500-s hold (1,664 paths, up to 33,776 holds); QL (64) at dt 500 s (T, P held per
-         hold, truth at hold ends) and QLc (8) at dt 500 s for 10,000 calls; panel P's 256 paths cycled at dt 25, 50
-         and 500 s for 10,000 calls each (no truth: stability counters only).
-  full   the yardstick rows to their end; then a 25-s clock of 3,456,000 ticks (1000 days): QL at dt 25 s (every tick)
+  quick  the first 32,768 boxes (chained calls between their stored stops, 0 to 1e8 s); then the paths: QC + QCs + QC
+         kick twins (T, P and dt every call, every state scored); QH + QHs + QH kick twins, one call per 1500-s hold;
+         QL at dt 500 s (T, P held per hold, truth at hold ends) and QLc at dt 500 s; panel P's 256 paths cycled at dt
+         25, 50 and 500 s for 10,000 calls each (no truth: stability counters only; starts mapped by species name).
+         The paths are as long as the truth set holds: its replay of the old qual set's first rows (QC family 1,000
+         calls instead of 10,000; QH family 128 of the 1,664 paths, 1,000 holds; QL 3,500 holds; QLc 3,000 calls).
+         Less trajectory coverage than the old set; the boxes add 131,072 states from 0 to 1e8 s, lit and dark.
+  full   every box; then a 25-s clock of 3,456,000 ticks (1000 days): QL at dt 25 s (every tick)
          and 500 s (every 20th), QLc (every 20th), the QH family at dt 50 s (every 2nd), the QC family and the QH family
          at 1500-s holds as in quick, panel P at dt 25 / 50 / 500 s (every 1st / 2nd / 20th) for 1000 days. After 1,000
          ticks it prints the estimate (time so far + remaining ticks x ms per tick of ticks 1-1,000) and stops above
          5 h unless --force.
   --save out.npz  per-path summaries, the 12 gases of every cell every 1,000 (quick) / 10,000 (full) ticks and at the
-                  end, the yardstick's per-row results, timings (refuses to overwrite).
+                  end, the per-box results, timings (refuses to overwrite).
   --ref ref.npz   paired comparison with a saved run of the same tier: per path the change of the worst error and the
                   largest state change, counts above 0.01 / 0.03 dex, steps per call, unfinished calls, latency.
     python bench/kintest.py quick|full [--save out.npz] [--ref ref.npz] [--force]
 """
 import argparse
+import hashlib
+import json
 import sys
 import time
 from pathlib import Path
@@ -42,7 +47,7 @@ FLOOR = np.log10([1e-10] * 7 + [1e-8] * 3 + [1e-6] * 2)
 MISS, LARGE = 0.1, 1.0
 HOLD, DAY = 1500.0, 86400.0
 READ = 1000                 # ticks between read-backs of the counters
-CHUNK = 131072              # most yardstick rows per chunk
+CHUNK = 65536               # most boxes per chunk
 CAP_H = 5.0                 # full: stop above this estimate (hours) unless --force
 META = ("id", "panel", "kind", "stratum", "start", "comp")
 KEYS_FB = ("bad_input", "nonfinite", "unfinished", "drift", "recomputed")   # CudaSolver.fallback
@@ -50,8 +55,20 @@ NEVER = 1 << 62
 
 
 def floored(x):
-    """Floored log10 of the scored gases' mole fractions (last axis = the 12 gases)."""
-    return np.maximum(np.log10(np.maximum(x, 1e-300)), FLOOR)
+    """Floored log10 of the scored gases' mole fractions (last axis = the 12 gases); a non-finite value stays NaN (a
+    failure when scored)."""
+    return np.maximum(np.log10(np.maximum(np.where(np.isfinite(x), x, np.nan), 1e-300)), FLOOR)
+
+
+def check_jobs():
+    """Stops unless the truth paths on disk are exactly those that paths.QUAL's jobs.json lists (a missing path would
+    shrink the coverage without notice)."""
+    jobs = json.loads((paths.QUAL / "jobs.json").read_text())
+    want = {j["out"].split(f"/{paths.QUAL.name}/", 1)[-1] for j in jobs}
+    have = {str(f.relative_to(paths.QUAL)) for f in paths.QUAL.rglob("*.npz")}
+    if want != have:
+        raise SystemExit(f"{paths.QUAL}: {len(want - have)} of {len(want)} listed truth paths missing "
+                         f"{sorted(want - have)[:3]}, {len(have - want)} not listed {sorted(have - want)[:3]}")
 
 
 def load_paths(dirs, sp, gi, hold):
@@ -88,12 +105,14 @@ def load_p(sp):
     """Decision panel P: GCM-like paths (T, P every call) with their recorded mixes; no truth at a fixed dt."""
     D = paths.DESIGNS / "decision/P"
     r, s, F = (np.load(D / f"{f}.npz") for f in ("rows", "starts", "forcing"))
-    assert [str(q) for q in s["species53"]] == sp
+    s53 = [str(q) for q in s["species53"]]
+    to = lambda a: np.stack([a[..., s53.index(q)] if q in s53 else np.zeros(a.shape[:-1]) for q in sp], -1)  # noqa
     T, Pb, mr, mk, mf, mx = (F[k] for k in ("T", "Pbar", "mix_row", "mix_k", "mix_f", "mix_x"))
+    x53, mx = to(s["x53"]), to(mx)                       # by species name onto the network (the others 0)
     out = []
     for p in range(len(r["N"])):
         q = np.flatnonzero(mr == p)
-        out.append(dict(T=T[p], P=Pb[p], dt=None, s0=0, x0=s["x53"][r["unit"][p]],
+        out.append(dict(T=T[p], P=Pb[p], dt=None, s0=0, x0=x53[r["unit"][p]],
                         mix=[(int(mk[i]), float(mf[i]), mx[i] / mx[i].sum()) for i in q], rows=None, truth=None,
                         seg=None, meta=dict(id=int(r["job"][p]), panel="P", kind="main", stratum="-",
                                             start=f"age{int(r['age_idx'][p])}", comp="-")))
@@ -172,7 +191,7 @@ def score(x, c, truth, j, best, cnt, gi, fl):
     lx = torch.log10(x[c][:, gi].clamp(min=1e-300)).maximum(fl)
     e = (lx - truth).abs()
     ep, g = e.max(1)
-    ep = torch.where(torch.isfinite(lx).all(1), ep, torch.inf)
+    ep = torch.where(torch.isfinite(lx).all(1) & torch.isfinite(truth).all(1), ep, torch.inf)   # bad truth: a failure
     w = best[0][c]
     up = ep > w
     best[0][c] = torch.where(up, ep, w)
@@ -187,104 +206,102 @@ def add_fb(fb, solver):
         fb[k] = fb.get(k, 0) + v
 
 
-def yardstick(solver, sp, gi, fl, cap, dev):
-    """The yardstick's segment rows (start = the unit's VULCAN state; calls of fixed dt at the row's T, P), calls
-    1..min(N, cap), every saved state up to there scored; rows sorted by length and run in chunks, finished rows left
-    out. Returns the per-row results (y_* entries)."""
-    D = paths.YARD / "design"
-    r, u, sv = (np.load(D / f"{f}.npz") for f in ("rows", "units", "saved"))
-    tr = np.load(D / "truth_saved.npz")
-    assert [str(q) for q in u["species53"]] == sp
-    tg = [str(g) for g in tr["gases12"]]
-    t0 = time.time()
-    rows = np.flatnonzero((r["kind"] == 0) & (r["N"] > 0))
-    ncap = r["N"][rows] if cap is None else np.minimum(r["N"][rows], cap)
-    o = np.argsort(-ncap, kind="stable")
-    rows, ncap = rows[o], ncap[o]
-    R = len(rows)
-    pos = np.full(len(r["N"]), -1)
-    pos[rows] = np.arange(R)
-    k, srow = sv["k"], sv["row"]
-    sel = np.flatnonzero((pos[srow] >= 0) & ((k <= cap) if cap else True))
-    sp_, sk = pos[srow[sel]], k[sel].astype(np.int64)
-    truth = np.maximum(tr["logx12"][sel][:, [tg.index(g) for g in GASES]], FLOOR).astype(np.float32)
-    nch = -(-R // CHUNK)
-    size = -(-R // nch)
-    cid = sp_ // size
-    o = np.lexsort((sk, cid))
-    sp_, sk, truth, cid = sp_[o], sk[o], truth[o], cid[o]
-    cb = np.searchsorted(cid, np.arange(nch + 1))
-    Y = dict(y_row=rows, y_calls=ncap, y_worst=np.zeros(R), y_kworst=np.full(R, -1), y_gworst=np.full(R, -1),
-             y_saved=np.zeros(R), y_nmiss=np.zeros(R), y_nlarge=np.zeros(R), y_unfinished=np.zeros(R),
-             y_nonfinite=np.zeros(R), y_steps=np.zeros(R), y_lx=np.zeros((R, 12), np.float32))
+def boxes(solver, net, sp, gh, gi, fl, cap, dev):
+    """The VULCAN truth boxes (paths.BOXES, made by the truth generator's sobol.py: constant T, P and photolysis rates,
+    stored at fixed stops from 0 to 1e8 s): the first cap boxes (None: all), each from its stored start in chained
+    calls whose lengths are the stop intervals, every stored state scored (gh: the scored gases' columns, gi: the
+    same on the device). Refuses a set whose manifest lists boxes not run, failed runs, bad states or element drift, or
+    whose shards do not hold the accepted count; reports the quarantined boxes (a step forced at the generator's dt_min,
+    left out). b_set: a digest of the scored truth and inputs. Returns the per-box results (b_*)."""
+    man = json.loads((paths.BOXES / "manifest.json").read_text())
+    shards = [paths.BOXES / f for f in man.get("shards", [])]
+    bad = {k: len(man.get(k, [])) for k in ("errors", "bad_states", "drift_over_1e-6")}
+    if man.get("pending", 1) or any(bad.values()) or sum(len(np.load(f)["box"]) for f in shards) != man["accepted"]:
+        raise SystemExit(f"{paths.BOXES}: not complete (manifest: {man.get('pending')} boxes not run, {bad}, "
+                         f"{man['accepted']} accepted)")
+    print(f"boxes: {man['accepted']:,} of {man['boxes']:,} accepted, {len(man['quarantine'])} quarantined (left out)")
+    z0 = np.load(shards[0])
+    assert [str(q) for q in z0["species"]] == sp
+    stops, lines = z0["stops"], [str(q) for q in z0["lines"]]
+    col = [lines.index(f"{q['absorber']},{q['branch']}") for q in net.photo]
+    keys = ("box", "X", "T", "P", "J", "lit", "kind")
+    Z = {k: [] for k in keys}
+    n = 0
+    for f in shards:
+        if cap is not None and n >= cap:
+            break
+        z = np.load(f)
+        for k in keys:
+            Z[k].append(z[k])
+        n += len(z["box"])
+    Z = {k: np.concatenate(v)[:cap] for k, v in Z.items()}
+    R, nc = len(Z["box"]), len(stops) - 1
+    B = dict(b_box=Z["box"], b_calls=np.full(R, nc), b_worst=np.zeros(R), b_kworst=np.full(R, -1),
+             b_gworst=np.full(R, -1), b_saved=np.zeros(R), b_nmiss=np.zeros(R), b_nlarge=np.zeros(R),
+             b_unfinished=np.zeros(R), b_nonfinite=np.zeros(R), b_steps=np.zeros(R), b_lx=np.zeros((R, 12), np.float32))
     fb = {}
-    print(f"yardstick: {R:,} segment rows, calls 1-{int(ncap.max())}, {len(sel):,} saved states, {nch} chunks "
-          f"(loaded in {time.time() - t0:.0f} s)", flush=True)
     t0 = time.time()
-    for ch in range(nch):
-        p0, p1 = ch * size, min((ch + 1) * size, R)
-        rr, nc = rows[p0:p1], ncap[p0:p1]
-        m, cmax = p1 - p0, int(nc.max())
-        tt = lambda a: torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float64, device=dev)  # noqa: E731
-        x = tt(u["x53"][r["unit"][rr]])
-        x = x / x.sum(1, keepdim=True)
-        T, P, dt = tt(r["T"][rr]), tt(r["P_barye"][rr]), tt(r["dt"][rr])
+    tt = lambda a: torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float64, device=dev)  # noqa: E731
+    for p0 in range(0, R, CHUNK):
+        sl = slice(p0, min(R, p0 + CHUNK))
+        m = sl.stop - p0
+        x, T, P, J = tt(Z["X"][sl, 0]), tt(Z["T"][sl]), tt(Z["P"][sl]), tt(Z["J"][sl][:, col])
         h = torch.full_like(T, 1e-10)
-        a0, a1 = cb[ch], cb[ch + 1]
-        sc = torch.as_tensor(sp_[a0:a1] - p0, device=dev)
-        st = torch.as_tensor(truth[a0:a1], device=dev)
-        kb = np.searchsorted(sk[a0:a1], np.arange(cmax + 2))                  # saved states of call c: kb[c]:kb[c+1]
-        nlive = np.searchsorted(-nc, -np.arange(cmax + 1), side="right")      # rows with at least c calls
         acc = torch.zeros(m, 3, dtype=torch.float64, device=dev)              # unfinished, non-finite, steps
         cnt = torch.zeros(m, 3, dtype=torch.float64, device=dev)              # saved states, misses, large misses
         best = (torch.zeros(m, dtype=torch.float64, device=dev), torch.full((m,), -1, device=dev),
                 torch.full((m,), -1, device=dev))
-        for c in range(1, cmax + 1):
-            n = int(nlive[c])
-            xo, ho, done, nok = solver(x[:n], T[:n], P[:n], dt[:n], h[:n])
+        c = torch.arange(m, device=dev)
+        for k in range(1, nc + 1):
+            x, h, done, nok = solver(x, T, P, torch.full_like(T, stops[k] - stops[k - 1]), h, J=J)
             add_fb(fb, solver)
-            x[:n], h[:n] = xo, ho
-            acc[:n] += torch.stack(((~done).double(), (~torch.isfinite(xo).all(1)).double(), nok), 1)
-            a, z = kb[c], kb[c + 1]
-            if z > a:
-                score(x, sc[a:z], st[a:z], c, best, cnt, gi, fl)
-        s = slice(p0, p1)
-        Y["y_worst"][s], Y["y_kworst"][s], Y["y_gworst"][s] = (q.cpu().numpy() for q in best)
-        Y["y_saved"][s], Y["y_nmiss"][s], Y["y_nlarge"][s] = cnt.cpu().numpy().T
-        Y["y_unfinished"][s], Y["y_nonfinite"][s], Y["y_steps"][s] = acc.cpu().numpy().T
-        Y["y_lx"][s] = torch.log10(x[:, gi].clamp(min=1e-300)).maximum(fl).float().cpu().numpy()
-        print(f"  chunk {ch + 1}/{nch}: {m:,} rows x up to {cmax} calls, {time.time() - t0:.0f} s", flush=True)
-    Y["y_s"], Y["y_cellcalls"] = time.time() - t0, int(ncap.sum())
-    Y["fallback_yard"] = np.array([fb.get(q, 0) for q in KEYS_FB])
-    meta = dict(start=r["starts"][r["start"][rows]], cell=r["cells"][r["cell"][rows]], T=r["T"][rows],
-                P=r["P_bar"][rows], t0=r["t0"][rows], dt=r["dt"][rows])
-    yard_report(Y, meta)
-    return Y
+            bad = torch.logical_not(torch.isfinite(x).all(1))
+            acc += torch.stack((torch.logical_not(done).double(), bad.double(), nok), 1)
+            xt = tt(Z["X"][sl, k][:, gh])
+            truth = torch.where(torch.isfinite(xt), torch.log10(xt.clamp(min=1e-300)).maximum(fl), torch.nan)
+            score(x, c, truth, k, best, cnt, gi, fl)
+        B["b_worst"][sl], B["b_kworst"][sl], B["b_gworst"][sl] = (q.cpu().numpy() for q in best)
+        B["b_saved"][sl], B["b_nmiss"][sl], B["b_nlarge"][sl] = cnt.cpu().numpy().T
+        B["b_unfinished"][sl], B["b_nonfinite"][sl], B["b_steps"][sl] = acc.cpu().numpy().T
+        B["b_lx"][sl] = torch.log10(x[:, gi].clamp(min=1e-300)).maximum(fl).float().cpu().numpy()
+    torch.cuda.synchronize()
+    B["b_s"], B["b_cellcalls"] = time.time() - t0, R * nc
+    h = hashlib.sha256(json.dumps(man["stamp"], sort_keys=True).encode())
+    for k in keys:
+        h.update(np.ascontiguousarray(Z[k]).tobytes())
+    B["b_set"] = np.array(f"{man['network']} rtol {man.get('rtol')} {R} boxes sha256 {h.hexdigest()[:16]}")
+    B["fallback_boxes"] = np.array([fb.get(q, 0) for q in KEYS_FB])
+    box_report(B, Z, stops)
+    return B
 
 
-def yard_report(Y, meta):
-    """Misses-first lines of the yardstick pass."""
-    w = Y["y_worst"]
-    print(f"yardstick: {len(w):,} rows, {Y['y_cellcalls']:,} cell-calls in {Y['y_s']:.0f} s "
-          f"({1e6 * Y['y_s'] / Y['y_cellcalls']:.3f} us per cell-call), steps per call "
-          f"{Y['y_steps'].sum() / Y['y_calls'].sum():.3f}; guard {dict(zip(KEYS_FB, Y['fallback_yard'].tolist()))}")
+def box_report(B, Z, stops):
+    """Misses-first lines of the box pass."""
+    w = B["b_worst"]
+    print(f"boxes: {len(w):,} boxes x {len(stops) - 1} calls in {B['b_s']:.0f} s "
+          f"({1e6 * B['b_s'] / B['b_cellcalls']:.3f} us per cell-call), steps per call "
+          f"{B['b_steps'].sum() / B['b_calls'].sum():.3f}; guard {dict(zip(KEYS_FB, B['fallback_boxes'].tolist()))}")
 
     def line(name, s):
-        print(f"  {name:20s} {int(s.sum()):7,d} rows: miss {100 * (w[s] > MISS).mean():6.3f} %  large "
-              f"{100 * (w[s] > LARGE).mean():6.3f} %  worst {w[s].max():.3f} | saved states {int(Y['y_saved'][s].sum()):,}: "
-              f"miss {int(Y['y_nmiss'][s].sum()):,} large {int(Y['y_nlarge'][s].sum()):,} | rows with an unfinished call "
-              f"{int((Y['y_unfinished'][s] > 0).sum())}, with a non-finite state {int((Y['y_nonfinite'][s] > 0).sum())}")
+        if s.any():
+            print(f"  {name:20s} {int(s.sum()):7,d} boxes: miss {100 * (w[s] > MISS).mean():6.3f} %  large "
+                  f"{100 * (w[s] > LARGE).mean():6.3f} %  worst {w[s].max():.3f} | stored states "
+                  f"{int(B['b_saved'][s].sum()):,}: miss {int(B['b_nmiss'][s].sum()):,} large "
+                  f"{int(B['b_nlarge'][s].sum()):,} | boxes with an unfinished call {int((B['b_unfinished'][s] > 0).sum())}"
+                  f", with a non-finite state {int((B['b_nonfinite'][s] > 0).sum())}")
 
-    line("all segment rows", np.ones(len(w), bool))
-    line("from t0 = 0", meta["t0"] == 0)
-    line("restarts t0 >= 1 s", meta["t0"] >= 1)
-    for v in np.unique(meta["start"]):
-        line(f"start {v}", meta["start"] == v)
-    print("  worst rows:")
+    line("all boxes", np.ones(len(w), bool))
+    line("dark", Z["lit"] == 0)
+    line("lit", Z["lit"] == 1)
+    for k, name in enumerate(("unreacted", "reheat", "mixed", "scrambled", "hot-H")):
+        line(f"start {name}", Z["kind"] == k)
+    for lo, hi in ((300, 400), (400, 700), (700, 1200), (1200, 2000), (2000, 3001)):
+        line(f"T {lo}-{hi} K", (Z["T"] >= lo) & (Z["T"] < hi))
+    print("  worst boxes:")
     for i in np.argsort(-w)[:5]:
-        print(f"    row {Y['y_row'][i]} {meta['cell'][i]} {meta['start'][i]} T {meta['T'][i]:.0f} K P {meta['P'][i]:.1e} bar "
-              f"t0 {meta['t0'][i]:g} s dt {meta['dt'][i]:.3g} s: {w[i]:.3f} dex in {GASES[Y['y_gworst'][i]]} at call "
-              f"{Y['y_kworst'][i]}")
+        print(f"    box {Z['box'][i]} T {Z['T'][i]:.0f} K P {Z['P'][i] / 1e6:.1e} bar {'lit' if Z['lit'][i] else 'dark'} "
+              f"start {int(Z['kind'][i])}: {w[i]:.3f} dex in {GASES[B['b_gworst'][i]]} at stop "
+              f"{stops[B['b_kworst'][i]]:.3g} s")
 
 
 def make_blocks(tier, sp, gi):
@@ -484,13 +501,13 @@ def report(blocks, R, L, S):
 
 def compare(new, ref):
     """Paired comparison of two runs of the same tier (mappings as written by --save)."""
-    for k in ("tier", "id", "block_of", "y_row"):
+    for k in ("tier", "id", "block_of", "b_box", "b_set"):
         assert np.array_equal(np.asarray(new[k]), np.asarray(ref[k])), f"runs differ in {k}: not comparable"
     assert np.array_equal(new["snap_tick"], ref["snap_tick"])
-    lat = lambda z: (1e3 * float(z["loop_s"]) / int(z["ticks"]), 1e6 * float(z["y_s"]) / int(z["y_cellcalls"]))  # noqa
+    lat = lambda z: (1e3 * float(z["loop_s"]) / int(z["ticks"]), 1e6 * float(z["b_s"]) / int(z["b_cellcalls"]))  # noqa
     (m1, y1), (m0, y0) = lat(new), lat(ref)
     print(f"\nPAIRED with the reference (tier {new['tier']}): latency loop {m1:.3f} vs {m0:.3f} ms per tick "
-          f"({m1 / m0:.2f}x), yardstick {y1:.3f} vs {y0:.3f} us per cell-call ({y1 / y0:.2f}x)")
+          f"({m1 / m0:.2f}x), boxes {y1:.3f} vs {y0:.3f} us per cell-call ({y1 / y0:.2f}x)")
     dif = lambda a, b: np.nan_to_num(np.abs(np.asarray(a, np.float64) - np.asarray(b, np.float64)), nan=np.inf)  # noqa
     ds = np.maximum(dif(new["final_lx"], ref["final_lx"]).max(1),
                     dif(new["snap_lx"], ref["snap_lx"]).max((0, 2)) if len(new["snap_tick"]) else 0.0)
@@ -511,10 +528,10 @@ def compare(new, ref):
         spc = lambda z: z["steps"][s].sum() / max(z["calls"][s].sum(), 1)  # noqa: E731
         row(str(name), s, bool(new["truth_block"][bi]), new["worst"], ref["worst"], ds, spc(new), spc(ref),
             new["unfinished"][s].sum(), ref["unfinished"][s].sum(), new["id"])
-    ys = np.ones(len(new["y_row"]), bool)
-    row("yardstick rows", ys, True, new["y_worst"], ref["y_worst"], dif(new["y_lx"], ref["y_lx"]).max(1),
-        new["y_steps"].sum() / new["y_calls"].sum(), ref["y_steps"].sum() / ref["y_calls"].sum(),
-        new["y_unfinished"].sum(), ref["y_unfinished"].sum(), new["y_row"])
+    bs = np.ones(len(new["b_box"]), bool)
+    row("boxes", bs, True, new["b_worst"], ref["b_worst"], dif(new["b_lx"], ref["b_lx"]).max(1),
+        new["b_steps"].sum() / new["b_calls"].sum(), ref["b_steps"].sum() / ref["b_calls"].sum(),
+        new["b_unfinished"].sum(), ref["b_unfinished"].sum(), new["b_box"])
 
 
 def main():
@@ -526,19 +543,20 @@ def main():
     a = ap.parse_args()
     if a.save and Path(a.save).exists():
         sys.exit(f"{a.save} exists; not overwriting")
-    paths.need(paths.QUAL / "QC", paths.DESIGNS / "decision/P", paths.YARD / "design", *([a.ref] if a.ref else []))
+    paths.need(paths.QUAL / "QC", paths.DESIGNS / "decision/P", paths.BOXES, *([a.ref] if a.ref else []))
+    check_jobs()
     ref = np.load(a.ref) if a.ref else None
     t_all = time.time()
     dev = torch.device("cuda")
     quick = a.tier == "quick"
     sp = [str(q) for q in np.load(sorted((paths.QUAL / "QC").glob("*.npz"))[0])["species"]]
     gi = [sp.index(g) for g in GASES]
-    net = KV.VulcanNetwork(f"{paths.VULCAN_THERMO}/NCHO_thermo_network.txt", f"{paths.VULCAN_THERMO}/NASA9", species=sp)
-    solver = KC.CudaSolver(net, dev)
+    net = KV.VulcanNetwork(f"{paths.VULCAN_THERMO}/NCHO_photo_network.txt", f"{paths.VULCAN_THERMO}/NASA9", species=sp)
+    solver = KC.CudaSolver(net, dev, photo=True)
     gi_t, fl = torch.tensor(gi, device=dev), torch.tensor(FLOOR, device=dev)
     print(f"{a.tier}: {torch.cuda.get_device_name(dev)}, kernel ready ({solver.wpb} warps per block), "
           f"{time.time() - t_all:.0f} s", flush=True)
-    Y = yardstick(solver, sp, gi_t, fl, 200 if quick else None, dev)
+    Y = boxes(solver, net, sp, gi, gi_t, fl, 32768 if quick else None, dev)
     blocks = make_blocks(a.tier, sp, gi)
     S = assemble(blocks, net, dev)
     ticks = max(b.stride * (b.end - 1) + 1 for b in blocks)
@@ -548,7 +566,7 @@ def main():
     R = results(blocks, S)
     report(blocks, R, L, S)
     R.update(L, **Y, tier=np.array(a.tier))
-    print(f"wall time {time.time() - t_all:.0f} s (yardstick {Y['y_s']:.0f} s, loop {L['loop_s']:.0f} s)", flush=True)
+    print(f"wall time {time.time() - t_all:.0f} s (boxes {Y['b_s']:.0f} s, loop {L['loop_s']:.0f} s)", flush=True)
     if a.save:
         Path(a.save).parent.mkdir(parents=True, exist_ok=True)
         np.savez(a.save, **R)

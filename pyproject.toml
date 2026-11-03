@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "maxichem"
 version = "0.1.0"
-description = "VULCAN's C-H-N-O gas-phase chemistry as a batched GPU 0-D solver for exoplanet GCMs"
+description = "VULCAN chemical networks, with photolysis, as a batched GPU 0-D solver for exoplanet GCMs"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -29,4 +29,4 @@ Repository = "https://github.com/imalsky/maxichem"
 packages = ["maxichem"]
 
 [tool.setuptools.package-data]
-maxichem = ["designs/*.yaml", "kinjax.cc"]
+maxichem = ["kinjax.cc"]
