@@ -756,6 +756,38 @@ New dated entries go below, newest last.
     1994); an equilibrium shortcut for cells whose chemical time is far below dt (quiet cells already cost ~1 step).
   - The largest lever is fp64 hardware (GH200; todo.md).
 
+### 2026-11-03 night to 2026-11-04 01:48: coupled runs and snapy tracer transport
+Snapy built from source (main 2d9fa419, CUDA 12.8, sm_89) on branch `isaac/maxichem-coupling`; all runs on one RTX
+6000 Ada, NCHO_photo (69 species) as passive tracers, dark (J = 0), atol 1e-25, chemistry after every 70 s step,
+negative tracers set to 0 before the call and counted. Data: experiments/2026-11-04_gcm-chem and
+experiments/2026-11-04_tracer-speed.
+- Cubed sphere, hot-Jupiter-like, C48x100 (1,382,400 cells), one model day from a 1.2-day spun-up flow (snapy's
+  default transport): 1.40 solver steps per call (median over steps; 1.24-1.45), at most 93 in one cell; 0.449 us per
+  cell-call; no failed or unfinished cell, every guard count 0; per step 2.18 s of flow and tracers against 0.70 s of
+  chemistry; per-cell element change through the chemistry at most 1.7e-12; totals over transport and chemistry
+  conserved to 1e-15; peak 27.6 GB.
+- Cartesian box (96 x 96 x 100 = 921,600 cells, periodic sides, 2000 km cells, a day side along one axis), 1 model
+  day of spin-up, then 3 model days coupled (fused transport): 1.43 steps per call (1.28-1.65), at most 37; 0.469 us
+  per cell-call; no failed cell; per step 0.57 s of flow and tracers against 0.49 s of chemistry; the Python loop's
+  own overhead 0.2 % (GPU busy time against wall time over 5 steps). Every tracer total and element total grows by
+  about 1.1e-10 per step (4e-7 over the 3 days), the same for all species: the box's dry air mass grows by the same
+  amount with no tracers at all (1.0e-10 per step over 20 steps), so it is the flow's own budget in this deck, not
+  transport or chemistry. Cause not investigated.
+- Negative tracers after transport (cubed sphere: 16,210 entries over the day, up to 54 per step, worst mass
+  fraction -3.4e-22). Cause: snapy's implicit x1 tracer transfer, added after the scalar's positivity limiter and
+  limited only by the donor's dry air. With it skipped, none (41 CHO_photo tracers, unmodified main plus a switch, 40
+  steps each: 20 of 40 steps with negatives against 0). Reported to the snapy group, who are fixing it upstream (a
+  tracer-side donor limit). The clamp and count stay as a guard.
+- Tracer-count cap: the CUDA reconstruction launch held every tracer's whole line in 48 KB of shared memory, so at
+  most 57 fp64 tracers on 106-cell lines; 69 failed. Fixed by splitting the launch (bit for bit the same results);
+  offered upstream as its own PR.
+- Fused tracer transport (opt-in, SNAP_SCALAR_FUSED=1; bit for bit the default path, tested on five decks): at
+  C64x100, 44.2 -> 19.7 ms per tracer per step; 69 tracers 3.52 -> 1.85 s per step; peak memory 0.45 -> 0.38 GB per
+  tracer. WENO5 reconstruction is now about half of the fused step.
+- One passive tracer, flow held fixed (WENO5): vertical transport through a stratified column converges at order 2.1
+  (25 -> 50 cells), horizontal at 4.0, as the snapy group found for the (cell-mean tracer) / (cell-mean density)
+  reconstruction.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
