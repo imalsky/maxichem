@@ -1,8 +1,10 @@
 // Runs maxichem::Solver on inputs the Python solver saved and compares the results bit for bit.
 //   test_export <export folder> <case folder>
-// The case folder holds raw little-endian float64 files written by tests/cpp_export_case.py: x.bin [B, ns],
-// T.bin, P.bin, dt.bin, h.bin [B], J.bin [B, nj] (photolysis networks), and the Python call's results
-// x_out.bin, h_out.bin, steps_out.bin, plus done_out.bin (int8) and B.txt.
+// The case folder holds raw little-endian files written by tests/cpp_export_case.py: the inputs x.bin [B, ns],
+// T.bin, P.bin, dt.bin, h.bin [B], J.bin [B, nj] (photolysis networks; all float64), the Python call's results
+// x_out.bin, h_out.bin, steps_out.bin (float64), done_out.bin (int8) and counts_out.bin (int32 [10]), and B.txt and
+// max_steps.txt. The call runs twice: the first is compared in full (counts included), the second is timed and
+// compared again.
 #include <chrono>
 #include <cstring>
 #include <fstream>
