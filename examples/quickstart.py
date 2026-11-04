@@ -7,7 +7,7 @@ import torch
 from maxichem import CudaSolver, VulcanNetwork, paths
 
 th = paths.VULCAN_THERMO
-net = VulcanNetwork(f"{th}/NCHO_photo_network.txt", f"{th}/NASA9")    # 69 species, 388 reactions, 48 photolysis branches
+net = VulcanNetwork(f"{th}/NCHO_photo_network.txt", f"{th}/NASA9")    # 69 species, 390 reactions, 48 photolysis branches
 sp = list(net.species)
 dev = torch.device("cuda")
 B = 512

@@ -14,9 +14,9 @@ steps; the guard's counts of every call (CudaSolver.fallback).
          kick twins (T, P and dt every call, every state scored); QH + QHs + QH kick twins, one call per 1500-s hold;
          QL at dt 500 s (T, P held per hold, truth at hold ends) and QLc at dt 500 s; panel P's 256 paths cycled at dt
          25, 50 and 500 s for 10,000 calls each (no truth: stability counters only; starts mapped by species name).
-         The paths are as long as the truth set holds: its replay of the old qual set's first rows (QC family 1,000
-         calls instead of 10,000; QH family 128 of the 1,664 paths, 1,000 holds; QL 3,500 holds; QLc 3,000 calls).
-         Less trajectory coverage than the old set; the boxes add 131,072 states from 0 to 1e8 s, lit and dark.
+         The paths are as long as the truth set holds: it replays the first rows of the recorded paths of truth/qual
+         (QC family 1,000 of 10,000 calls; QH family 128 of the 1,664 paths, 1,000 holds; QL 3,500 holds; QLc 3,000
+         calls). The boxes add 131,072 states from 0 to 1e8 s, lit and dark.
   full   every box; then a 25-s clock of 3,456,000 ticks (1000 days): QL at dt 25 s (every tick)
          and 500 s (every 20th), QLc (every 20th), the QH family at dt 50 s (every 2nd), the QC family and the QH family
          at 1500-s holds as in quick, panel P at dt 25 / 50 / 500 s (every 1st / 2nd / 20th) for 1000 days. After 1,000

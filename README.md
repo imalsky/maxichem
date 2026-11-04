@@ -50,7 +50,8 @@ kept, and the rates add, as in VULCAN; the reader lists the duplicates in `net.d
 - Linux with an NVIDIA GPU. The kernels run in double precision, so their speed follows the GPU's fp64 throughput.
   Only the RTX 6000 Ada (sm_89) has been tested.
 - No CUDA toolkit. The kernels are compiled at run time with NVRTC from the `nvidia-cuda-nvrtc-cu12` wheel.
-- Python 3.10 or newer, NumPy and PyTorch with CUDA. Tested with Python 3.12, torch 2.8.0+cu126 and NumPy 2.5.3.
+- Python 3.10 or newer, NumPy and PyTorch with CUDA. Tested with Python 3.11, torch 2.10.0+cu128 and NumPy 2.4.6 (the
+  environment of the snapy GCM), and with Python 3.12, torch 2.8.0+cu126 and NumPy 2.5.3.
 - The network and NASA-9 files of VULCAN-JAX (its `src/vulcan3/thermo` folder). They are not bundled.
 
 ## Install
@@ -109,7 +110,7 @@ truth data come from VULCAN-0D with corrections to its step
 control and the network data (see notes.md), run at rtol 5e-4. The domain is 300 to 3000 K, 1e-5 to 100 bar,
 metallicity 0.1 to 300 times solar, C/O 0.1 to 2, with and without photolysis.
 
-Results on the truth data of 2026-11-03 (rtol 1e-3, atol 1e-25, the defaults):
+Results at the default tolerances (rtol 1e-3, atol 1e-25):
 
 | Test | States scored | Misses | Worst error |
 | --- | --- | --- | --- |
@@ -124,23 +125,20 @@ The one sulfur miss is an error in VULCAN-0D. In that box (511 K, 2.6e-3 bar, li
 of Radau.
 
 Sulfur species in lit gas below 800 K can grow by many orders of magnitude from tiny seeds, so both codes need a small
-absolute tolerance. The sulfur truth uses a VULCAN-0D cutoff of 1e-28 in mole fraction. VULCAN-0D's default is 1e-2
-molecules cm^-3, a mole fraction near 1e-16 at 1e-5 bar, and with it the truth is off by more than 0.1 dex in 18 of 991
-boxes. At maxichem's earlier default of atol 1e-16, 22 of the 1,955 boxes miss, 17 of them by more than 1 dex (worst 6.7
-dex).
+absolute tolerance. The sulfur truth uses a VULCAN-0D cutoff of 1e-28 in mole fraction. With atol 1e-16, maxichem
+misses in 22 of the 1,955 boxes, 17 of them by more than 1 dex (worst 6.7 dex); this is why the default is 1e-25.
 
 Limits of the sulfur result:
 
-- It covers 2,048 boxes. 93 of them have no VULCAN-0D result (92 stopped at the 2e6-step cap, 1 forced a step at the
-  minimum size), so the table does not score them. We solved 25 of the 93 with Radau: maxichem has 0 misses on them
-  (1,175 states, worst 0.002 dex). These 25 all start from unreacted gas, and 8 more timed out. They say nothing about
-  the other 68, which have no reference. The boxes left out are more often lit (6.1 % of lit boxes, 3.0 % of dark), so
-  the score under-represents the hardest gas.
+- 93 of the 2,048 boxes have no VULCAN-0D result (92 stopped at the 2e6-step cap, 1 forced a step at the minimum
+  size), so the table does not score them. Radau solved 25 of them, all from unreacted gas: maxichem has 0 misses there
+  (1,175 states, worst 0.002 dex). The other 68 have no reference. The boxes left out are more often lit (6.1 % of lit
+  boxes, 3.0 % of dark), so the score under-represents the hardest gas.
 - VULCAN-0D's cutoff can still lose a trace species, as in the box above. Radau on 44 other boxes finds VULCAN-0D
   within 0.0005 dex and maxichem within 0.005 dex.
 
-The NCHO truth keeps VULCAN-0D's default tolerance: 255 of 256 sampled boxes, rerun with the new cutoff, change by at most
-0.003 dex (the other one stopped at the step cap).
+The NCHO truth keeps VULCAN-0D's default tolerance: 255 of 256 sampled boxes, rerun with the 1e-28 cutoff, change by at
+most 0.003 dex (the other one stopped at the step cap).
 
 The guard recomputed none of the NCHO cell-calls in these tests and 3 of the 91,885 sulfur ones (all recovered).
 
@@ -168,26 +166,24 @@ box in T and P (median 27 K and 0.06 dex away; metallicity and C/O can differ):
 | SNCHO_photo | 1e-25 (default) | 17.0 | 30.1 |
 | SNCHO_photo | 1e-16 | 9.23 | 16.0 |
 
-How real transport compares with this bed is not known. A coupled GCM run on the older 53-species network, at atol 1e-16,
-took about one step per call. The cost in a GCM on the current networks is not known until a coupled run. The timings
-include the mixing step. atol is an argument of the call.
+How real transport compares with this bed is not known. A coupled GCM run on an earlier 53-species network, at atol
+1e-16, took about one step per call. The cost in a GCM on the current networks is not known until a coupled run. The
+timings include the mixing step. atol is an argument of the call.
 
-## Derivatives and JAX
+## Derivatives
 
 The package also holds tangent and adjoint kernels of a call (`ADSolver`). They give the derivatives of the call's
 x and h with respect to x, T, P, dt, h, the photolysis rates J, per-cell rate multipliers and the Arrhenius
 parameters, with the step sizes frozen or with the step control differentiated. They repeat the call's arithmetic, so
-their result is bitwise the call's. They take networks up to 96 species with photolysis, the Troe factor and the
-collision limit (every VULCAN-JAX network). They are checked on CHO_photo, NCHO_photo and SNCHO_photo against finite
-differences of the call and by dot products between the two kernels (a development check, not yet in tests/): every
-case passes on CHO_photo and NCHO_photo; on SNCHO_photo two cases (the J tangent on box starts at dt 500 s) are just
-above their bar. In a dark cell, the J tangent at exactly J = 0 is not verified at the default atol: finite differences
-cannot resolve it. We infer that it holds only for a tiny, state-dependent range of J. For a J derivative there, call at
-a small positive rate (the check uses 1e-8 s^-1, where it passes). Not yet done: an independent reference for these networks, and the JAX layer (`KinJax`), which
-refuses to run until it is ported.
+their primal result is bitwise the call's. They take networks up to 96 species with photolysis, the Troe factor and the
+collision limit (every VULCAN-JAX network).
 
-The GCM advects every species. An earlier reduced-tracer call (31 advected tracers for the old 53-species network) was
-removed; notes.md keeps its method and results.
+`tests/kincuda_ad_check.py` checks them against finite differences of the call and by dot products between the two
+kernels. Every case passes on CHO_photo and NCHO_photo. On SNCHO_photo, two cases (the J tangent on box starts at
+dt 500 s) are just above their bar. In a dark cell, the J tangent at exactly J = 0 is not verified at the default
+atol: finite differences cannot resolve it. We infer that it holds only for a tiny, state-dependent range of J. For a
+J derivative there, call at a small positive rate (the check uses 1e-8 s^-1, where it passes). There is no independent
+reference for these derivatives on the current networks.
 
 ## Tests and the data they need
 
@@ -195,6 +191,7 @@ removed; notes.md keeps its method and results.
 | --- | --- |
 | `tests/kincuda_check.py <VULCAN_THERMO>` | the CUDA call against stored outputs of an independent torch reference solver: cold, scrambled and 2,000-call chained calls; photolysis calls, a lit chain and lit recovery; bad inputs; guard and recovery; batch size and order |
 | `bench/kintest.py quick --ref <saved run>` | the solver against VULCAN-0D truth boxes and truth paths, misses first, paired with a saved run |
+| `tests/kincuda_ad_check.py [network]` | the derivative kernels: primal bitwise the call's, tangents against finite differences, dot products, recovered cells, determinism |
 
 The checks and benches read stored references and truth data that are not part of this repository. They are found
 under `CHEM_DATA`:
@@ -205,6 +202,7 @@ under `CHEM_DATA`:
     benches/designs/decision/P/        test panel P (paths, starts, forcing)
     truth_v2/boxes_ncho/               VULCAN-0D truth boxes (Sobol design, 131,072 boxes, 0 to 1e8 s)
     truth_v2/qual_ncho/                VULCAN-0D truth paths (GCM-like forcing with mixing)
+    truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz   input states of the derivative check
     benches/kintest/                   saved quick runs of bench/kintest.py
 
 Each check stops with a message that names the missing files. Each stored reference of `tests/kincuda_check.py`
@@ -217,7 +215,6 @@ refuses a saved run made on other truth data (a digest of the scored truth).
     maxichem/kinvulcan.py    reader of VULCAN-format networks and NASA-9 files (VulcanNetwork)
     maxichem/kincuda.py      the call as generated CUDA kernels (CudaSolver)
     maxichem/kincuda_ad.py   tangent and adjoint kernels (ADSolver; networks up to 96 species)
-    maxichem/kinjax.py       the JAX layer (KinJax), with the FFI shim kinjax.cc
     maxichem/paths.py        data locations (CHEM_DATA, VULCAN_THERMO)
     tests/, bench/           the checks and the benches
     examples/quickstart.py   the example above
