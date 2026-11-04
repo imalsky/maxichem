@@ -99,7 +99,13 @@ counts = solver.check()                             # guard counts; raises if a 
   elements and mass. Keep `h` per cell between calls and in restart files.
 - A cell below 300 K, or with a non-finite x, T, P or dt, or a negative or non-finite J, is not stepped. It is counted,
   and `check()` raises for cold cells.
-- Not done here: radiation, transport, condensation. The interface is Python only.
+- Not done here: radiation, transport, condensation.
+- From C++ (no Python in the time loop): `solver.export(folder)` writes the kernels (source and cubin for this GPU),
+  their tables and the launch sizes; `cpp/maxichem.hpp` (`maxichem::Solver`, libtorch and the CUDA driver API) loads
+  the export and launches the same kernels with the same arguments, so a call gives the same bits as in Python.
+  Export on the machine that runs it (a cubin is for one GPU architecture). Build: `cmake -S cpp -B cpp/build
+  -DPython3_EXECUTABLE=<python with torch> -DCUDAToolkit_ROOT=<CUDA toolkit>`. Check: `tests/cpp_export_case.py`
+  writes an export and one call, and `cpp/build/test_export` compares the C++ call with it bit for bit.
 
 ## Accuracy
 
@@ -216,6 +222,7 @@ refuses a saved run made on other truth data (a digest of the scored truth).
     maxichem/kincuda.py      the call as generated CUDA kernels (CudaSolver)
     maxichem/kincuda_ad.py   tangent and adjoint kernels (ADSolver; networks up to 96 species)
     maxichem/paths.py        data locations (CHEM_DATA, VULCAN_THERMO)
+    cpp/                     the C++ caller of an exported solver (maxichem.hpp) and its test
     tests/, bench/           the checks and the benches
     examples/quickstart.py   the example above
     notes.md                 the research record

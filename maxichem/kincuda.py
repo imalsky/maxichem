@@ -1373,6 +1373,8 @@ class CudaSolver:
                 _check(_cuda().cuModuleUnload(mod[0]), "unload")
             mod, self.cpb = nxt, self.cpb + 1
         self._mod, self._fn, self._guard, self._rec = mod
+        self._build = (tab, wsh, arch)                       # what export() recompiles
+        self._names = (list(net.species), list(net.elements))  # export() writes them
         self.wpb = self.w * self.cpb                          # warps per block
         self.smem = 8 * self.cpb * _perc(tab) + len(blob)
         self.smem_rec = 8 * _perw_rec(tab, wsh) + len(blob)
@@ -1449,6 +1451,44 @@ class CudaSolver:
         xo, ho, done, nok, _ = self.launch(x, T, P, dt, h, rtol, atol, max_steps, J)
         self.total += self.count
         return xo, ho, done, nok
+
+    def export(self, folder):
+        """Write what a caller without Python needs to run this solver's kernels (cpp/maxichem.hpp loads it): the
+        CUDA source and its cubin for this device (kernel.cu, kernel.cubin), every table the kernels read
+        (tables/<name>.bin, raw little-endian, with dtype and shape in meta.json), the species and element names (the
+        atoms table is species x elements in that order) and the launch sizes. The kernels
+        are those this object launches (same source, cells per block and options), so a call through the export
+        gives the same bits. A cubin is for one GPU architecture: export on the machine that runs it."""
+        import json
+        tab, wsh, arch = self._build
+        os.makedirs(os.path.join(folder, "tables"), exist_ok=True)
+        src = source(tab, self.cpb, wsh, self.drift)
+        with open(os.path.join(folder, "kernel.cu"), "w") as f:
+            f.write(src)
+        with open(os.path.join(folder, "kernel.cubin"), "wb") as f:
+            f.write(compile_cubin(src, arch))
+        names = ["perm", "blob", "rc", "rf", "nasa", "sst", "jt", "lu", "optr", "didx", "atoms"]
+        tensors = [*self._tabs, *self._streams[:4], self._didx, self._atoms]
+        meta = dict(arch=arch, ns=self.ns, nr=self.nr, nj=self.nj, w=self.w, cpb=self.cpb, smem=self.smem,
+                    smem_rec=self.smem_rec, stride=self.stride, stride_rec=self.stride_rec,
+                    sround=self._streams[4].value, jround=self._streams[5].value, rec_steps=REC_STEPS, atol=ATOL,
+                    t_min=T_MIN, drift=self.drift, counts=list(COUNTS), species=self._names[0],
+                    elements=self._names[1], tables={})
+        for name, t in zip(names, tensors):
+            a = t.cpu().contiguous()
+            a.numpy().tofile(os.path.join(folder, "tables", name + ".bin"))
+            meta["tables"][name] = dict(dtype=str(a.dtype).replace("torch.", ""), shape=list(a.shape))
+        with open(os.path.join(folder, "meta.json"), "w") as f:
+            json.dump(meta, f, indent=1)
+        with open(os.path.join(folder, "meta.txt"), "w") as f:     # the same, one "key value..." per line, for C++
+            for k, v in meta.items():
+                if k == "tables":
+                    for name, d in v.items():
+                        f.write(f"table {name} {d['dtype']} {' '.join(str(n) for n in d['shape'])}\n")
+                elif k in ("counts", "species", "elements"):
+                    f.write(k + " " + " ".join(v) + "\n")
+                else:
+                    f.write(f"{k} {v!r}\n" if isinstance(v, float) else f"{k} {v}\n")
 
     @property
     def fallback(self):
