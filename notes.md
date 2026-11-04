@@ -1755,14 +1755,18 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   miss, all large (0.0076 %); 1 of 1,955 boxes; worst 4.342 dex; dark worst 0.029; 5.32 steps per call; guard 3 recomputed,
   all recovered. atol 1e-16: 100 states, 87 large; 22 boxes, 17 large; worst 6.702; 3.51 steps per call. The one miss, box
   1939 (511 K, 2.6e-3 bar, lit), is VULCAN's error: its S2 is exactly 0 at the late stops; Radau reaches 2.2e-6 at 1e8 s. VULCAN against
-  Radau 4.342 dex; maxichem against Radau 0.0835 at atol 1e-25, 0.0396 at 1e-26, 0.0010 at 1e-27, stable below (box_1939.py).
-  So VULCAN at XATOL 1e-28 can still lose a seed (its clamp bound nega_cut -1 was not changed or tested).
+  Radau 4.342 dex; maxichem against Radau 0.0835 at atol 1e-25, 0.0396 at 1e-26, 0.0010 at 1e-27, stable below (box_1939.py,
+  box_1939.log). Radau on the same chemistry shows an integration error in VULCAN; I: a lost seed, cause not proven (its
+  clamp bound nega_cut -1 was not changed or tested).
 - Radau sample on unreacted starts (24 lit below 800 K, 16 lit above, 24 dark, chosen at random, box 12 first; stopped at
   17:47 with 45 done, the slowest had not finished; box 543 has no VULCAN result, so 44 scored): VULCAN worst 0.0005 dex, maxichem
   0.0049 dex, maxichem at atol 1e-16 off > 0.1 dex in 2 boxes (worst 1.773).
 - The 93 boxes without a VULCAN result: Radau on the 33 with unreacted starts (25 min limit per box): 25 solved, 8 timed out;
   the 60 with other starts need a VULCAN donor run and were not tried. maxichem on the 25: default atol 0 misses of 1,175
-  states, worst 0.002 dex; atol 1e-16 1 box, 5.891 dex (box 863). 68 boxes have no reference. They stay out of the scores.
+  states, worst 0.002 dex; atol 1e-16 1 box, 5.891 dex (box 863). 68 boxes have no reference. They stay out of the scores,
+  which so under-represent lit gas (6.1 % of lit boxes left out, 3.0 % of dark); the 25 say nothing about the other 68.
+  Not done from the plan review: forcing and build provenance in the Radau files (their start check allows absolute
+  differences below 1e-14), per-case tolerance digests, rejected and minimum-step diagnostics.
 - NCHO truth: 256 boxes (192 lit below 800 K and below 1e-2 bar, 64 random) rerun with XATOL 1e-28: 255 finished, differences
   at most 0.0030 dex (median 0.0001), 1 stopped at the cap. No regeneration: boxes_ncho keeps VULCAN's default atol.
 - Checks at the new default (run_checks.log): kincuda_check 28 of 28 (new reference libref7); SNCHO parity 15 of 15
@@ -1782,9 +1786,10 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   (1.93x); SNCHO 9.231 and 15.98, 16.995 and 30.14 (1.84x; the truth's 89 names, S8_l_s carried inert). Partner = a random
   cell of any T and P, 86,016 cells: NCHO 15.567 and 56.96, 28.832 and 106.60; SNCHO 35.879 and 65.08, 63.496 and 117.34; a
   first run at 1,382,400 cells gave 15.281 and 56.57 for NCHO at 1e-16 (speed_mixed.py; stopped: it would have held the GPU
-  about 1 h). I: real transport is gentler than these beds, as the coupled C48 run on the 53-species network stayed near
-  one step per call (chemistry 0.21 us, atol 1e-16). The cost on the current networks and atol is unknown until a coupled
-  run. Measure it first; atol is an argument of the call.
+  about 1 h). The timings include the mixing step. How real transport compares with these beds is not known; the coupled
+  C48 run on the 53-species network stayed near one step per call (chemistry 0.21 us, atol 1e-16). The cost on the current
+  networks and atol is unknown until a coupled run. Measure it first; atol is an argument of the call. A review of these
+  results recommends atol 1e-25 for sulfur networks and 1e-16 for NCHO until a coupled run; the default is the author's call.
 - J derivative near 0. At atol 1e-25 the check "FD J at 0" failed on all three networks (p99 about 1, max 1.0-1.8). Cause, from
   dbg_j0.py and dbg_j0b.py (NCHO_photo; I): the tangent at J = 0 holds only for a tiny, state-dependent range of J, since a
   species made only by J joins the error control once it passes about atol / rtol. V: in the two of the six worst cells
@@ -1797,7 +1802,9 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   with 20 judged cells); three distinct step sizes, so a cap cannot fake a plateau; the exact-0 case stays at atol 1e-16.
   Results: NCHO_photo 101 of 101, CHO_photo 101 of 101, SNCHO_photo 99 of 101. Near 0 pooled: NCHO 3,256 of 3,387, p99
   3.9e-5, max 1.8e-3; CHO 3,355 of 3,456, p99 3.8e-5, max 5.2e-4. The two SNCHO failures are the known ones (J on starts dt
-  500 s: p90 2.4e-4 and 1.4e-4 against 1e-4). Exact-0 at atol 1e-16 passes on all three. Not covered: sulfur failure states,
+  500 s: p90 2.4e-4 and 1.4e-4 against 1e-4). Exact-0 at atol 1e-16 passes on all three, with no coverage bar: cells with
+  a plateau NCHO 721 of 3,404 judged, CHO 843 of 3,463, SNCHO 928 of 3,368. The tangent at exactly 0 is not verified at
+  the default atol; the mechanism above is an inference. Not covered: sulfur failure states,
   scale-aware checks of trace species, an independent reference.
 - Open: 68 sulfur boxes without a reference; VULCAN's clamp bound untested; the JAX layer still refuses to run.
 

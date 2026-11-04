@@ -133,7 +133,9 @@ Limits of the sulfur result:
 
 - It covers 2,048 boxes. 93 of them have no VULCAN-0D result (92 stopped at the 2e6-step cap, 1 forced a step at the
   minimum size), so the table does not score them. We solved 25 of the 93 with Radau: maxichem has 0 misses on them
-  (1,175 states, worst 0.002 dex). The other 68 have no reference.
+  (1,175 states, worst 0.002 dex). These 25 all start from unreacted gas, and 8 more timed out. They say nothing about
+  the other 68, which have no reference. The boxes left out are more often lit (6.1 % of lit boxes, 3.0 % of dark), so
+  the score under-represents the hardest gas.
 - VULCAN-0D's cutoff can still lose a trace species, as in the box above. Radau on 44 other boxes finds VULCAN-0D
   within 0.0005 dex and maxichem within 0.005 dex.
 
@@ -166,9 +168,9 @@ box in T and P (median 27 K and 0.06 dex away; metallicity and C/O can differ):
 | SNCHO_photo | 1e-25 (default) | 17.0 | 30.1 |
 | SNCHO_photo | 1e-16 | 9.23 | 16.0 |
 
-We expect real transport to be gentler than this bed, but that is not yet measured on these networks. A coupled GCM run on
-the older 53-species network, at atol 1e-16, took about one step per call. The cost in a GCM on the current networks is not
-known until a coupled run. atol is an argument of the call.
+How real transport compares with this bed is not known. A coupled GCM run on the older 53-species network, at atol 1e-16,
+took about one step per call. The cost in a GCM on the current networks is not known until a coupled run. The timings
+include the mixing step. atol is an argument of the call.
 
 ## Derivatives and JAX
 
@@ -179,9 +181,9 @@ their result is bitwise the call's. They take networks up to 96 species with pho
 collision limit (every VULCAN-JAX network). They are checked on CHO_photo, NCHO_photo and SNCHO_photo against finite
 differences of the call and by dot products between the two kernels (a development check, not yet in tests/): every
 case passes on CHO_photo and NCHO_photo; on SNCHO_photo two cases (the J tangent on box starts at dt 500 s) are just
-above their bar. In a dark cell, the J tangent at exactly J = 0 holds only for a tiny, state-dependent range of J, too
-small for finite differences to confirm at the default atol. For a J derivative there, call at a small positive rate
-(the check uses 1e-8 s^-1). Not yet done: an independent reference for these networks, and the JAX layer (`KinJax`), which
+above their bar. In a dark cell, the J tangent at exactly J = 0 is not verified at the default atol: finite differences
+cannot resolve it. We infer that it holds only for a tiny, state-dependent range of J. For a J derivative there, call at
+a small positive rate (the check uses 1e-8 s^-1, where it passes). Not yet done: an independent reference for these networks, and the JAX layer (`KinJax`), which
 refuses to run until it is ported.
 
 The GCM advects every species. An earlier reduced-tracer call (31 advected tracers for the old 53-species network) was
