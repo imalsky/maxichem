@@ -685,6 +685,24 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
   - Tiny negative tracers reaching the chemistry: find out first whether they are a transport bug; if not, clamp at 0
     before the call and count them and the mass added.
   - The 48 KB reconstruction-launch fix is held on the fork: no upstream post or PR until the author says.
+- 2026-11-04 ~00:1x, the snapy group's calls on the coupling plan, adopted by the author ("incorporate that"):
+  - Passive tracers first; hydro species with feedback on the EOS only once the passive path is stable and conserves
+    element totals over several model days.
+  - A Python driver on unchanged snapy first; a C++ launcher only if the measured time split shows that the Python
+    overhead matters. This replaces the earlier "C++/CUDA entry point second" order; the transport speed work stays
+    first.
+  - Photolysis: J from kintera, computed from pyharp's mean intensity, so radiation and chemistry see one radiation
+    field; VULCAN's branches mapped with branch ratios; own cross sections only for a branch kintera lacks, listed per
+    branch. kintera's J is per reaction (summed over branches) and can be injected as `kf_override`.
+  - Develop on one GPU; scale-up runs on GH200s once the coupled test is ready.
+  - Coupled tests run on a Cartesian box (independent of the stretched-x1 work). Each includes a convergence check of
+    one passive tracer, so transport error is not mixed with chemistry error, plus element totals and guard counts.
+    snapy reconstructs a tracer's mixing ratio as (cell-mean tracer) / (cell-mean density), which on a stratified
+    column limits transport to about 2nd order (measured 2.0 against 4.7-4.9 with exact averages); an upstream fix is
+    planned after the stretched-x1 work.
+  - Memory per tracer is to be settled by measurement: persistent arrays about 0.175 GB per tracer at C64x100 (7
+    fp64 arrays, a code count) against about 0.47 GB measured at the peak; the gap is transient work in the tracer
+    step.
 
 ## Log
 
