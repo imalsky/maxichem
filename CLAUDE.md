@@ -131,6 +131,10 @@ every edit, and never on a GPU where a timing is running. "Every check" means al
   <network>` on NCHO_photo, SNCHO_photo and CHO_photo (primal bitwise CudaSolver's, tangents against finite
   differences, JVP / VJP dot products, recovered cells, determinism; exit status 1 on a failure). Compare the failing
   cases with the last result in notes.md.
+- After a change to `CudaSolver.export`, to the generated kernels or to `cpp/`: rebuild `cpp/build`, then for each of
+  the photolysis case, the thermal case (`photo` 0) and a forced-recovery case (`max_steps` 2) run
+  `python tests/cpp_export_case.py <dir> [cells] [photo] [max_steps]` and `cpp/build/test_export <dir>/export
+  <dir>/case`: the C++ call must equal the Python call bit for bit, counts included.
 - For a comment-only edit, compare syntax trees (`ast.dump`, with docstrings stripped) instead of rerunning the checks.
   A comment inside the CUDA templates changes the generated source, so compare the compiled cubins instead.
 
