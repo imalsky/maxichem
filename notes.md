@@ -810,6 +810,53 @@ experiments/2026-11-04_gcm-chem (runs/box, runs/conv, runs/conv2) and experiment
   x1 cells the floor is gone (order 4.9 and 4.8, 100 -> 200 cells), so it is a vertical-resolution term, not the
   horizontal transport. Turning the flux covariance off changes nothing in this Cartesian deck.
 
+### 2026-11-04 03:13 to 05:01: tracer WENO5 arithmetic, the noise floor of the coupled box, branch cleanup
+Night queue on one RTX 6000 Ada; data in experiments/2026-11-04_night (summary.txt has every job).
+- The fused path's WENO5 was half of its tracer time, mostly fp64 divisions (this card runs fp64 at 1/64 rate).
+  Variants, C64x100 with 69 tracers, median per step:
+  - default path 3491 ms;
+  - fused, bit-exact WENO5 1537 ms;
+  - fewer divisions 1391 ms;
+  - the same with guards 1327 ms;
+  - fp32 smoothness indicators and weights 1205 ms.
+  Tracer WENO5 kernels, GPU ms per step: 593, 418, 406, 273. Peak memory: 30.1 GB fused, 37.0 GB default.
+  - Fewer divisions: the weights c_k / d_k are multiplied through by d0 d1 d2, one reciprocal serves both faces, and
+    phi = src * (1 / mean). That takes 12 divisions by variables down to 2.
+  - The guards: the quotient is formed before the scale is applied (the unguarded form underflowed to 0 at 1e-305,
+    gave NaN on subnormals and Inf on a 1e303 spike); 1 / mean is skipped below 1e-300 (fp64) or 1e-30 (fp32); the
+    default formula is used when scale is false.
+- Transport only (cubed sphere C24x40, 200 steps; constants from 1 to 1e-305, zero, fronts):
+  - guarded form vs bit-exact: within 3.4e-14 floored dex;
+  - fp32 weights: 1.1e-10 dex on smooth tracers, up to 2.2e-7 at sharp fronts;
+  - in both, constants and zero are kept and the mass drift is identical.
+- Coupled box (96x96x100, 69 tracers, chemistry every step), 1,000 steps against the bit-exact build:
+  - the guarded form and the fp32 form both end 0.0027 dex away (floor 1e-30; 0.0007 dex at floor 1e-12), with the
+    flow bit-identical and the budgets and negatives identical;
+  - the bit-exact build with its start tracers multiplied by (1 + 1e-15) ends exactly as far away (0.00268,
+    0.00207, 0.00070 dex at floors 1e-30, 1e-20, 1e-12).
+  So the coupled box has its own floor of about 0.003 dex after 1,000 steps: the solver's step control turns any
+  round-off change into differences near its tolerance. Both variants are indistinguishable from round-off there,
+  and the 0.01-dex bound for cheaper schemes sits only about 4x above that floor.
+- Adopted in the fused path (snapy fork 36e8b84): the guarded fewer-divisions form, round-off class. The fp32-weights
+  form is held: 9 % more per step on this card, and less on fp64 hardware.
+- Tests:
+  - a new kernel test compares the fused WENO5 with the default reconstruction on 17 stress lines to 1e-12 of the
+    largest input within 4 cells; it fails on the unguarded form and on the fp32 form;
+  - the fused-path test compares the flow bit for bit, PLM decks bit for bit and WENO5 decks to 1e-12 of the local
+    largest value, and the positivity-limited cells must agree.
+- Branch cleanup after an independent whole-branch review (snapy fork 5767512):
+  - On a column split in x1 with the covariance on, the fused path stopped the run; that case now keeps the default
+    lateral flux, with a CUDA test.
+  - Every fused launcher checks its inputs.
+  - An unused kernel branch is removed.
+  - CPU CTest: every snapy test passes, except test_straka (ncrcat not installed).
+- Negative tracers: the snapy group's donor-limit fix (their branch at e3100503), at C48x100 with 41 tracers over 40
+  steps: 20 of 40 steps with negatives on main (as before), none with the fix, and the transfer-skipped arms
+  identical. The fused path's transfer kernel reproduces today's transfer, so it needs the same limit when the fix
+  merges.
+- The C++ coupled loop's own glue around the solver call is about 25 ms per step on the box (the default path,
+  120 steps): too small for a fused gather/scatter kernel to pay off.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
