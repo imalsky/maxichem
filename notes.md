@@ -857,6 +857,29 @@ Night queue on one RTX 6000 Ada; data in experiments/2026-11-04_night (summary.t
 - The C++ coupled loop's own glue around the solver call is about 25 ms per step on the box (the default path,
   120 steps): too small for a fused gather/scatter kernel to pay off.
 
+### 2026-11-04 05:01 to 09:00: C64 model day, sulfur on the box, 3 days on the sphere, the dry-source carry
+Data in experiments/2026-11-04_night (summary.txt).
+- C64x100 hot Jupiter (2,457,600 cells), 69 tracers, chemistry after every 50 s step, one model day after a 1,728-step
+  spin-up without tracers:
+  - 79.5 min for the day, 1.58 s flow and tracers plus 1.18 s chemistry per step;
+  - 1.32 steps per call, 0.42 us per cell-call, no failures, element totals within 1.1e-13 over the day;
+  - peak 41.3 GB of 48 in the Python driver. A C++ loop with a two-kernel version of the work around the solver call
+    has the same peak as with torch operations (12.6 GB on the box), so the transport sets the peak and the Python
+    driver's diagnostics add the rest (inferred). That version saves about 1 % of the step, so it is not adopted;
+  - negatives after transport in every step (up to 117, worst -3.7e-16), far larger than at C48.
+- SNCHO_photo (88 tracers) on the box, the first 100 steps: 1.21 us per cell-call at 1.96 steps per call (2.6x the
+  NCHO cost); one cell caught by the drift guard and recovered; no negatives; 17.2 GB on 921,600 cells.
+- Cubed sphere C48x100, 69 tracers, 3 model days, with the ghost refresh:
+  - 37.7 min per model day, with 1.14 s flow and tracers per step (the default path took 2.18 s);
+  - chemistry at 0.444 us per cell-call, 1.40 / 1.37 / 1.41 steps per call by day, no failures;
+  - element totals within 2.4e-13 over the 3 days;
+  - negatives after transport in 2,668 of 3,705 steps (worst -3.0e-18).
+- Fused dry-source carry (snapy fork 11e9475). With scalars and any forcing (gravity suffices), MeshBlock carries
+  the forcings' dry-density increment into the scalars every stage. That was about 10 passes over the tracers, even
+  when the increment is zero; it is now one bitwise kernel. Measured back to back at C64x100 with 69 tracers:
+  1379 -> 1238 ms per step. The default path takes 3491 ms, so the fused path is now 2.8x faster.
+- Run-to-run spread of these timings: the same build measured 1327 ms and 1379 ms five hours apart (about 4 %).
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
