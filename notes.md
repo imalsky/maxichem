@@ -788,6 +788,28 @@ experiments/2026-11-04_tracer-speed.
   (25 -> 50 cells), horizontal at 4.0, as the snapy group found for the (cell-mean tracer) / (cell-mean density)
   reconstruction.
 
+### 2026-11-04 02:00 to 03:22: box rerun, the coupled loop from C++, convergence check
+Same software as the entry above (snapy fork branch at e2b0089, maxichem 1f2cf97). Data:
+experiments/2026-11-04_gcm-chem (runs/box, runs/conv, runs/conv2) and experiments/2026-11-04_cpp/box.
+- Box drift (supersedes "cause not investigated" above): the driver added the heating after Mesh.forward's ghost
+  exchange, so the periodic ghosts were one heating step stale and the two copies of each periodic face saw different
+  states. A ghost exchange after the heating fixes it. Rerun of the 3 model days: every element total changes by at
+  most 2.4e-13 (relative) over the run (4.0e-7 before), at most 5.4e-16 per step through transport and 1.4e-15
+  through chemistry. Chemistry as before: 1.43 steps per call (median), at most 37; 0.465 us per cell-call; no failed
+  or unfinished cell. Negatives after transport: 5,256 entries in 28 of 3,705 steps, up to 192 per step, worst -5.9e-43,
+  clamped.
+- The coupled loop from C++ (box.cpp: snap::Mesh, harp::ToonMcKay89 and cpp/maxichem.hpp, no Python; the same snapy
+  libraries for both): after 20 and after 120 coupled steps (fused transport, three radiation updates), the flow, all 69
+  tracers, the step sizes and the solver counts are bit for bit the Python driver's.
+- One passive tracer, flow held fixed (conv_tracer.py). The first full run was a flawed test: the blob (width 0.1 L)
+  started 3 widths above the bottom wall, so part of the "exact" profile came from below the domain, where the
+  reflecting wall lets nothing in; the vertical error then grew with resolution (largest error above 1e-3 of the peak
+  0.2 -> 4.7 dex from 25 to 200 cells). With width 0.05 L (6 widths from either wall), vertical transport converges at
+  order 2.9, 2.7, 2.2, 2.0 (25 -> 400 cells; L1 0.25 -> 2.8e-4; largest error above 1e-3 of the peak 1.2 -> 0.0017
+  dex). Horizontal: order 4.0 and 4.3 (25 -> 100 cells), then a floor at L1 2.5e-5 with 8 cells in x1; with 16 or 32
+  x1 cells the floor is gone (order 4.9 and 4.8, 100 -> 200 cells), so it is a vertical-resolution term, not the
+  horizontal transport. Turning the flux covariance off changes nothing in this Cartesian deck.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
