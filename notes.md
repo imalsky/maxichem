@@ -717,6 +717,12 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
   fused call from snapy's C++ loop (fusing it into the transport kernels saves little and upstream will not take it);
   the bit-for-bit fused transport stays for our runs, and the upstream version adds the corrected reconstruction as
   a switch once its fix plan is known.
+- 2026-11-04 ~12:00, the author, after the overnight runs:
+  - No fp32 in the tracer WENO5. The fp32-weights variant (another 9 % per step at C64x100) is not adopted.
+  - No GH200 benchmark now.
+  - The 48 KB launch-split PR goes to review: marked ready at its unchanged head.
+  - The fused-transport design is posted to snapy's author for approval before any upstream PR.
+  - The C++/Python pair-comparison dumps (14 GB) are deleted; their logs are kept.
 
 ## Log
 
