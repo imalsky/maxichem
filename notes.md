@@ -708,6 +708,16 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
   (921,600 cells, 69 tracers, chemistry every step, 3 steps): the GPU is busy 99.7 % of the wall time, so the Python
   loop's own overhead is about 0.3 %; the gain from C++ comes from fusing work, not from leaving Python.
 
+- 2026-11-04 ~01:1x, after the snapy group's conditions on the fused path (the Python-driver box run stays the
+  reference until the fused path matches it; chemistry and transport as separate PRs, the fused transport's design
+  approved by snapy's author before code, three sign-offs incl. CUDA; the fused transport built on the corrected
+  tracer reconstruction): the 48 KB reconstruction-launch fix goes upstream as its own PR (so unchanged snapy can run
+  69-88 tracers for the reference run); the negative-tracer defect was reported, with the repro bundle for its fix.
+  The author: "whatever you recommend or is faster" on the shape of the fused path, so: chemistry stays a separate
+  fused call from snapy's C++ loop (fusing it into the transport kernels saves little and upstream will not take it);
+  the bit-for-bit fused transport stays for our runs, and the upstream version adds the corrected reconstruction as
+  a switch once its fix plan is known.
+
 ## Log
 
 New dated entries go below, newest last.
