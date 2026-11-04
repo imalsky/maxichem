@@ -689,8 +689,7 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
   - Passive tracers first; hydro species with feedback on the EOS only once the passive path is stable and conserves
     element totals over several model days.
   - A Python driver on unchanged snapy first; a C++ launcher only if the measured time split shows that the Python
-    overhead matters. This replaces the earlier "C++/CUDA entry point second" order; the transport speed work stays
-    first.
+    overhead matters. Superseded the same night (below).
   - Photolysis: J from kintera, computed from pyharp's mean intensity, so radiation and chemistry see one radiation
     field; VULCAN's branches mapped with branch ratios; own cross sections only for a branch kintera lacks, listed per
     branch. kintera's J is per reaction (summed over branches) and can be injected as `kf_override`.
@@ -703,6 +702,11 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
   - Memory per tracer is to be settled by measurement: persistent arrays about 0.175 GB per tracer at C64x100 (7
     fp64 arrays, a code count) against about 0.47 GB measured at the peak; the gap is transient work in the tracer
     step.
+- 2026-11-04 ~00:3x: the author wants the fused-CUDA path as the main path because speed is the priority: tracer
+  transport and chemistry as fused CUDA kernels called from snapy's C++ time loop, no Python in the loop; a Python
+  driver only for tests and the first coupled box runs (posted to the snapy group). Measured meanwhile on the box
+  (921,600 cells, 69 tracers, chemistry every step, 3 steps): the GPU is busy 99.7 % of the wall time, so the Python
+  loop's own overhead is about 0.3 %; the gain from C++ comes from fusing work, not from leaving Python.
 
 ## Log
 

@@ -86,8 +86,8 @@ Speed work on snapy happens in `../snapy` on branch `isaac/maxichem-coupling`, p
 upstream PR or a Slack post about a change. The acceptance rules are in notes.md, "Decisions in force"
 (2026-11-03 night and 2026-11-04): default path bit-for-bit, opt-in fused path at round-off, deterministic, the 0.01
 dex bound for fp32 or cheaper schemes, C64x100 with 69 tracers for speed numbers; coupled tests on a Cartesian box
-with a single passive-tracer convergence check, element totals and guard counts; a Python driver unless the time
-split shows its overhead matters; J from kintera. Development build: `../.venv-snapdev` (snapy built
+with a single passive-tracer convergence check, element totals and guard counts; the main path is fused CUDA called
+from snapy's C++ loop (a Python driver only for tests); J from kintera. Development build: `../.venv-snapdev` (snapy built
 from source with `../.cuda`); the shared `../.venv` keeps the released snapy wheel.
 
 ## Engineering rules
