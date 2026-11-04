@@ -1376,7 +1376,6 @@ class CudaSolver:
         self.wpb = self.w * self.cpb                          # warps per block
         self.smem = 8 * self.cpb * _perc(tab) + len(blob)
         self.smem_rec = 8 * _perw_rec(tab, wsh) + len(blob)
-        self.src = source(tab, self.cpb, wsh, self.drift)
         cu = _cuda()
         occ = []
         for fn, threads, smem in ((self._fn, nl * self.cpb, self.smem), (self._rec, nl, self.smem_rec)):

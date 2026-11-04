@@ -6,7 +6,6 @@ experiments/
 *.h5
 *.hdf5
 *.pt
-*.so
 
 # Logs
 *.log

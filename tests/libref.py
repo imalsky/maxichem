@@ -55,13 +55,3 @@ def entry(key, *inputs, path=None):
     if str(D[f"{key}/sha"]) != digest(*inputs):
         raise ValueError(f"{key}: the inputs differ from those the stored reference was written for")
     return arrays(key, path)
-
-
-def rates(sig, T, P, path=None):
-    """The reference rate coefficients kf, kr [B, R] (three-body n_tot excluded) and n_tot [B] at T [B] K, P [B]
-    dyn cm^-2 (numpy), stored for these exact T, P on the network sig."""
-    D = load(path)
-    key = f"rates/{digest(sig, T, P)[:16]}"
-    if f"{key}/kf" not in D.files:
-        raise ValueError(f"no stored rate coefficients for these T, P ({key} not in {path or paths.LIBREF})")
-    return D[f"{key}/kf"], D[f"{key}/kr"], D[f"{key}/nd"]
