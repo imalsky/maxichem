@@ -880,6 +880,25 @@ Data in experiments/2026-11-04_night (summary.txt).
   1379 -> 1238 ms per step. The default path takes 3491 ms, so the fused path is now 2.8x faster.
 - Run-to-run spread of these timings: the same build measured 1327 ms and 1379 ms five hours apart (about 4 %).
 
+### 2026-11-04 09:00 to 11:44: the box over 8 model days; ghosts after the chemistry
+- Box, 69 tracers, 8 model days (9,874 steps), fused path with the dry carry:
+  - 18.6 min per model day; per step 0.36 s flow and tracers and 0.55 s chemistry;
+  - 0.53 us per cell-call, with 1.46, 1.40, 1.50, 1.53, 1.90, 1.99, 1.72, 1.73 steps per call by day as the flow
+    develops (temperatures 1139-1863 K after day 1, 1070-1984 K after day 8);
+  - no failed cell, every guard count 0, per-cell element change through the chemistry at most 9.6e-12.
+- Transport conservation held at round-off for 4 days, then broke: element totals by up to 1.2e-13 per step from
+  day 4.6 (1.4e-10 over the run), fast radicals (N_2D, O_1, then NO2, N) by up to 6.9e-6 of their totals per step.
+  - Cause: the driver writes the chemistry's output into the interior after Mesh.forward's last ghost exchange, so
+    the next step's first stage reconstructs from stale periodic ghosts. It is the same mechanism as the heating.
+  - With a ghost exchange after the chemistry, over 400 steps: the per-species transport budget falls from 6.5e-13
+    (median; max 1.7e-12) to 3.6e-16 (max 4.4e-16), and the negatives from 4,168 to 3,840.
+  - Fixed in the box, sphere and C++ drivers, which still agree bit for bit.
+  - The 3-day box run above was not affected at its precision (round-off through day 4). The 8-day numbers other
+    than the budgets (cost, steps per call, failures) stand.
+  - For a coupled snapy step: anything that writes scalar_s after the stages needs a ghost exchange before the next
+    step, or must also update the ghost cells. snapy's own kintera step in run_hydro.cpp updates whole arrays.
+- CTest at the final branch commit: every snapy test passes on the CPU except test_straka (ncrcat not installed).
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
