@@ -82,8 +82,9 @@ gitignored); it holds the truth sets, benches, the checks' references and the ca
   Plotting scripts stay in the experiment folder, never in `maxichem/`.
 
 ## GCM-side work (snapy)
-Speed work on snapy happens in `../snapy` on branch `isaac/maxichem-coupling`, pushed to Isaac's fork; ask before an
-upstream PR or a Slack post about a change. The acceptance rules are in notes.md, "Decisions in force"
+Speed work on snapy happens in `../snapy` on branch `isaac/maxichem-coupling`, pushed to Isaac's fork. On this work
+Isaac said (2026-11-04): don't ask; investigate, post findings and results in the Lumine thread, and keep working.
+Still ask before an upstream PR (or marking one ready). The acceptance rules are in notes.md, "Decisions in force"
 (2026-11-03 night and 2026-11-04): default path bit-for-bit, opt-in fused path at round-off, deterministic, the 0.01
 dex bound for fp32 or cheaper schemes, C64x100 with 69 tracers for speed numbers; coupled tests on a Cartesian box
 with a single passive-tracer convergence check, element totals and guard counts; the main path is fused CUDA called
