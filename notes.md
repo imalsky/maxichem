@@ -897,7 +897,9 @@ Data in experiments/2026-11-04_night (summary.txt).
     than the budgets (cost, steps per call, failures) stand.
   - For a coupled snapy step: anything that writes scalar_s after the stages needs a ghost exchange before the next
     step, or must also update the ghost cells. snapy's own kintera step in run_hydro.cpp updates whole arrays.
-- CTest at the final branch commit: every snapy test passes on the CPU except test_straka (ncrcat not installed).
+- The exchange after the chemistry costs about 1 ms per step on the box (rough: that run shared the GPU).
+- CTest at the final branch commit (d824671): on the CPU, every snapy test passes except test_straka (ncrcat not
+  installed); with the GPU visible, 154 pass, 1 is skipped (needs two GPUs) and test_straka fails the same way.
 
 ## References (by topic)
 
