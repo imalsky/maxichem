@@ -21,8 +21,9 @@ min(h, dt - t); with q_i = K_4,i / (atol + rtol max(|N_i|, |N'_i|)), err is the 
 while the call has no accepted step (t = 0), when it is max(RMS, max_i |q_i|), the worst species: the first try uses the
 step size carried from the last call, often the whole call, and the gas may have changed abruptly since, so one fast
 species' error must not hide in the mean over all species; a step is accepted when err <= 1, err is finite and no
-species is below -atol (rtol 1e-3, atol 1e-16 by default; atol also sets the guard's clamping allowance); accepted
-states are clamped at 0. The next step is f times the last try's, f = 0.9 err^(-1/3) with the same err (so a first try
+species is below -atol (rtol 1e-3, atol ATOL = 1e-25 by default: trace species well below 1e-20 can grow by many orders
+of magnitude, as sulfur species do in lit gas below 800 K, so the error control must follow them; atol also sets the
+guard's clamping allowance); accepted states are clamped at 0. The next step is f times the last try's, f = 0.9 err^(-1/3) with the same err (so a first try
 rejected by its worst species shrinks by that species' error; 0.1 for a non-finite err), within [0.2, 20] after an
 accepted step or a rejected try, at most 0.5 after a rejection; a rejection that follows a rejection
 (both at the same state, both err > 1, the second try shorter) instead fits err ~ h^p to the two tries,
@@ -87,6 +88,7 @@ from . import kinvulcan as KV
 T_MIN = 300.0   # K: the solver's domain starts here (colder cells are counted, not stepped)
 DRIFT = 1e-6    # default drift allowance (NCHO): relative change of an element's share left to rounding
 REC_STEPS = 10  # the recovery's tries, in units of the call's max_steps (40,000 at the default 4,000)
+ATOL = 1e-25    # default absolute tolerance, in mole fraction (module docstring)
 K_COLL = 1e-9   # cm3 s^-1: no thermal rate may exceed this as a bimolecular-equivalent rate (module docstring)
 COUNTS = ("bad_input", "cold", "nonfinite", "unfinished", "drift", "recomputed", "recovered", "still_failed")
 
@@ -1407,7 +1409,7 @@ class CudaSolver:
         self.count = torch.zeros(10, dtype=torch.int32, device=self.dev)
         self.total = torch.zeros(10, dtype=torch.int64, device=self.dev)
 
-    def launch(self, x, T, P, dt, h, rtol=1e-3, atol=1e-16, max_steps=4000, J=None):
+    def launch(self, x, T, P, dt, h, rtol=1e-3, atol=ATOL, max_steps=4000, J=None):
         """The kernel, its checks and the recovery, no host sync: (x, h, done, accepted steps, flag) per cell, flag 0
         (the call's result passed the guard), 1 (recomputed, passes) or 2 (recomputed, still fails); the counts in
         self.count. J: the photolysis rates (photo=True only)."""
@@ -1443,7 +1445,7 @@ class CudaSolver:
                  self._atoms, *self._streams[4:], *jx])
         return xo, ho, done.bool(), nok, redo
 
-    def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=1e-16, max_steps=4000, J=None):
+    def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=ATOL, max_steps=4000, J=None):
         """The call: (x, h, done, accepted steps), no host sync; the counts added to self.total on the stream."""
         xo, ho, done, nok, _ = self.launch(x, T, P, dt, h, rtol, atol, max_steps, J)
         self.total += self.count

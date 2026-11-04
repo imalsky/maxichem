@@ -14,7 +14,7 @@ BOXES = DATA / "truth_v2/boxes_ncho"                     # VULCAN truth boxes on
 DESIGNS = DATA / "benches/designs"                       # test designs: decision/P (panel P's rows, starts and forcing)
 YARD = DATA / "benches/yardstick"                        # yardstick design (design/: recorded starts, rows, saved states)
 AD_REF = DATA / "benches/kincuda_ad/refdata3.npz"        # torch-autograd derivatives of the torch reference call
-LIBREF = DATA / "benches/kincuda/libref6.npz"            # the torch reference call's outputs and rate coefficients on
+LIBREF = DATA / "benches/kincuda/libref7.npz"            # the torch reference call's outputs and rate coefficients on
                                                          # the checks' inputs (tests/libref.py)
 KINJAX = DATA / "caches/kinjax"                          # the JAX shim built from kinjax.cc at first use
 

@@ -164,8 +164,9 @@ section reference renumbered; nothing removed.
 
 Superseded in part by the 2026-11-03 entry (section 2): the default network is now VULCAN-JAX's NCHO_photo (69
 species, photolysis), the reduced-tracer call is removed (the GCM advects every species), the rates have a collision
-limit, the truth data are data/truth_v2/, and the derivative kernels take every VULCAN-JAX network. The text below is
-the state of 2026-11-01.
+limit, the truth data are data/truth_v2/, and the derivative kernels take every VULCAN-JAX network. The default atol is
+1e-25 and the sulfur truth is data/truth_v2/boxes_sncho2 (the 2026-11-03 afternoon entry). The text below is the state of
+2026-11-01.
 
 ### What the author wants (section 3, 2026-10-31 ~22:1x)
 A 0-D chemistry model inside a GCM, fast, accurate over the realistic domain (no rare misses of orders of magnitude),
@@ -1731,6 +1732,75 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   the floor; the run exits 1 on a miss, an unfinished call or a non-finite or negative state. Paired check of the new
   reference against a second run: no path or box changed (logs/kintest_quick_paired.log).
 
+### 2026-11-03 (afternoon to evening): default atol 1e-25, new sulfur truth, J derivatives near 0
+
+- Why: the sulfur misses of the morning entry. Both codes lose trace sulfur species in lit cool gas. Records:
+  experiments/2026-11-03_atol/ (plan.md, logs, scripts, reviews). This entry supersedes the morning's atol 1e-16 figures.
+- maxichem against Radau on 37 hard sulfur boxes, same starts, production limits (2026-11-03_overnight/logs/
+  sulfur_atol_conv.log): atol 1e-16: 27 off > 0.1 dex, worst 7.264, 2.2 steps per call; 1e-20: 8, 6.702, 3.0; 1e-25: 0,
+  0.023, 4.1; 1e-30: 0, 0.011, 5.0. Guard counts all 0. Decision: default atol 1e-25 (kincuda.ATOL), a numerics change.
+- VULCAN cutoff: its atol is a number-density cutoff (species below it leave the error control). New generator setting:
+  atol = XATOL n_tot per run, donor runs included, count_max 2e6. XATOL 1e-28 against Radau on 35 of 37 known boxes: worst
+  0.0047 dex; 1e-26: 36 of 37, worst 0.0052. Box 12 (472 K, 0.33 bar, lit): unchanged at 1e-26 and 1e-27 (153 steps),
+  0.396 dex different and 3,937 steps at 1e-28. Radau on box 12: VULCAN at 1e-28 within 0.0000 dex, maxichem at 1e-25
+  0.0015, maxichem at 1e-16 0.396, Radau atol 1e-30 against 1e-40 0.0000. Stock VULCAN-0D against the fast build, 20 boxes (10
+  lit) x 5 stops at the new cutoff: identical. Pilot cost, 136 boxes at XATOL 1e-28: weighted mean 49.3 s per box, median 3 s.
+- New truth set data/truth_v2/boxes_sncho2 (the first 2,048 rows of boxes_sncho's design, a balanced Sobol subset, same box
+  numbers; 54 workers, 16:02 to 16:55; 50,922 CPU s; median 7,188 steps): 1,955 accepted, 92 stopped at the 2e6-step cap,
+  1 quarantined (box 810), 0 bad states, worst drift 1.8e-8. Boxes without a result: dark 3.0 %, lit 6.1 %, 1200-2000 K 7.5 %,
+  lit below 800 K 6.6 %. boxes_sncho is superseded: on 991 unreacted starts it differs from the new set by > 0.1 dex in 18
+  boxes, > 1 dex in 16, worst 6.702. Negative result: a whole-set run at VULCAN atol 1e-10 was stopped after 62 min, because
+  workers wrote only at the end (data/truth_v2/boxes_sncho_atol, partial); hence the queue of 512 chunks of 4 boxes.
+- Score of maxichem against boxes_sncho2 (16 gases; score_set2.py, score_set2.log): default atol: 91,885 states, 7 with a
+  miss, all large (0.0076 %); 1 of 1,955 boxes; worst 4.342 dex; dark worst 0.029; 5.32 steps per call; guard 3 recomputed,
+  all recovered. atol 1e-16: 100 states, 87 large; 22 boxes, 17 large; worst 6.702; 3.51 steps per call. The one miss, box
+  1939 (511 K, 2.6e-3 bar, lit), is VULCAN's error: its S2 is exactly 0 at the late stops; Radau reaches 2.2e-6 at 1e8 s. VULCAN against
+  Radau 4.342 dex; maxichem against Radau 0.0835 at atol 1e-25, 0.0396 at 1e-26, 0.0010 at 1e-27, stable below (box_1939.py).
+  So VULCAN at XATOL 1e-28 can still lose a seed (its clamp bound nega_cut -1 was not changed or tested).
+- Radau sample on unreacted starts (24 lit below 800 K, 16 lit above, 24 dark, chosen at random, box 12 first; stopped at
+  17:47 with 45 done, the slowest had not finished; box 543 has no VULCAN result, so 44 scored): VULCAN worst 0.0005 dex, maxichem
+  0.0049 dex, maxichem at atol 1e-16 off > 0.1 dex in 2 boxes (worst 1.773).
+- The 93 boxes without a VULCAN result: Radau on the 33 with unreacted starts (25 min limit per box): 25 solved, 8 timed out;
+  the 60 with other starts need a VULCAN donor run and were not tried. maxichem on the 25: default atol 0 misses of 1,175
+  states, worst 0.002 dex; atol 1e-16 1 box, 5.891 dex (box 863). 68 boxes have no reference. They stay out of the scores.
+- NCHO truth: 256 boxes (192 lit below 800 K and below 1e-2 bar, 64 random) rerun with XATOL 1e-28: 255 finished, differences
+  at most 0.0030 dex (median 0.0001), 1 stopped at the cap. No regeneration: boxes_ncho keeps VULCAN's default atol.
+- Checks at the new default (run_checks.log): kincuda_check 28 of 28 (new reference libref7); SNCHO parity 15 of 15
+  (libref7_SNCHO); kintest quick against quick_ref5: exit 0, 0 misses, 32,768 boxes worst 0.014 (0.034 before), 904 paths
+  worst 0.004, no path moved > 0.01 dex (largest fall 0.0089), 75 boxes moved > 0.01 (largest fall 0.0223, rise 0.0014); new
+  reference quick_ref6. All NCHO boxes: 6,160,384 states, 0 misses, worst 0.0662, 4.7 steps per call (3.0 before), guard 0.
+  Day-night 64 paths: 0 misses, worst 0.0023. Hard cold lit cells (below 325 K, 2,280 NCHO, 142 SNCHO; dark 1e8 s, then lit):
+  none unfinished, non-finite or still failed; first lit call steps median / max NCHO 106 / 201 (39 / 129 at 1e-16), SNCHO
+  40 / 169 (15 / 127). kintest now also fails on still_failed, and records it.
+- Speed. Settled gas, 1,382,400 cells, about one step per call, idle GPU (us per cell-call, dark / lit): NCHO_photo 0.354 /
+  0.349 (0.346 / 0.349 at 1e-16), SNCHO_photo 0.658 / 0.635 (0.636 / 0.636). Gas that changes costs more: kintest paired
+  against quick_ref5: loop latency 6.224 against 4.229 ms per tick (1.47x), boxes 1.813 against 1.267 us per cell-call
+  (1.43x), panel P 1.78-1.88 steps per call against 1.31-1.37. Moving-gas bed (speed_mixed2.py, speed2_ncho.log,
+  speed2_sncho.log; idle GPU1; 2,048 box states at 1e4 s; 5 settling calls, then 5 untimed and 10 timed calls of 70 s, each
+  after x <- 0.99 x + 0.01 x(partner)). Partner = the nearest box in (T / 100 K, log10 P / 0.2) with the same light (median
+  27 K, 0.06 dex; Z and C/O can differ), 1,382,400 cells: NCHO 3.890 us and 13.73 steps at 1e-16, 7.493 and 27.15 at 1e-25
+  (1.93x); SNCHO 9.231 and 15.98, 16.995 and 30.14 (1.84x; the truth's 89 names, S8_l_s carried inert). Partner = a random
+  cell of any T and P, 86,016 cells: NCHO 15.567 and 56.96, 28.832 and 106.60; SNCHO 35.879 and 65.08, 63.496 and 117.34; a
+  first run at 1,382,400 cells gave 15.281 and 56.57 for NCHO at 1e-16 (speed_mixed.py; stopped: it would have held the GPU
+  about 1 h). I: real transport is gentler than these beds, as the coupled C48 run on the 53-species network stayed near
+  one step per call (chemistry 0.21 us, atol 1e-16). The cost on the current networks and atol is unknown until a coupled
+  run. Measure it first; atol is an argument of the call.
+- J derivative near 0. At atol 1e-25 the check "FD J at 0" failed on all three networks (p99 about 1, max 1.0-1.8). Cause, from
+  dbg_j0.py and dbg_j0b.py (NCHO_photo; I): the tangent at J = 0 holds only for a tiny, state-dependent range of J, since a
+  species made only by J joins the error control once it passes about atol / rtol. V: in the two of the six worst cells
+  that can be resolved, the slope reaches the tangent only below e = 1e-18 and 1e-20; one cell's tangent is +465 and the slope
+  above e = 1e-14 is -365; the others stay under the noise floor (about 1e-16 in x), so they are not confirmed. Tangent against
+  central differences at J = 1e-8 dJ, starts: median 7.0e-8, p90 2.5e-6, p99 4.0e-4; at J = 1e-10 dJ the bar fails. The
+  frozen tangent at 0 is not the tangent at 1e-8 either (median relative difference 0.15 on starts), so it is no substitute.
+  No solver or kernel change. Check changed after a review (2026-11-03_ad/dev_check2.py, part b'): the tangent at J = 1e-8 dJ
+  against central differences at the default atol, every judged cell counted (>= 90 % with a plateau pooled, >= 80 % per case
+  with 20 judged cells); three distinct step sizes, so a cap cannot fake a plateau; the exact-0 case stays at atol 1e-16.
+  Results: NCHO_photo 101 of 101, CHO_photo 101 of 101, SNCHO_photo 99 of 101. Near 0 pooled: NCHO 3,256 of 3,387, p99
+  3.9e-5, max 1.8e-3; CHO 3,355 of 3,456, p99 3.8e-5, max 5.2e-4. The two SNCHO failures are the known ones (J on starts dt
+  500 s: p90 2.4e-4 and 1.4e-4 against 1e-4). Exact-0 at atol 1e-16 passes on all three. Not covered: sulfur failure states,
+  scale-aware checks of trace species, an independent reference.
+- Open: 68 sulfur boxes without a reference; VULCAN's clamp bound untested; the JAX layer still refuses to run.
+
 ## 3 Author decisions and requirements (dated)
 
 - 2026-06-09 (gate 2 of the paper plan): held-out open-loop rollouts at fixed dt 6.4 s for K >= 100 steps plus 0.5 s and
@@ -2026,6 +2096,8 @@ all-species control; frozen rules and one-time judge sets (QT, QT2; both now use
   simple method exists; plans and complicated code reviewed first; simplified technical English everywhere. ~05:08:
   "1) extend [the derivative and JAX layers] 2) drop reduce tracer code, but keep all notes so I can build it in the
   future 3) fix the ch and ch2 stuff 4) push to github when neded".
+- 2026-11-03 afternoon: "Fix the atol and sulfur"; the sulfur regeneration approved; "use 64 cpus, and run a smaller set, so
+  that the whole thing finishes in ~1 hour" (above the usual CPU cap, for this run); "fix the 0 derivate thing easily".
 
 ## 4 Data
 

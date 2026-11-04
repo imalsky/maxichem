@@ -375,7 +375,7 @@ batching.primitive_batchers[_adj_p] = functools.partial(_tan_batch, _adj_p)
 # --- the solver -------------------------------------------------------------------------------------------------------
 
 class KinJax:
-    """KinJax(net, drift=None)(x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-16, max_steps=4000, adapt=True) ->
+    """KinJax(net, drift=None)(x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=KC.ATOL, max_steps=4000, adapt=True) ->
     (x, h, done, steps, flag, status): one solver call per cell on the local CUDA devices, differentiable (see the module
     docstring); drift: the element-drift allowance (kincuda). The call kernel's layout is CudaSolver's (built once here through torch to choose it); the tables are
     device constants of the traced call; rtol, atol, max_steps and adapt are static."""
@@ -443,7 +443,7 @@ class KinJax:
                      u(ext["gt"], np.uint64), jnp.asarray(ext["xg"]), u(tab["didx"], np.uint16))
         self._jit = jax.jit(self.call, static_argnames=("rtol", "atol", "max_steps", "adapt"))
 
-    def call(self, x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-16, max_steps=4000, adapt=True):
+    def call(self, x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=KC.ATOL, max_steps=4000, adapt=True):
         """The traceable call (use inside jit / vmap / grad); __call__ is its jitted form."""
         T = jnp.asarray(T, jnp.float64)
         lead = T.shape
@@ -458,7 +458,7 @@ class KinJax:
         return (xo.reshape(lead + (self.ns,)), ho.reshape(lead), done.reshape(lead),
                 nok.astype(jnp.int32).reshape(lead), redo.reshape(lead), count[1:9])
 
-    def __call__(self, x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=1e-16, max_steps=4000, adapt=True):
+    def __call__(self, x, T, P, dt, h, lm=None, rc=None, rtol=1e-3, atol=KC.ATOL, max_steps=4000, adapt=True):
         return self._jit(x, T, P, dt, h, lm, rc, rtol=rtol, atol=atol, max_steps=max_steps, adapt=adapt)
 
 

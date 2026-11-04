@@ -1,7 +1,7 @@
 """The whole-call CUDA kernel (maxichem/kincuda.py) against the stored reference on one GPU; prints PASS / FAIL per case.
 
 Reference = the call computed by batched fp64 Rodas3 in torch with the kernel's numerics (rates from T and P every call,
-exact Jacobian, LU without row exchanges, rtol 1e-3, atol 1e-16, the step control of maxichem/kincuda.py), stored for
+exact Jacobian, LU without row exchanges, rtol 1e-3, atol kincuda.ATOL, the step control of maxichem/kincuda.py), stored for
 exactly these inputs (tests/libref.py, paths.LIBREF; a check of the inputs' digest refuses others). Each solver
 advances its own state from the same inputs.
 (a) Parity. Pass: floored difference on the 12 scored gases (floors 1e-10 H2O CO CO2 CH4 NH3 HCN C2H2, 1e-8 H OH O,
@@ -144,6 +144,7 @@ def main():
     net = KV.VulcanNetwork(nf, nasa)
     sp = list(net.species)
     SP[:] = sp
+    assert float(LR.load()["atol"]) == KC.ATOL, "the reference was made at another atol"
     assert [str(q) for q in LR.load()["species"]] == sp, "the reference's species order differs from the reader's"
     sig = LR.netsig(nf, nasa, sp)
     gi = [sp.index(g) for g in GASES]

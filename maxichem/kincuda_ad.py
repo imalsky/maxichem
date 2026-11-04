@@ -26,6 +26,9 @@ Two contracts, both on the branch the call takes (accept / reject, clamped speci
     selects).
 Ties of min / max / |.| / clamps follow torch's derivative conventions (half to each side of a tie of min / max, a
 maximum over species shared evenly among the species attaining it, d|a| = 0 at 0, a clamp passes at its bound).
+In a dark cell, the adaptive J tangent at exactly J = 0 holds only for a tiny, state-dependent range of J: a species made
+only by J joins the error control once it passes about atol / rtol. For a J derivative there, call at a small positive
+rate (the checks use 1e-8 s^-1).
 
 Tangent: for each attempt the stage tangents W Kd_i = bd_i + (hd / (gamma h^2)) K_i + Jd K_i are solved with the
 attempt's factors (Sherman-Morrison as the primal); Jd K_i, the derivative of the Jacobian along the tangent applied to
@@ -1865,7 +1868,7 @@ class ADSolver:
         return n
 
     def jvp(self, x, T, P, dt, h, dx, dT, dP, ddt, dh, lm=None, dlm=None, rc=None, drc=None, adapt=True, rtol=1e-3,
-            atol=1e-16, max_steps=4000, J=None, dJ=None):
+            atol=KC.ATOL, max_steps=4000, J=None, dJ=None):
         """The call and its tangent: (x, h, done, accepted steps, dx, dh) for the tangents dx [B, S], dT, dP, ddt,
         dh [B], dlm [B, R], drc [R, 9] and dJ [B, branches] (dlm, drc, dJ optional); with a leading axis of D <= DMAX
         directions on every tangent (dx [D, B, S], dT [D, B], ..., dlm [D, B, R], drc [D, R, 9], dJ [D, B, branches])
@@ -1909,7 +1912,7 @@ class ADSolver:
         self._finish(redo)
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
-    def vjp(self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=1e-16, max_steps=4000,
+    def vjp(self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=KC.ATOL, max_steps=4000,
             J=None):
         """The call and the cotangents of its inputs for the cotangents gx [B, S] of x_out and gh [B] of h_out
         (optional): (x, h, done, accepted steps, dict x, T, P, dt, h, lm [B, R] (of each reaction's log multiplier),

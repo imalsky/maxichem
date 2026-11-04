@@ -27,7 +27,8 @@ steps; the guard's counts of every call (CudaSolver.fallback).
   --ref ref.npz   paired comparison with a saved run of the same tier and the same truth (b_set, q_set: digests of the
                   scored truth and forcing): per path the change of the worst error and the largest state change,
                   counts above 0.01 / 0.03 dex, steps per call, unfinished calls, latency.
-Exit status 1 when a path or box has a miss, or a call is unfinished or leaves a non-finite or negative state.
+Exit status 1 when a path or box has a miss, a call is unfinished or leaves a non-finite or negative state, or a cell
+still fails after the recovery.
     python bench/kintest.py quick|full [--save out.npz] [--ref ref.npz] [--force]
 """
 import argparse
@@ -52,7 +53,7 @@ READ = 1000                 # ticks between read-backs of the counters
 CHUNK = 65536               # most boxes per chunk
 CAP_H = 5.0                 # full: stop above this estimate (hours) unless --force
 META = ("id", "panel", "kind", "stratum", "start", "comp")
-KEYS_FB = ("bad_input", "nonfinite", "unfinished", "drift", "recomputed")   # CudaSolver.fallback
+KEYS_FB = ("bad_input", "nonfinite", "unfinished", "drift", "recomputed", "recovered", "still_failed")   # CudaSolver.fallback
 NEVER = 1 << 62
 
 
@@ -606,9 +607,11 @@ def main():
         compare(R, ref)
     tr = R["truth_block"][R["block_of"]]
     fail = int((np.where(tr, R["worst"], 0.0) > MISS).sum() + (Y["b_worst"] > MISS).sum() + R["unfinished"].sum()
-               + R["nonfinite"].sum() + R["negative"].sum() + Y["b_unfinished"].sum() + Y["b_nonfinite"].sum())
+               + R["nonfinite"].sum() + R["negative"].sum() + Y["b_unfinished"].sum() + Y["b_nonfinite"].sum()
+               + Y["fallback_boxes"][KEYS_FB.index("still_failed")] + R["fallback_loop"][KEYS_FB.index("still_failed")])
     if fail:
-        sys.exit(f"FAIL: {fail} paths or boxes with a miss, unfinished calls, non-finite or negative states")
+        sys.exit(f"FAIL: {fail} paths or boxes with a miss, unfinished calls, non-finite or negative states, or cell-calls "
+                 "still failed after the recovery")
 
 
 if __name__ == "__main__":

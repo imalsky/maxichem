@@ -111,13 +111,13 @@ reads both. The truth data come from the VULCAN-0D generator in /home/imalsky/Ch
 Run the checks that cover a change once the change is finished, before committing it or saying it works: not after
 every edit, and never on a GPU where a timing is running. "Every check" means all of the following.
 - After a change under `maxichem/`: `python tests/kincuda_check.py $VULCAN_THERMO` (NCHO_photo; ~2 min). It tests
-  parity against the stored reference (`benches/kincuda/libref6.npz`) to 1e-6 dex (the 2,000-call chain allows one
+  parity against the stored reference (`benches/kincuda/libref7.npz`) to 1e-6 dex (the 2,000-call chain allows one
   cell-call in 100,000 up to 1e-5) on recorded cold starts, scrambled starts, a 2,000-call chain and the photolysis
   cases (lit calls, a lit chain, lit recovery, bad J), plus the guard and recovery cases, the 300 K count and batch size
   and order. Also `python bench/kintest.py quick --ref $CHEM_DATA/benches/kintest/<latest saved quick run>`: it must
   show 0 misses against VULCAN, and no path's worst error may change by more than 0.01 dex.
 - After a change to the generated kernels or the reader, also the parity of the sulfur network (SNCHO_photo, 88
-  species, 4 warps per cell) against `benches/kincuda/libref6_SNCHO.npz` (the driver is kept outside this repository).
+  species, 4 warps per cell) against `benches/kincuda/libref7_SNCHO.npz` (the driver is kept outside this repository).
   For a new network, its rounding drift sets `drift`.
 - After a change to `maxichem/kincuda_ad.py` (or to the call arithmetic it repeats): its development check
   `experiments/2026-11-03_ad/dev_check2.py <network>` on NCHO_photo, SNCHO_photo and CHO_photo (primal bitwise
