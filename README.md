@@ -172,9 +172,20 @@ box in T and P (median 27 K and 0.06 dex away; metallicity and C/O can differ):
 | SNCHO_photo | 1e-25 (default) | 17.0 | 30.1 |
 | SNCHO_photo | 1e-16 | 9.23 | 16.0 |
 
-How real transport compares with this bed is not known. A coupled GCM run on an earlier 53-species network, at atol
-1e-16, took about one step per call. The cost in a GCM on the current networks is not known until a coupled run. The
-timings include the mixing step. atol is an argument of the call.
+The timings include the mixing step. atol is an argument of the call.
+
+In coupled snapy runs every species is a passive tracer and the chemistry is called after every dynamics step, over
+all cells at once. These runs were dark, at the default atol, on one RTX 6000 Ada, from a solar-like gas relaxed by
+one long call. Medians over the steps:
+
+| Run | Network | Cells | Steps per call | us per cell-call |
+| --- | --- | --- | --- | --- |
+| Cartesian box, 3 model days, 70 s steps | NCHO_photo | 921,600 | 1.43 | 0.47 |
+| Cubed sphere C48x100, 1 model day, 70 s steps | NCHO_photo | 1,382,400 | 1.40 | 0.45 |
+| Cubed sphere C64x100, 1 model day, 50 s steps | NCHO_photo | 2,457,600 | 1.32 | 0.42 |
+| Cartesian box, the first 100 steps of 70 s | SNCHO_photo | 921,600 | 1.96 | 1.21 |
+
+No cell failed. Real transport sits close to the quiet-gas end of the two benches above.
 
 ## Derivatives
 
