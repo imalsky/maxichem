@@ -668,6 +668,23 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
 - 2026-11-03: the neural-network emulator and the reduced tracers are retired; the JAX layer is dropped (the derivatives
   stay in the CUDA kernels); experiments/2026-11-03_ad/dev_check2.py becomes tests/kincuda_ad_check.py; refdata3
   (paths.AD_REF) is retired.
+- 2026-11-03 ~22:5x-23:1x, GCM-side speed work (snapy branch `isaac/maxichem-coupling` on the author's fork). Goal: fast
+  chemistry and fast tracer transport, "full CUDA".
+  - Order: tracer transport first, then a C++/CUDA entry point so snapy's time loop calls maxichem with no Python in
+    the loop (a Python driver only for the first benchmark), then chemistry-solver speed. Stop at diminishing returns
+    (when a step of work gives less than ~10 % on the whole coupled step), then report and ask.
+  - Correctness: snapy's default path stays bit-for-bit as upstream; fused kernels may differ at round-off, behind an
+    opt-in switch. Results must be deterministic run to run (no floating-point atomics or order-dependent reductions).
+  - Lower precision and cheaper schemes (fp32 arithmetic inside transport; WENO3 or PLM for tracers instead of WENO5)
+    are allowed only where they are much faster and meet a bound fixed in advance: the 12 scored gases within 0.01 dex
+    of the fp64 / WENO5 run after 1,000 coupled steps, tracer mass conserved to fp64 round-off, no new negative
+    tracers.
+  - Tune for the RTX cards first; the GH200 later.
+  - Speed numbers are quoted on the hot-Jupiter-like deck at C64x100 (2.46 M cells) with all 69 NCHO_photo species as
+    tracers and chemistry every step; sulfur (88) once memory allows.
+  - Tiny negative tracers reaching the chemistry: find out first whether they are a transport bug; if not, clamp at 0
+    before the call and count them and the mass added.
+  - The 48 KB reconstruction-launch fix is held on the fork: no upstream post or PR until the author says.
 
 ## Log
 

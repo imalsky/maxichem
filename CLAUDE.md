@@ -81,6 +81,13 @@ gitignored); it holds the truth sets, benches, the checks' references and the ca
   Put every file in one flat folder and give one `scp -r` command that copies it to `~/Desktop` on Isaac's laptop.
   Plotting scripts stay in the experiment folder, never in `maxichem/`.
 
+## GCM-side work (snapy)
+Speed work on snapy happens in `../snapy` on branch `isaac/maxichem-coupling`, pushed to Isaac's fork; ask before an
+upstream PR or a Slack post about a change. The acceptance rules are in notes.md, "Decisions in force"
+(2026-11-03 night): default path bit-for-bit, opt-in fused path at round-off, deterministic, the 0.01 dex bound for
+fp32 or cheaper schemes, C64x100 with 69 tracers for speed numbers. Development build: `../.venv-snapdev` (snapy built
+from source with `../.cuda`); the shared `../.venv` keeps the released snapy wheel.
+
 ## Engineering rules
 - Add no options nobody asked for, and no silent fallbacks: any fallback is counted and reported.
 - Speed target: under about 1 us per cell-call in the GCM. Simple code beats small speed gains: a GPU-specific
