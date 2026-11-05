@@ -6,8 +6,9 @@ temperature, pressure and photolysis rates.
 
 The chemistry is a VULCAN reaction network. The default is the C-H-N-O network of
 [VULCAN-JAX](https://github.com/imalsky/VULCAN3) (`NCHO_photo_network.txt`: 69 species, 390 reversible reactions, 48
-photolysis branches). maxichem solves it as a 0-D kinetics problem in CUDA kernels. The kernels are generated for the
-network and run over many cells at once.
+photolysis branches). With sulfur, the default is its `SNCHO_photo_network_2025.txt` (91 species, 532 reversible
+reactions, 61 photolysis branches). maxichem solves the network as a 0-D kinetics problem in CUDA kernels. The kernels
+are generated for the network and run over many cells at once.
 
 - **Physics.** Mass-action kinetics at constant T and P within a call: dx/dt = (S v - x sum(S v)) / n_tot, with
   n_tot = P / kT. Forward rates come from the network file. Reverse rates come from NASA-9 thermodynamics. Elements are
@@ -37,10 +38,15 @@ with J) no cell failed and the element shares moved by at most 4e-11 over the 20
 | NCHO_full_photo | 74 | 416 | 57 | |
 | CHO_photo | 41 | 207 | 36 | |
 | CHO_photo_lowT | 35 | 149 | 32 | thermal only: its photolysis branches make O_1 and CH2_1, which its thermal part lacks |
-| SNCHO_photo | 88 | 513 | 60 | tested against its own stored reference |
-| SNCHO_photo_2025, SNCHO_DMS_photo_Tsai2024 | 91-95 | 532-536 | 61-64 | |
+| SNCHO_photo_2025 (the sulfur network) | 91 | 532 | 61 | tested against its stored reference and VULCAN-0D (Accuracy) |
+| SNCHO_photo | 88 | 513 | 60 | the earlier sulfur network; its tests are superseded |
+| SNCHO_DMS_photo_Tsai2024 | 95 | 536 | 64 | |
 | SNCHO_photo_C3 | 92 | 524 | 60 | one duplicate reaction |
 | TiSNCHO_photo | 96 | 541 | 65 | three duplicate reactions |
+
+On SNCHO_photo_2025 the parity check against the stored reference passes 27 of its 28 cases. In the 2,000-call chain,
+2 of 1,024 hot cells (2,500-2,900 K) drift from the reference by up to 2.1e-6 dex in H2S, COS and S2, more cell-calls
+than the 1e-6 dex bar allows; the solver steps match the reference's in every cell-call.
 
 The reader refuses a reaction whose atoms do not balance. A duplicate reaction (the same species on both sides) is
 kept, and the rates add, as in VULCAN; the reader lists the duplicates in `net.duplicates`.
@@ -93,6 +99,11 @@ counts = solver.check()                             # guard counts; raises if a 
   - `J` [cells, branches]: photolysis rates in s^-1, one column per branch in the order of `net.photo` (each entry
     names its absorber and branch index as in the network file). Use zeros at night.
 - Outputs: the new `x`, the step size to keep, a per-cell `done` flag and the number of accepted steps.
+- Tolerances are arguments of every call, in Python (`rtol=1e-3, atol=1e-25`) and in the C++ caller (`rtol`, `atol`;
+  a negative `atol` takes the export's default). The default atol, `kincuda.ATOL` = 1e-25 in mole fraction, follows
+  trace species down to that level. A smaller atol (for example 1e-30) follows seeds of trace species further, at the
+  cost of more steps: in one cool, thin, lit sulfur box (386 K, 9e-5 bar) S2 is off by 0.15 dex at 1e-25 and by 0.002
+  dex at 1e-30 against a tight Radau reference. A GCM coupling should pass atol through as a setting.
 - T, P and J stay fixed within a call. Cells never couple. The results do not depend on the batch size or the order of
   the cells, so domain decomposition does not change them.
 - GCMs advect mass mixing ratios. Convert to mole fractions before the call and back after it. The chemistry conserves
@@ -123,67 +134,79 @@ Results at the default tolerances (rtol 1e-3, atol 1e-25):
 | NCHO_photo: 131,072 boxes, 0 to 1e8 s, half lit | 6,160,384 | 0 | 0.066 dex |
 | NCHO_photo: 904 GCM-like paths (recorded forcing and mixing) | 1,016,411 | 0 | 0.004 dex |
 | NCHO_photo: 64 paths with photolysis on a one-day cycle, 1,000 calls each | 64,000 | 0 | 0.002 dex |
-| SNCHO_photo (88 species): 993 dark boxes | 46,671 | 0 | 0.029 dex |
-| SNCHO_photo: 962 lit boxes | 45,214 | 7, in 1 box | 4.34 dex |
+| SNCHO_photo_2025 (91 species): 986 dark boxes | 46,342 | 0 | 0.030 dex |
+| SNCHO_photo_2025: 944 lit boxes | 44,368 | 7, in 1 box | 4.34 dex |
+| SNCHO_photo_2025: 350 targeted lit boxes (C/O >= 0.8 at 500-1500 K, below 800 K, metallicity >= 100) | 16,450 | 1 | 0.155 dex |
+| SNCHO_photo_2025: 272 GCM-like paths (recorded forcing and mixing, 64 with a one-day light cycle) | 312,000 | 0 | 0.007 dex |
 
-The one sulfur miss is an error in VULCAN-0D. In that box (511 K, 2.6e-3 bar, lit), VULCAN-0D ends with no S2. Radau
-(rtol 1e-10, atol 1e-30, on the same chemistry as VULCAN-0D) reaches S2 = 2e-6 at 1e8 s, and maxichem is within 0.084 dex
-of Radau.
+The sulfur boxes use the photolysis rates of a 1-D WASP-39b model on the same network; the paths replay the NCHO paths'
+forcing with sulfur added as H2S (S/H 1.41e-5 times the metallicity). Besides the 16 scored gases, C3H5, allene,
+propyne, H2CS, CS and CS2 (floor 1e-10) stay within 0.013 dex everywhere.
+
+The two sulfur misses were checked against Radau (rtol 1e-10, atol 1e-30, on the same chemistry as VULCAN-0D):
+
+- The large one is an error in VULCAN-0D. In that box (511 K, 2.6e-3 bar, lit), VULCAN-0D ends with no S2; Radau
+  reaches S2 = 2e-6 at 1e8 s, and maxichem is within 0.084 dex of Radau. The same box fails the same way on the earlier
+  sulfur network.
+- The small one is maxichem's. In a cool, thin, lit box (386 K, 9e-5 bar) S2 is off by 0.155 dex at 1.9e7 s, while
+  VULCAN-0D is within 0.001 dex of Radau. A tighter rtol does not change it; atol 1e-30 brings it to 0.002 dex. The
+  default stays 1e-25; atol is a setting of every call (Using it in a GCM).
 
 Sulfur species in lit gas below 800 K can grow by many orders of magnitude from tiny seeds, so both codes need a small
-absolute tolerance. The sulfur truth uses a VULCAN-0D cutoff of 1e-28 in mole fraction. With atol 1e-16, maxichem
-misses in 22 of the 1,955 boxes, 17 of them by more than 1 dex (worst 6.7 dex); this is why the default is 1e-25.
+absolute tolerance. The sulfur truth uses a VULCAN-0D cutoff of 1e-28 in mole fraction. On the earlier sulfur network,
+maxichem with atol 1e-16 missed in 22 of 1,955 boxes, 17 of them by more than 1 dex; this is why the default is 1e-25.
 
 Limits of the sulfur result:
 
-- 93 of the 2,048 boxes have no VULCAN-0D result (92 stopped at the 2e6-step cap, 1 forced a step at the minimum
-  size), so the table does not score them. Radau solved 25 of them, all from unreacted gas: maxichem has 0 misses there
-  (1,175 states, worst 0.002 dex). The other 68 have no reference. The boxes left out are more often lit (6.1 % of lit
-  boxes, 3.0 % of dark), so the score under-represents the hardest gas.
-- VULCAN-0D's cutoff can still lose a trace species, as in the box above. Radau on 44 other boxes finds VULCAN-0D
-  within 0.0005 dex and maxichem within 0.005 dex.
+- 118 of the 2,048 boxes and 54 of the 404 targeted boxes have no VULCAN-0D result (stopped at the 2e6-step cap, or
+  one forced step at the minimum size), so the table does not score them. Radau solved 54 of them, all from unreacted
+  gas: maxichem is within 0.016 dex there. 118 have no reference: 10 unreacted starts whose Radau runs did not finish
+  in the time given, and 108 starts that need a VULCAN-0D donor run. The boxes left out are more often lit and cool, so
+  the score under-represents the hardest gas.
+- Radau on 60 more boxes that VULCAN-0D finished finds maxichem within 0.0021 dex and VULCAN-0D within 0.0011 dex.
 
 The NCHO truth keeps VULCAN-0D's default tolerance: 255 of 256 sampled boxes, rerun with the 1e-28 cutoff, change by at
 most 0.003 dex (the other one stopped at the step cap).
 
-The guard recomputed none of the NCHO cell-calls in these tests and 3 of the 91,885 sulfur ones (all recovered).
+The guard recomputed none of the cell-calls in these tests, NCHO or sulfur.
 
 ## Speed
 
 On an RTX 6000 Ada with no other job, at a GCM-sized batch (1,382,400 cells: the states of 4,096 truth boxes at 1e4 s,
-repeated), with 70-s calls on gas that changes little between calls (about one step per call). "Lit" replays the
-boxes' J, so half of the cells are lit:
+repeated; on the sulfur network the 1,930 accepted boxes of its first 2,048, 1,381,880 cells), with 70-s calls on gas
+that changes little between calls (about one step per call). "Lit" replays the boxes' J, so half of the cells are lit:
 
 | Network | Species | atol | us per cell-call, dark / lit |
 | --- | --- | --- | --- |
 | NCHO_photo | 69 | 1e-25 (default) | 0.354 / 0.349 |
 | NCHO_photo | 69 | 1e-16 | 0.346 / 0.349 |
-| SNCHO_photo (sulfur gas from the truth boxes) | 88 | 1e-25 (default) | 0.658 / 0.635 |
-| SNCHO_photo (sulfur gas from the truth boxes) | 88 | 1e-16 | 0.636 / 0.636 |
+| SNCHO_photo_2025 (sulfur gas from its truth boxes) | 91 | 1e-25 (default) | 0.684 / 0.651 |
+| SNCHO_photo_2025 (sulfur gas from its truth boxes) | 91 | 1e-16 | 0.661 / 0.658 |
 
 Gas that changes between calls needs more steps, and atol 1e-25 needs about twice as many as atol 1e-16. This test bed has
-the same batch size, with 2,048 truth-box states at 1e4 s. Before each 70-s call, it mixes in 1 % of the gas of the nearest
+the same batch size, with 2,048 truth-box states at 1e4 s (1,930 on the sulfur network). Before each 70-s call, it mixes in 1 % of the gas of the nearest
 box in T and P (median 27 K and 0.06 dex away; metallicity and C/O can differ):
 
 | Network | atol | us per cell-call | Steps per call |
 | --- | --- | --- | --- |
 | NCHO_photo | 1e-25 (default) | 7.49 | 27.2 |
 | NCHO_photo | 1e-16 | 3.89 | 13.7 |
-| SNCHO_photo | 1e-25 (default) | 17.0 | 30.1 |
-| SNCHO_photo | 1e-16 | 9.23 | 16.0 |
+| SNCHO_photo_2025 | 1e-25 (default) | 16.9 | 29.0 |
+| SNCHO_photo_2025 | 1e-16 | 9.05 | 15.1 |
 
 The timings include the mixing step. atol is an argument of the call.
 
 In coupled snapy runs every species is a passive tracer and the chemistry is called after every dynamics step, over
-all cells at once. These runs were dark, at the default atol, on one RTX 6000 Ada, from a solar-like gas relaxed by
-one long call. Medians over the steps:
+all cells at once. These runs were dark unless marked, at the default atol, on one RTX 6000 Ada, from a solar-like gas
+(with sulfur as H2S, S/H 1.41e-5, on the sulfur network) relaxed by one long call. Medians over the steps:
 
 | Run | Network | Cells | Steps per call | us per cell-call |
 | --- | --- | --- | --- | --- |
 | Cartesian box, 3 model days, 70 s steps | NCHO_photo | 921,600 | 1.43 | 0.47 |
 | Cubed sphere C48x100, 1 model day, 70 s steps | NCHO_photo | 1,382,400 | 1.40 | 0.45 |
 | Cubed sphere C64x100, 1 model day, 50 s steps | NCHO_photo | 2,457,600 | 1.32 | 0.42 |
-| Cartesian box, the first 100 steps of 70 s | SNCHO_photo | 921,600 | 1.96 | 1.21 |
+| Cartesian box, the first 100 steps of 70 s | SNCHO_photo_2025 | 921,600 | 1.96 | 1.24 |
+| The same, lit (J of a 1-D WASP-39b model's layer nearest in P, times cos z) | SNCHO_photo_2025 | 921,600 | 1.96 | 1.25 |
 
 No cell failed. Real transport sits close to the quiet-gas end of the two benches above.
 
@@ -196,8 +219,8 @@ their primal result is bitwise the call's. They take networks up to 96 species w
 collision limit (every VULCAN-JAX network).
 
 `tests/kincuda_ad_check.py` checks them against finite differences of the call and by dot products between the two
-kernels. Every case passes on CHO_photo and NCHO_photo. On SNCHO_photo, two cases (the J tangent on box starts at
-dt 500 s) are just above their bar. In a dark cell, the J tangent at exactly J = 0 is not verified at the default
+kernels. Every case passes on CHO_photo, NCHO_photo and SNCHO_photo_2025 (101 of 101; on the sulfur network the
+branches the check's boxes lack take the J of a 1-D WASP-39b model). In a dark cell, the J tangent at exactly J = 0 is not verified at the default
 atol: finite differences cannot resolve it. We infer that it holds only for a tiny, state-dependent range of J. For a
 J derivative there, call at a small positive rate (the check uses 1e-8 s^-1, where it passes). There is no independent
 reference for these derivatives on the current networks.
@@ -206,7 +229,7 @@ reference for these derivatives on the current networks.
 
 | Check | What it verifies |
 | --- | --- |
-| `tests/kincuda_check.py <VULCAN_THERMO>` | the CUDA call against stored outputs of an independent torch reference solver: cold, scrambled and 2,000-call chained calls; photolysis calls, a lit chain and lit recovery; bad inputs; guard and recovery; batch size and order |
+| `tests/kincuda_check.py <VULCAN_THERMO> [--network SNCHO_photo_network_2025.txt]` | the CUDA call against stored outputs of an independent torch reference solver: cold, scrambled and 2,000-call chained calls; photolysis calls, a lit chain and lit recovery; bad inputs; guard and recovery; batch size and order (NCHO_photo by default; the sulfur network also scores H2S, SO2, COS, S2) |
 | `bench/kintest.py quick --ref <saved run>` | the solver against VULCAN-0D truth boxes and truth paths, misses first, paired with a saved run |
 | `tests/kincuda_ad_check.py [network]` | the derivative kernels: primal bitwise the call's, tangents against finite differences, dot products, recovered cells, determinism |
 
@@ -214,7 +237,8 @@ The checks and benches read stored references and truth data that are not part o
 under `CHEM_DATA`:
 
     benches/kincuda/libref7.npz        outputs of the torch reference solver on the check's inputs (NCHO_photo)
-    benches/kincuda/libref7_SNCHO.npz  the same for the sulfur network
+    benches/kincuda/libref8_SNCHO25.npz  the same for the sulfur network SNCHO_photo_network_2025
+    benches/kincuda/jref_SNCHO25.npz   J of a 1-D WASP-39b model on that network (the derivative check's sulfur J)
     benches/yardstick/design/          recorded starts used as check inputs
     benches/designs/decision/P/        test panel P (paths, starts, forcing)
     truth_v2/boxes_ncho/               VULCAN-0D truth boxes (Sobol design, 131,072 boxes, 0 to 1e8 s)

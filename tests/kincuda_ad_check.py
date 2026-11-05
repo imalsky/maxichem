@@ -2,7 +2,9 @@
 vm11 law and the collision limit; prints PASS / FAIL per case.
 States: truth boxes made with an earlier version of the NCHO network data (paths.AD_BOXES), mapped by species name
 (species the network lacks dropped, renormalized; sulfur networks H2S = 1.41e-5 x H2), their T, P and J (branches
-matched by absorber and branch; dark boxes J = 0); lm = 0.1 N(0, 1) per reaction unless named lm = 0.
+matched by absorber and branch; dark boxes J = 0; on SNCHO_photo_network_2025 the branches the boxes lack take the J
+of layer i % L of paths.JREF_S, a 1-D WASP-39b model on that network); lm = 0.1 N(0, 1) per reaction unless named
+lm = 0.
 (a) primal: ADSolver jvp / vjp outputs bitwise CudaSolver(photo=True).launch: settled gas dt 100 s, box starts dt 500 s,
     cold boxes (T < 650 K, where the collision limit acts) dt 100 s.
 (b) adaptive tangents against central differences of the primal (CudaSolver's at lm = 0, the derivative kernels' own
@@ -29,7 +31,7 @@ matched by absorber and branch; dark boxes J = 0); lm = 0.1 N(0, 1) per reaction
 (e) the rc batch dot product (relative 1e-7: a sum over cells, reactions and columns), its photolysis rows zero;
     several directions in one call bitwise; determinism.
 Exit status 1 when any case fails.
-    python tests/kincuda_ad_check.py [network stem in VULCAN_THERMO, default NCHO_photo]"""
+    python tests/kincuda_ad_check.py [network stem or file in VULCAN_THERMO, default NCHO_photo]"""
 import sys
 
 import numpy as np
@@ -45,7 +47,8 @@ TH = paths.VULCAN_THERMO
 dev = torch.device("cuda")
 tt = lambda a: torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float64, device=dev)  # noqa: E731
 NAME = sys.argv[1] if len(sys.argv) > 1 else "NCHO_photo"
-net = KV.VulcanNetwork(f"{TH}/{NAME}_network.txt", f"{TH}/NASA9")
+FILE = NAME if NAME.endswith(".txt") else f"{NAME}_network.txt"
+net = KV.VulcanNetwork(f"{TH}/{FILE}", f"{TH}/NASA9")
 sp = net.species
 kc = KC.CudaSolver(net, dev, photo=True)
 ad = KA.ADSolver(net, dev, photo=True)
@@ -54,6 +57,12 @@ z = np.load(paths.AD_BOXES)
 sp0, lines = [str(q) for q in z["species"]], [str(q) for q in z["lines"]]
 col = [lines.index(f"{q['absorber']},{q['branch']}") if f"{q['absorber']},{q['branch']}" in lines else -1
        for q in net.photo]
+JREF = None                                        # J of the branches the boxes lack (columns of col < 0)
+if FILE == "SNCHO_photo_network_2025.txt":
+    paths.need(paths.JREF_S)
+    jr = np.load(paths.JREF_S)
+    keys = [str(q) for q in jr["lines"]]
+    JREF = np.stack([jr["J"][:, keys.index(f"{q['absorber']},{q['branch']}")] for q in net.photo], 1)
 
 
 def states(sel, k):
@@ -62,7 +71,8 @@ def states(sel, k):
     if "H2S" in sp:
         x[:, sp.index("H2S")] = 1.41e-5 * x[:, sp.index("H2")]
     x = x / x.sum(1, keepdims=True)
-    J = np.stack([z["J"][sel, c] if c >= 0 else np.zeros(len(sel)) for c in col], 1) * z["lit"][sel, None]
+    J = np.stack([z["J"][sel, c] if c >= 0 else (JREF[sel % len(JREF), j] if JREF is not None else np.zeros(len(sel)))
+                  for j, c in enumerate(col)], 1) * z["lit"][sel, None]
     return tt(x), tt(z["T"][sel]), tt(z["P"][sel]), tt(J)
 
 

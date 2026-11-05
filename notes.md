@@ -23,7 +23,8 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   (NVRTC). Persistent warps take cells from a queue; no host loop and no host sync.
 - Default network: VULCAN-JAX's NCHO_photo (69 species, 390 thermal reactions, 48 photolysis branches). All 11
   VULCAN-JAX networks load and run (4,096 cells, 21 calls: 0 unfinished, 0 failed, element shares within 3.8e-11). The
-  generator caps a network at 254 species. The sulfur network SNCHO_photo (88 species) runs with 4 warps per cell.
+  generator caps a network at 254 species. The sulfur network is SNCHO_photo_network_2025 (91 species, 4 warps per
+  cell; since 2026-11-04, replacing SNCHO_photo, 88 species).
 - Production numerics: the module docstring of maxichem/kincuda.py holds every setting. In short: Rodas3; a sparse LU
   without pivoting in a minimum-degree order; rtol 1e-3; atol 1e-25 (kincuda.ATOL); the step size carried between calls;
   the first try judged by its worst species; the V3F step rule; the collision limit on rates; a guard and a device-side
@@ -41,7 +42,9 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   0.0662 dex. 4.7 steps per call (3.0 at atol 1e-16). Guard 0.
 - NCHO_photo on the 904 qual_ncho paths (kintest quick): 0 misses, worst 0.004 dex. Day-night set, 64 paths: 0 misses,
   worst 0.0023 dex.
-- SNCHO_photo on boxes_sncho2 (16 gases; the 1,955 boxes with a VULCAN result): 91,885 states, 7 with a miss, all large
+- SNCHO_photo_network_2025 (2026-11-04 log): 1,930 boxes, 1 with a miss (box 1939, a VULCAN error); 350 targeted
+  boxes, 1 miss (box 96, 0.155 dex S2, maxichem's: fixed by atol 1e-30, default kept); 272 paths, 0 misses.
+- Superseded (the old network): SNCHO_photo on boxes_sncho2 (16 gases; the 1,955 boxes with a VULCAN result): 91,885 states, 7 with a miss, all large
   (0.0076 %), all in box 1939. Worst 4.342 dex; dark worst 0.029 dex. 5.32 steps per call. Guard: 3 recomputed, all
   recovered. Box 1939 is a VULCAN error (see "VULCAN reference errors"). The score leaves out the 93 boxes without a
   VULCAN result (6.1 % of lit boxes, 3.0 % of dark), so it under-represents lit gas.
@@ -152,8 +155,9 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   still-failed cell.
 
 ### Check references (data/benches/)
-- kincuda/libref7.npz: tests/kincuda_check.py on NCHO_photo at atol 1e-25 (28 of 28). kincuda/libref7_SNCHO.npz: the
-  sulfur parity (15 of 15). kintest/quick_ref6.npz: the kintest quick reference. Earlier references belong to superseded
+- kincuda/libref7.npz: tests/kincuda_check.py on NCHO_photo at atol 1e-25 (28 of 28). kincuda/libref8_SNCHO25.npz:
+  the same check on SNCHO_photo_network_2025 (--network; 27 of 28, see the 2026-11-04 log); kincuda/jref_SNCHO25.npz:
+  its J table. kincuda/libref7_SNCHO.npz: the old sulfur network's parity (15 of 15), superseded. kintest/quick_ref6.npz: the kintest quick reference. Earlier references belong to superseded
   numerics.
 
 ### The 53-species truth sets
@@ -723,6 +727,12 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
   - The 48 KB launch-split PR goes to review: marked ready at its unchanged head.
   - The fused-transport design is posted to snapy's author for approval before any upstream PR.
   - The C++/Python pair-comparison dumps (14 GB) are deleted; their logs are kept.
+- 2026-11-04 ~15:47, the author: sulfur means VULCAN-JAX's SNCHO_photo_network_2025.txt (91 species). The two default
+  networks are the newest NCHO (NCHO_photo_network.txt) and the newest sulfur network; the older SNCHO_photo_network.txt
+  is not a default. Test the 2025 network fully, use it in the snapy coupling, push and post.
+- 2026-11-04 ~22:10, the author: keep atol 1e-25 as the default, and expose atol as a setting in maxichem (a call
+  argument in Python and C++, as it was) and in the snapy coupling (the drivers' --atol; the future snapy chemistry
+  step reads it from the deck).
 
 ## Log
 
@@ -906,6 +916,82 @@ Data in experiments/2026-11-04_night (summary.txt).
 - The exchange after the chemistry costs about 1 ms per step on the box (rough: that run shared the GPU).
 - CTest at the final branch commit (d824671): on the CPU, every snapy test passes except test_straka (ncrcat not
   installed); with the GPU visible, 154 pass, 1 is skipped (needs two GPUs) and test_straka fails the same way.
+
+### 2026-11-04 14:57 to 15:39: structure of the C48 hot Jupiter after one coupled day
+- C48x100, 69 NCHO_photo tracers, fused path with the dry carry, chemistry every 70 s step, dark, 1,231 steps (one
+  model day) from the earlier spin-up (1.2 model days of flow without chemistry); final state dumped for figures
+  (experiments/2026-11-04_structure; data in 2026-11-04_gcm-chem/runs/structure).
+- Per step (medians): 1.08 s flow and tracers, 0.74 s chemistry (solver 0.62 s, 0.45 us per cell-call), 1.40 solver
+  steps per call. No failed cell, every guard count 0. Per-step element budgets of transport and chemistry at
+  round-off (about 1e-16); per-cell element change through the chemistry at most 3.2e-13. 16,268 negative tracer
+  entries clamped over the run. Peak memory 24.9 GB.
+- The atmosphere is young (2.2 model days in all): above about 1 bar it has a day-night contrast (substellar peak
+  1,822 K at 0.19 bar), an equatorial jet of about 1.0 km/s near 0.1 bar and cold mid-latitude night-side gyres where
+  CH4 at 0.1 bar reaches 1.0e-5 (day-side median 2e-9; CO varies by 2 %); below 10 bar it is still within 25 K of
+  the 1,500 K start. The chemistry was relaxed to each cell's T and P at the start, so the maps mostly follow
+  temperature, not quenching.
+- bench/gpu_speed.py at e4ba969 on this card (1,382,400 cells; experiments/2026-11-04_gpu-speed), the reference
+  for the fp64-GPU comparison asked in the group thread: NCHO_photo 0.35 us per cell-call dark (1.00 steps per call),
+  0.64 us lit (2.58 steps); SNCHO_photo 0.64 us dark (1.00), 1.18 us lit (2.64). No unfinished cell, guard counts 0.
+  The lit load (J = 1e-4 s^-1 on every branch above 0.03 bar) keeps the gas changing; it is not a realistic J.
+
+### 2026-11-04 15:47 to 22:40: SNCHO_photo_network_2025 becomes the sulfur network
+Data and scripts: experiments/2026-11-04_net2025 (plan.md, reviewed before the work; the logs named below).
+- The network: 91 species, 532 thermal reactions, 61 photolysis branches (old: 88 / 513 / 60). New species C3H5,
+  CH2CCH2, CH3CCH, H2CS; C3H4 gone; new branch H2CS -> H2 + CS; CS2 + H -> SH + CS replaced by SH + CS -> CS2 + H with
+  its own rate; a new condensation line H2O -> H2O_l_s, skipped like S8 -> S8_l_s. 4 warps per cell, 184 registers,
+  2 cells per block; the recovery matrix no longer fits shared memory (global-memory recovery).
+- Truth generator: the 2025 network added, condensation pinned off (it was off by default); the C twin bitwise equal to
+  stock VULCAN-0D (3,000 trials). Photolysis table: a VULCAN-JAX 1-D WASP-39b run on the 2025 network (the paper
+  setup with the network swapped; 4.5 min, converged; SO2 up to 2.6e-5 at 1e-5-1e-3 bar); its common branches are
+  within 0.0023 dex of the old run's.
+- Parity, tests/kincuda_check.py --network (new option; reference libref8_SNCHO25.npz; also scores H2S, SO2, COS,
+  S2): 27 of 28. The 2,000-call chain exceeds the count rule: 2,596 cell-calls above 1e-6 dex (cap 1e-5 holds; worst
+  2.1e-6), all in 2 of 1,024 cells at 2,500-2,900 K and in H2S, COS, S2 only; step counts identical everywhere; the
+  error grows overall (3e-7 at call 100, 1e-6 near call 660, 2.1e-6 at 2,000; not monotonic) together with the
+  kernel's sulfur element share (up to 2.5e-6 relative by call 2,000; the other elements up to 1.2e-8). Supported
+  hypothesis: rounding drift of the scarcest element over a long chain (the reference's own element budget was not
+  measured, and equal step counts do not prove equal step sequences). The rule was not changed; a review agreed to
+  keep it strict and report 27 of 28. NCHO with the edited check: 28 of 28.
+- Drift survey (the prescribed stress cases): r = 1.35e-8, so the allowance stays 1e-6 (old sulfur network 1.2e-7,
+  NCHO 5.6e-9). One 1e10-s relaxation call flags a few cells on every network; the guard recomputes them, and on the
+  2025 network one lit cell of 65,536 stays failed (it keeps the main path's state and is counted).
+- Derivatives: 101 of 101 on the 2025 network (the old one had 99 of 101) and on NCHO. C++ export bitwise (photo,
+  thermal, forced recovery; the forced case, max_steps 2, leaves all 2,029 recomputed cells failed, so it compares
+  the failure path only). 142 hard cold lit cells: none unfinished. Recovery under 65,536 cells (max_steps 100):
+  36,851 / 53,266 cells recovered dark / lit, 4 / 91 still failed; the recovered cells that the main path finished
+  within 4,000 steps are within 2.8e-4 / 7.5e-3 dex of its answer; x, h and steps bitwise in a permuted batch.
+- VULCAN truth (data/truth_v2): boxes_sncho25, the 2,048 rows of boxes_sncho2's design with the 2025 J table (1,930
+  accepted; 117 at the step cap, 1 quarantined), and boxes_sncho25p, 404 targeted lit boxes (350 accepted). Paths:
+  qual_sncho25 (208) and daynight_sncho25 (64), replayed from the NCHO paths with H2S = 1.41e-5 Z per H atom.
+- Scores (score25.py, score_paths25.py): 1,930 boxes, 1 with a miss (box 1939, 4.34 dex S2; dark worst 0.030);
+  panel 1 miss (box 96, 0.155 dex S2); paths 312,000 states, 0 misses, worst 0.0072. New species within 0.013 dex.
+  Guard: nothing recomputed.
+- Radau (radau25.py; stopped at a time cap: 116 of 130 requested boxes): box 1939 is VULCAN's error again (maxichem
+  0.084 from Radau). Box 96 (386 K, 9e-5 bar, lit, mixed start) is maxichem's (box96_tol.log): 0.154 / 0.161 / 0.161
+  dex at rtol 1e-3 / 1e-4 / 1e-5 with atol 1e-25; 0.003 at atol 1e-28, 0.002 at 1e-30 (219 steps against 180), 1e-4 at
+  rtol 1e-6 and atol 1e-30; VULCAN 0.0009. The author keeps atol 1e-25. 54 boxes without a VULCAN result have a Radau
+  reference: maxichem within 0.016 dex; 60 more: maxichem within 0.0021, VULCAN within 0.0011. Without any reference:
+  118 boxes (10 unreacted starts whose Radau run did not finish, 108 starts that need a VULCAN donor run).
+- Coupling: the drivers now start a sulfur network with H2S (the earlier "SNCHO_photo box" number had no sulfur in the
+  gas: superseded). First runs had H2S = 1.41e-5 x H2, i.e. S/H 7e-6, half solar (runs/box2025*_halfS): box, 91
+  tracers, 100 steps: 1.25 us per cell-call at 1.98 steps, no failure, transport budgets 4e-16, chemistry 4.5e-15,
+  17.7 GB; lit (J of the WASP-39b layer nearest in P times cos z) the same within 1 %. At the box's pressures (above
+  7e-3 bar) only S4, HCO, NO2-type branches have large J, so this does not test SO2 photochemistry. Python and C++
+  drivers bitwise equal (dark, 23 and 8 steps, default atol). Drivers take --atol. Rerun with solar sulfur (S/H
+  1.41e-5): 1.24 / 1.25 us per cell-call dark / lit at 1.96 steps, no failure, transport budgets 4e-16, chemistry
+  5.3e-15, per-cell element change 1.3e-11. Python and C++ drivers also bitwise equal at atol 1e-30 (8 steps).
+- Speed (speed25.py): settled 0.684 / 0.651 us dark / lit; mixing bed 16.9 us at 29.0 steps; atol 1e-16 0.661 /
+  0.658 and 9.05 us at 15.1. About the same as the old sulfur network's numbers (measured on an 89-species layout
+  that included a condensate, so not a controlled comparison). Transport at C64x100 (bench_scalar_transport.py,
+  fused, idle GPU): 0 / 69 / 91 tracers 0.31 / 1.08 / 1.33 s per step (11 ms per tracer), 4.5 / 30 / 38 GB; default
+  path at 91: 4.35 s, 43 GB. The flow-only time was 0.47-0.49 s on 2026-11-04 morning; not explained.
+- Mistakes found on the way: the first Radau script re-read the whole truth file per box (about 100 GB per worker;
+  killed by the system's out-of-memory daemon); the first path run had no sulfur in its starts (VULCAN refused every
+  path); the drivers' first sulfur start was half solar. A results review (2026-11-04 night) also asked for: accuracy
+  gates in the experiment scorers (they gate integrity only), a C++ recovery case that finishes, a lit Python/C++
+  coupling comparison (the C++ driver has no J yet), and the 91-tracer C48 run; the non-default atol comparison is
+  done (above).
 
 ## References (by topic)
 

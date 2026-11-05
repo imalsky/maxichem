@@ -1,7 +1,7 @@
 """Cost of one CudaSolver call on a GCM-like batch, for comparing GPUs (the call is fp64 throughout).
 
     VULCAN_THERMO=<VULCAN3>/src/vulcan3/thermo python bench/gpu_speed.py [--cells 1382400]
-        [--network NCHO_photo_network.txt] [--calls 10]
+        [--network NCHO_photo_network.txt | SNCHO_photo_network_2025.txt] [--calls 10]
 
 The batch: cells spread over 800-2000 K and 1e-4 to 10 bar (log-spaced), a solar-like gas (H2S = 1.41e-5 x H2 for a
 sulfur network) relaxed by one 1e10 s call. Then --calls calls of 70 s each, every call starting from the previous

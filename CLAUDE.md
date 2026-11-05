@@ -38,9 +38,11 @@ Keep the records organized and short. Do not add files, folders or text that nob
 ## Environment
 This checkout sits in a project folder with its neighbours: `../.venv` (the Python environment: snapy, pyharp, kintera
 and maxichem as an editable install), `../vulcan-truth` (the VULCAN-0D truth-data generator; GPL, outside this
-repository), `../reference` (the torch reference generator and the sulfur parity driver) and `../snapy` (the GCM).
-`VULCAN_THERMO` is VULCAN-JAX's `src/vulcan3/thermo` folder (the networks and `NASA9/`; no default). The default network
-is its `NCHO_photo_network.txt` (69 species, photolysis). `CHEM_DATA` is the data root (default `data/` in the checkout,
+repository), `../reference` (the torch reference generator) and `../snapy` (the GCM).
+`VULCAN_THERMO` is VULCAN-JAX's `src/vulcan3/thermo` folder (the networks and `NASA9/`; no default). The two default
+networks are its newest NCHO and newest sulfur network: `NCHO_photo_network.txt` (69 species, photolysis) and, whenever
+sulfur is asked for, `SNCHO_photo_network_2025.txt` (91 species; Isaac, 2026-11-04). The older
+`SNCHO_photo_network.txt` is not a default. `CHEM_DATA` is the data root (default `data/` in the checkout,
 gitignored); it holds the truth sets, benches, the checks' references and the caches. `maxichem/paths.py` reads both.
 
 ## Running jobs
@@ -96,7 +98,8 @@ from source with `../.cuda`); the shared `../.venv` keeps the released snapy whe
 - Speed target: under about 1 us per cell-call in the GCM. Simple code beats small speed gains: a GPU-specific
   optimization that saves only a few hundredths or tenths of a microsecond but adds a lot of code is removed, not kept.
   Tuning for one GPU belongs in the GCM integration, not here.
-- Every network Isaac uses must work, up to the largest (the sulfur network, 88 species), even at some cost in speed.
+- Every network Isaac uses must work, up to the largest (the sulfur network SNCHO_photo_network_2025, 91 species), even
+  at some cost in speed.
   Reduce the advected tracers only if a clean, simple method exists; if the cost grows about linearly with the number
   of species and stays reasonable, carry all species rather than add code and special cases.
 - Numerics: keep the production settings in `maxichem/kincuda.py`'s module docstring. A change of method, tolerance,
@@ -114,6 +117,20 @@ from source with `../.cuda`); the shared `../.venv` keeps the released snapy whe
 - Before proposing a method or speed idea, check whether it was tried, in `notes.md` ("Do not retry") and in
   `~/VULCAN_Project/VULCAN-JAX/notes.md` ("Efficiency program", "Ideas not adopted", "Do not retry"), and say so.
 
+## Style
+Isaac wants the code to look clean and read well (2026-11-04). Every commit follows this policy.
+- Python (`maxichem/`, `tests/`, `bench/`): PEP 8 through Ruff, both the formatter and the linter, at a line length
+  of 120. The settings are in `pyproject.toml`. Before a commit, run `uvx ruff format maxichem tests bench` and
+  `uvx ruff check maxichem tests bench`; the commit leaves both clean. Fix a lint finding in the code; silence one
+  only with a short reason on the same line.
+- C++ and CUDA (`cpp/`): clang-format, Google style at 120 columns (`.clang-format`). In snapy, follow snapy's own
+  style (Google, as its other files).
+- Comments: a docstring for every module, class and public function; a comment where the code's reason is not obvious
+  (what it does and why), not one per line. Short sentences, consistent terms, no commented-out code. The rule on
+  dates, history and names above still holds.
+- A formatting or comment change must not change what the code does. Prove it as for a comment edit (Checks): equal
+  syntax trees for Python, equal compiled kernels for the CUDA templates. Run the checks when real code changed.
+
 ## Checks
 Run the checks that cover a change once the change is finished, before committing it or saying it works: not after
 every edit, and never on a GPU where a timing is running. "Every check" means all of the following.
@@ -123,18 +140,18 @@ every edit, and never on a GPU where a timing is running. "Every check" means al
   a lit chain, lit recovery, bad J), plus the guard and recovery cases, the 300 K count and batch size and order. Also
   `python bench/kintest.py quick --ref $CHEM_DATA/benches/kintest/<latest saved quick run>`: it must show 0 misses
   against VULCAN, and no path's worst error may change by more than 0.01 dex.
-- After a change to the generated kernels or the reader, also the parity of the sulfur network (SNCHO_photo, 88
-  species, 4 warps per cell) against `benches/kincuda/libref7_SNCHO.npz`: `python ../reference/check_nets2.py <this
-  checkout>`.
-  For a new network, its rounding drift sets `drift`.
+- After a change to the generated kernels or the reader, also the sulfur network: `python tests/kincuda_check.py
+  $VULCAN_THERMO --network SNCHO_photo_network_2025.txt` (91 species, 4 warps per cell; reference `paths.LIBREF_S`;
+  H2S, SO2, COS and S2 scored as well). For a new network, its rounding drift sets `drift`.
 - After a change to `maxichem/kincuda_ad.py` (or to the call arithmetic it repeats): `python tests/kincuda_ad_check.py
-  <network>` on NCHO_photo, SNCHO_photo and CHO_photo (primal bitwise CudaSolver's, tangents against finite
+  <network>` on NCHO_photo, SNCHO_photo_network_2025.txt and CHO_photo (primal bitwise CudaSolver's, tangents against finite
   differences, JVP / VJP dot products, recovered cells, determinism; exit status 1 on a failure). Compare the failing
   cases with the last result in notes.md.
 - After a change to `CudaSolver.export`, to the generated kernels or to `cpp/`: rebuild `cpp/build`, then for each of
   the photolysis case, the thermal case (`photo` 0) and a forced-recovery case (`max_steps` 2) run
-  `python tests/cpp_export_case.py <dir> [cells] [photo] [max_steps]` and `cpp/build/test_export <dir>/export
-  <dir>/case`: the C++ call must equal the Python call bit for bit, counts included.
+  `python tests/cpp_export_case.py <dir> [cells] [photo] [max_steps] [network]` and `cpp/build/test_export
+  <dir>/export <dir>/case`, on NCHO_photo and on SNCHO_photo_network_2025.txt: the C++ call must equal the Python call
+  bit for bit, counts included.
 - For a comment-only edit, compare syntax trees (`ast.dump`, with docstrings stripped) instead of rerunning the checks.
   A comment inside the CUDA templates changes the generated source, so compare the compiled cubins instead.
 

@@ -3,7 +3,8 @@ are not part of the repository (README.md, "Tests and the data they need"), all 
 
 DATA: the environment variable CHEM_DATA (empty = unset; default: data/ beside this package, i.e. in a source checkout).
 VULCAN_THERMO: the environment variable VULCAN_THERMO, the folder with the VULCAN networks and NASA9/: VULCAN-JAX's
-src/vulcan3/thermo (the checks use its NCHO_photo_network.txt; no default: reading it while unset raises).
+src/vulcan3/thermo (the checks use its NCHO_photo_network.txt and SNCHO_photo_network_2025.txt; no default: reading it
+while unset raises).
 """
 import os
 from pathlib import Path
@@ -14,7 +15,9 @@ BOXES = DATA / "truth_v2/boxes_ncho"                     # VULCAN truth boxes on
 DESIGNS = DATA / "benches/designs"                       # test designs: decision/P (panel P's rows, starts and forcing)
 YARD = DATA / "benches/yardstick"                        # yardstick design (design/: recorded starts, rows, saved states)
 LIBREF = DATA / "benches/kincuda/libref7.npz"            # the torch reference call's outputs on the checks' inputs
-                                                         # (tests/libref.py)
+                                                         # (tests/libref.py), NCHO_photo
+LIBREF_S = DATA / "benches/kincuda/libref8_SNCHO25.npz"  # the same for the sulfur network SNCHO_photo_network_2025
+JREF_S = DATA / "benches/kincuda/jref_SNCHO25.npz"       # J of a 1-D WASP-39b model's layers on that network (lines, J)
 AD_BOXES = DATA / "truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz"   # input states of tests/kincuda_ad_check.py
 
 

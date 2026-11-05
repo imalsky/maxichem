@@ -8,8 +8,10 @@ advances its own state from the same inputs.
     1e-6 H2 N2) <= 1e-6 dex on all but one cell-call in 100,000 (at least one per case) and <= 1e-5 dex on every
     cell-call (the reference's batched arithmetic rounds differently), accepted-step counts identical on all but
     <= 1e-4 of the cell-calls, no non-finite state, no unfinished call, no cell recomputed by the guard.
-    The network is VULCAN-JAX's NCHO_photo_network.txt (thermal part; photolysis in the photolysis cases). The
-    recorded starts are 53-species states mapped onto its 69 species by name (the others start at 0).
+    The network is VULCAN-JAX's NCHO_photo_network.txt (thermal part; photolysis in the photolysis cases), or with
+    --network SNCHO_photo_network_2025.txt the sulfur network (reference paths.LIBREF_S; also scored: H2S, SO2, COS,
+    S2, floor 1e-10). The recorded starts are 53-species states mapped onto the network's species by name (the others
+    start at 0; on the sulfur network H2S at 2.7e-5 x H2).
     - yardstick cold calls: 4,096 recorded starts at their T, P, dt 1 and 500 s, starting step 1e-10 s;
     - scrambled starts: the same kind of starts, each species times 10^(sigma N(0, 1)), sigma 0 / 1 / 2 dex, at
       dt 0.01 / 1 / 50 / 500 s;
@@ -29,7 +31,8 @@ advances its own state from the same inputs.
 (c) Batch size and order: 128 cells and one cell alone bitwise the same cells inside 8,192, and 8,192 cells in a
     permuted order bitwise the same per cell (x, h, done, steps, flag).
     python tests/kincuda_check.py <VULCAN-JAX thermo folder: NCHO_photo_network.txt, NASA9/>
-(about 1 min on an idle GPU). Exit 0 = every case PASS."""
+    python tests/kincuda_check.py <thermo folder> --network SNCHO_photo_network_2025.txt
+(about 1 min each on an idle GPU). Exit 0 = every case PASS."""
 import argparse
 import sys
 import time
@@ -44,9 +47,11 @@ from maxichem import paths  # noqa: E402
 
 YARD = paths.YARD / "design"
 PANEL = paths.DESIGNS / "decision/P"
-paths.need(YARD, PANEL, paths.LIBREF)
+paths.need(YARD, PANEL)
+REFS = {"NCHO_photo_network.txt": paths.LIBREF, "SNCHO_photo_network_2025.txt": paths.LIBREF_S}
 GASES = ["H2O", "CO", "CO2", "CH4", "NH3", "HCN", "C2H2", "H", "OH", "O", "H2", "N2"]
 FLOORS = [1e-10] * 7 + [1e-8] * 3 + [1e-6] * 2
+SGASES = ["H2S", "SO2", "COS", "S2"]                     # also scored on a sulfur network (floor 1e-10)
 TOL, MISMATCH = 1e-6, 1e-4
 dev = torch.device("cuda")
 results = []
@@ -111,14 +116,18 @@ class Tally:
 
 SP53 = [str(s) for s in np.load(YARD / "units.npz")["species53"]]
 SP = []                                                  # the network's species (main)
+REF = []                                                 # the reference file of the network (main)
 
 
 def mapped(x53):
-    """53-species states onto the network's species by name (the others 0), renormalized."""
+    """53-species states onto the network's species by name (the others 0; H2S at 2.7e-5 x H2 on a sulfur network),
+    renormalized."""
     x = np.zeros((len(x53), len(SP)))
     for j, q in enumerate(SP):
         if q in SP53:
             x[:, j] = x53[:, SP53.index(q)]
+    if "H2S" in SP:
+        x[:, SP.index("H2S")] = 2.7e-5 * x53[:, SP53.index("H2")]
     return x / x.sum(1, keepdims=True)
 
 
@@ -138,14 +147,22 @@ def yardstick(B, seed, sigma):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("vulcan_thermo", help="VULCAN-JAX's thermo folder (NCHO_photo_network.txt and NASA9/)")
+    ap.add_argument("vulcan_thermo", help="VULCAN-JAX's thermo folder (the network files and NASA9/)")
+    ap.add_argument("--network", default="NCHO_photo_network.txt", choices=sorted(REFS))
     a = ap.parse_args()
-    nf, nasa = f"{a.vulcan_thermo}/NCHO_photo_network.txt", f"{a.vulcan_thermo}/NASA9"
+    nf, nasa = f"{a.vulcan_thermo}/{a.network}", f"{a.vulcan_thermo}/NASA9"
     net = KV.VulcanNetwork(nf, nasa)
     sp = list(net.species)
     SP[:] = sp
-    assert float(LR.load()["atol"]) == KC.ATOL, "the reference was made at another atol"
-    assert [str(q) for q in LR.load()["species"]] == sp, "the reference's species order differs from the reader's"
+    REF[:] = [REFS[a.network]]
+    paths.need(REF[0])
+    if "S" in net.elements:
+        GASES.extend(SGASES)
+        FLOORS.extend([1e-10] * len(SGASES))
+    assert float(LR.load(REF[0])["atol"]) == KC.ATOL, "the reference was made at another atol"
+    assert [str(q) for q in LR.load(REF[0])["species"]] == sp, "the reference's species order differs from the reader's"
+    assert [str(q) for q in LR.load(REF[0])["gases"]] == GASES, "the reference stores other gases"
+    print(f"network {a.network}: {len(sp)} species, scored gases {GASES}; reference {REF[0].name}", flush=True)
     sig = LR.netsig(nf, nasa, sp)
     gi = [sp.index(g) for g in GASES]
     t0 = time.time()
@@ -159,14 +176,14 @@ def main():
     for dt in (1.0, 500.0):
         t = Tally()
         args = (x0, T, P, full(B, dt), full(B, 1e-10))
-        t.add(gi, tensors(LR.entry(f"call/cold{dt:g}", sig, *args)), kc(*args), kc)
+        t.add(gi, tensors(LR.entry(f"call/cold{dt:g}", sig, *args, path=REF[0])), kc(*args), kc)
         t.verdict(f"yardstick cold calls, dt {dt:g} s")
     for sigma in (0.0, 1.0, 2.0):
         x0, T, P = yardstick(B, int(10 + sigma), sigma)
         for dt in (0.01, 1.0, 50.0, 500.0):
             t = Tally()
             args = (x0, T, P, full(B, dt), full(B, 1e-10))
-            t.add(gi, tensors(LR.entry(f"call/scr{sigma:g}_{dt:g}", sig, *args)), kc(*args), kc)
+            t.add(gi, tensors(LR.entry(f"call/scr{sigma:g}_{dt:g}", sig, *args, path=REF[0])), kc(*args), kc)
             t.verdict(f"scrambled starts sigma {sigma:g} dex, dt {dt:g} s")
     r, s, F = (np.load(PANEL / f"{f}.npz") for f in ("rows", "starts", "forcing"))
     assert [str(q) for q in s["species53"]] == SP53
@@ -176,7 +193,7 @@ def main():
                   for q in (F["T"], F["Pbar"] * 1e6, F["dt"]))
     xb = tt(mapped(s["x53"][r["unit"][path]]))
     hb = full(B, 1e-10)
-    R = tensors(LR.entry("chain", sig, xb, hb, Tc, Pc, dc))
+    R = tensors(LR.entry("chain", sig, xb, hb, Tc, Pc, dc, path=REF[0]))
     t, tb = Tally(frac=1e-5, cap=1e-5), 0.0
     for k in range(NC):
         torch.cuda.synchronize(); c0 = time.perf_counter()
@@ -189,25 +206,25 @@ def main():
 
     # photolysis
     kp = KC.CudaSolver(net, dev, photo=True)
-    J = tt(LR.arrays("photo")["J"])
+    J = tt(LR.arrays("photo", path=REF[0])["J"])
     B = J.shape[0]
     for name, seed, sigma in (("cold", 0, 0.0), ("scr1", 11, 1.0)):
         x0, T, P = yardstick(B, seed, sigma)
         for dt in (1.0, 500.0):
             t = Tally()
             args = (x0, T, P, full(B, dt), full(B, 1e-10))
-            t.add(gi, tensors(LR.entry(f"photo/{name}{dt:g}", sig, *args, J)), kp(*args, J=J), kp)
+            t.add(gi, tensors(LR.entry(f"photo/{name}{dt:g}", sig, *args, J, path=REF[0])), kp(*args, J=J), kp)
             t.verdict(f"photolysis, {name} starts, dt {dt:g} s")
     x0, T, P = yardstick(B, 0, 0.0)
     args = (x0, T, P, full(B, 500.0), full(B, 1e-10))
     t = Tally()
-    t.add(gi, tensors(LR.entry("call/cold500", sig, *args)), kp(*args, J=torch.zeros_like(J)), kp)
+    t.add(gi, tensors(LR.entry("call/cold500", sig, *args, path=REF[0])), kp(*args, J=torch.zeros_like(J)), kp)
     t.verdict("photolysis with J = 0 against the thermal reference, cold starts, dt 500 s")
     i = torch.tensor([7], device=dev)                    # a lit cell forced to fail and recomputed on the device
     y, _, d, n, flag = kp.launch(x0[i], T[i], P[i], full(1, 500.0), full(1, 1e-10), max_steps=10, J=J[i])
     fb = dict(kp.fallback)
     R = tensors(LR.entry("photo/forced", sig, x0[i], T[i], P[i], full(1, 500.0), full(1, 1e-10), J[i],
-                         np.array(10 * KC.REC_STEPS)))
+                         np.array(10 * KC.REC_STEPS), path=REF[0]))
     e = float(floored(y[:, gi], R["x"]).max())
     ok = (fb["unfinished"] == 1 and fb["recomputed"] == 1 and e <= TOL and bool(torch.equal(n, R["steps"]))
           and bool(torch.equal(d, R["done"])))
@@ -220,7 +237,7 @@ def main():
                   for q in (F["T"], F["Pbar"] * 1e6, F["dt"]))
     xb, hb = tt(mapped(s["x53"][r["unit"][path]])), full(Bc, 1e-10)
     Jc = J[:Bc]                                           # rows i % L of the layers, as the reference
-    R = tensors(LR.entry("photo/chain", sig, xb, hb, Tc, Pc, dc, Jc))
+    R = tensors(LR.entry("photo/chain", sig, xb, hb, Tc, Pc, dc, Jc, path=REF[0]))
     t = Tally()
     for k in range(NC):
         rb = kp(xb, tt(Tc[k]), tt(Pc[k]), tt(dc[k]), hb, J=Jc)
@@ -254,14 +271,14 @@ def main():
     # (b) guard
     B = 64
     x0, T, P = yardstick(B, 1, 0.0)
-    G = LR.entry("guard", sig, x0, T, P)
+    G = LR.entry("guard", sig, x0, T, P, path=REF[0])
     xs, hs = tt(G["xs"]), tt(G["hs"])                                     # the reference's settled states (100 s)
     keep = torch.arange(B, device=dev) != 3
     x = xs.clone()
     x[3, 5] = float("nan")
     y, _, d, _ = kc(x, T, P, full(B, 1.0), hs)
     fb = dict(kc.fallback)
-    ya = tensors(LR.arrays("guard/nan"))["x"][keep]                     # the reference from xs, hs at dt 1 s
+    ya = tensors(LR.arrays("guard/nan", path=REF[0]))["x"][keep]                     # the reference from xs, hs at dt 1 s
     e = float(floored(y[keep][:, gi], ya).max())
     ok = (fb["bad_input"] == 1 and fb["recomputed"] == 0 and not bool(torch.isfinite(y[3]).all()) and not bool(d[3])
           and e <= TOL and bool(d[keep].all()))
@@ -273,7 +290,7 @@ def main():
     y, _, d, n, flag = kc.launch(x, T, P, dt, h, max_steps=10)
     fb = dict(kc.fallback)
     i = torch.tensor([7], device=dev)
-    R = tensors(LR.entry("guard/forced", sig, x[i], T[i], P[i], dt[i], h[i], np.array(10 * KC.REC_STEPS)))
+    R = tensors(LR.entry("guard/forced", sig, x[i], T[i], P[i], dt[i], h[i], np.array(10 * KC.REC_STEPS), path=REF[0]))
     yr, dr, nr = R["x"], R["done"], R["steps"]
     e = float(floored(y[i][:, gi], yr).max())
     ok = (fb["unfinished"] == 1 and fb["recomputed"] == 1 and fb["recovered"] + fb["still_failed"] == 1 and e <= TOL
@@ -290,7 +307,7 @@ def main():
     fb = dict(kz.fallback)
     yk, _, _, _, flag0 = kc.launch(*args, atol=1e-18)                   # the same call, nothing flagged
     i, o = (flag > 0).nonzero().squeeze(1), flag == 0
-    yr = tensors(LR.entry("guard/drift", sig, *args, np.array(4000 * KC.REC_STEPS)))["x"][i]
+    yr = tensors(LR.entry("guard/drift", sig, *args, np.array(4000 * KC.REC_STEPS), path=REF[0]))["x"][i]
     e = float(floored(y[i][:, gi], yr).max())
     ok = (fb["drift"] > 0 and fb["recomputed"] == fb["drift"] and fb["recovered"] + fb["still_failed"] == fb["drift"]
           and e <= TOL and int(flag0.sum()) == 0 and bool(torch.equal(y[o], yk[o])))
