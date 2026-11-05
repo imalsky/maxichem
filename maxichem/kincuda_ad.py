@@ -1,19 +1,19 @@
 """Derivatives of one solver call (kincuda.py's call: rates from T and P, Rodas3 and its step control) as CUDA
 kernels generated from the same tables: a tangent (JVP) kernel and an adjoint (VJP) kernel; each also returns the call's
 result with the call kernel's arithmetic (bitwise). One warp per cell: each lane walks W of the call kernel's 32 W lane
-streams (S v, Jacobian terms, LU updates), and the trailing block, the solves and the Sherman-Morrison steps are the call
-kernel's code, so every sum of the primal is the call kernel's. Networks: at most 96 species (64 leading rows and the
-32-row trailing block), at most 2,047 reactions (photolysis branches included), every rate law of kincuda but explicit reverse laws, e.g.
-every VULCAN-JAX network; photolysis as CudaSolver(photo=True).
+streams (S v, Jacobian terms, LU updates), and the trailing block, the solves and the Sherman-Morrison steps are the
+call kernel's code, so every sum of the primal is the call kernel's. Networks: at most 96 species (64 leading rows and
+the 32-row trailing block), at most 2,047 reactions (photolysis branches included), every rate law of kincuda but
+explicit reverse laws, e.g. every VULCAN-JAX network; photolysis as CudaSolver(photo=True).
 
 Differentiated inputs: the state x, T, P, dt, the starting step size h, per-cell log rate multipliers lm [B, R] (each
 multiplies a reaction's forward and reverse coefficients together, after the collision limit; a photolysis row's kf =
 J exp(lm)), the Arrhenius columns of the rate table rc [R, 9 of RCW] (ln A, B, C of k0, of the second k0 term and of
 k_inf, as kincuda.tables; the Troe parameters and efficiencies are not differentiated) and the photolysis rates J
 [B, branches] (derivatives in J itself, so they hold at J = 0). Outputs: x_out, h_out. The rate derivatives include the
-Troe factor (standard and vm11 widths, kpart) and the collision limit: with A = ln of a pair's forward coefficient before
-the limit and G = ln kr - A, the limit c adds d ln c = -(wA dA + wG dG + wE d ln nd) to both directions (cap_w: wA 1
-above the limit, 1/2 at it; wG = wA times the reverse direction's share of the larger direction, 1/2 at a tie).
+Troe factor (standard and vm11 widths, kpart) and the collision limit: with A = ln of a pair's forward coefficient
+before the limit and G = ln kr - A, the limit c adds d ln c = -(wA dA + wG dG + wE d ln nd) to both directions (cap_w:
+wA 1 above the limit, 1/2 at it; wG = wA times the reverse direction's share of the larger direction, 1/2 at a tie).
 
 Two contracts, both on the branch the call takes (accept / reject, clamped species, step-control limits):
   frozen (adapt=False): the accepted step sizes held fixed (replay): no derivative through dt, h or the error estimate,
@@ -26,9 +26,9 @@ Two contracts, both on the branch the call takes (accept / reject, clamped speci
     selects).
 Ties of min / max / |.| / clamps follow torch's derivative conventions (half to each side of a tie of min / max, a
 maximum over species shared evenly among the species attaining it, d|a| = 0 at 0, a clamp passes at its bound).
-In a dark cell, the adaptive J tangent at exactly J = 0 holds only for a tiny, state-dependent range of J: a species made
-only by J joins the error control once it passes about atol / rtol. For a J derivative there, call at a small positive
-rate (the checks use 1e-8 s^-1).
+In a dark cell, the adaptive J tangent at exactly J = 0 holds only for a tiny, state-dependent range of J: a species
+made only by J joins the error control once it passes about atol / rtol. For a J derivative there, call at a small
+positive rate (the checks use 1e-8 s^-1).
 
 Tangent: for each attempt the stage tangents W Kd_i = bd_i + (hd / (gamma h^2)) K_i + Jd K_i are solved with the
 attempt's factors (Sherman-Morrison as the primal); Jd K_i, the derivative of the Jacobian along the tangent applied to
@@ -50,6 +50,7 @@ pivoted factors, the adjoint's transposed solves W^-T = P^T L^-T U^-T with the s
 stored attempts before checkpoints). Its result passes the guard's test (flag 1) or not (flag 2: the cell's tangents
 and cotangents are NaN).
 """
+
 import ctypes
 import string
 
@@ -63,15 +64,104 @@ DMAX = 16  # tangent directions per jvp call
 # per-warp work arrays of each kernel (name, length in units of NS unless given) and the arrays sharing their space
 # (free while they are used); names a kernel does not use sit at offset 0.
 _LAYOUT = {
-    "jvp": (["M", "DINV", "N0", "N1", "V", "PART", "NN", "Y", "F", "SV", "U", "K1", "K2", "K3", "K4", "ND", "YD",
-             "SV1N", "KD1", "KD2", "KD3", "KD4", "YS", "YDS"],
-            {"FD": "F", "SVN": "SV", "T1": "YS", "T2": "YDS", "N2": "YD", "N12": "F"}),
-    "vjp": (["M", "DINV", "N0", "N1", "V", "PART", "NN", "Y", "F", "SV", "U", "K1", "K2", "K3", "K4", "NB", "KB1",
-             "KB2", "KB3", "Z", "YB", "YB2", "NBD"], {"YS": "F"}),
+    "jvp": (
+        [
+            "M",
+            "DINV",
+            "N0",
+            "N1",
+            "V",
+            "PART",
+            "NN",
+            "Y",
+            "F",
+            "SV",
+            "U",
+            "K1",
+            "K2",
+            "K3",
+            "K4",
+            "ND",
+            "YD",
+            "SV1N",
+            "KD1",
+            "KD2",
+            "KD3",
+            "KD4",
+            "YS",
+            "YDS",
+        ],
+        {"FD": "F", "SVN": "SV", "T1": "YS", "T2": "YDS", "N2": "YD", "N12": "F"},
+    ),
+    "vjp": (
+        [
+            "M",
+            "DINV",
+            "N0",
+            "N1",
+            "V",
+            "PART",
+            "NN",
+            "Y",
+            "F",
+            "SV",
+            "U",
+            "K1",
+            "K2",
+            "K3",
+            "K4",
+            "NB",
+            "KB1",
+            "KB2",
+            "KB3",
+            "Z",
+            "YB",
+            "YB2",
+            "NBD",
+        ],
+        {"YS": "F"},
+    ),
 }
-NAMES = ("M", "DINV", "N0", "N1", "N2", "N12", "V", "PART", "NN", "Y", "F", "SV", "U", "K1", "K2", "K3",
-         "K4", "ND", "YD", "FD", "SVN", "SV1N", "KD1", "KD2", "KD3", "KD4", "YS", "YDS", "T1", "T2", "NB", "KB1", "KB2",
-         "KB3", "Z", "YB", "YB2", "NBD")
+NAMES = (
+    "M",
+    "DINV",
+    "N0",
+    "N1",
+    "N2",
+    "N12",
+    "V",
+    "PART",
+    "NN",
+    "Y",
+    "F",
+    "SV",
+    "U",
+    "K1",
+    "K2",
+    "K3",
+    "K4",
+    "ND",
+    "YD",
+    "FD",
+    "SVN",
+    "SV1N",
+    "KD1",
+    "KD2",
+    "KD3",
+    "KD4",
+    "YS",
+    "YDS",
+    "T1",
+    "T2",
+    "NB",
+    "KB1",
+    "KB2",
+    "KB3",
+    "Z",
+    "YB",
+    "YB2",
+    "NBD",
+)
 
 
 def supported(tab):
@@ -79,8 +169,10 @@ def supported(tab):
     leading rows (with the 32-row trailing block: at most 96 species), at most 2,047 reactions (photolysis branches
     included), no explicit reverse law."""
     if "rev" in tab["law"] or tab["k0"] > 64 or 2 * tab["nr"] >= 4096:
-        raise NotImplementedError("the derivative kernels take networks of at most 96 species (64 leading rows), "
-                                  "at most 2,047 reactions (photolysis branches included) and no explicit reverse law")
+        raise NotImplementedError(
+            "the derivative kernels take networks of at most 96 species (64 leading rows), "
+            "at most 2,047 reactions (photolysis branches included) and no explicit reverse law"
+        )
 
 
 def ad_tables(net, tab):
@@ -96,17 +188,17 @@ def ad_tables(net, tab):
     for r in range(nr):
         if not np.any(S[:, r] != 0):
             continue
-        for side, k in ((reac[r]["re"], r), (reac[r]["pr"], nr + r))[:1 if r >= nrt else 2]:
+        for side, k in ((reac[r]["re"], r), (reac[r]["pr"], nr + r))[: 1 if r >= nrt else 2]:
             sl = [pos[q] for q in side]
             for m in range(len(sl)):
-                rest = sl[:m] + sl[m + 1:]
+                rest = sl[:m] + sl[m + 1 :]
                 rest = rest + [ns] * (2 - len(rest))
                 rows[sl[m]].append((k, rest[0], rest[1]))
     ch = -(-sum(len(t) for t in rows) // 32)
     pieces, xg, nx = [], [0], 0
     for i, t in enumerate(rows):
         for c in range(0, len(t), ch):
-            pieces.append((i if c == 0 else ns + nx, t[c:c + ch]))
+            pieces.append((i if c == 0 else ns + nx, t[c : c + ch]))
             nx += c > 0
         xg.append(nx)
     npg = ns + nx
@@ -130,8 +222,18 @@ def ad_tables(net, tab):
 def layout(tab, ext, kind):
     """Shared-memory offsets (doubles) of kernel kind's per-warp work arrays and their total."""
     ns, nr = tab["ns"], tab["nr"]
-    size = dict(M=tab["nnz"], N0=ns + 1, N1=ns + 1, V=max(nr, ns + 1), F=ns + 1, YD=ns + 1, YB=ns + 1, YB2=ns + 1, NBD=ns + 1,
-                PART=2 * tab["npart"] if kind == "jvp" else max(tab["npart"], ext["npg"]))
+    size = dict(
+        M=tab["nnz"],
+        N0=ns + 1,
+        N1=ns + 1,
+        V=max(nr, ns + 1),
+        F=ns + 1,
+        YD=ns + 1,
+        YB=ns + 1,
+        YB2=ns + 1,
+        NBD=ns + 1,
+        PART=2 * tab["npart"] if kind == "jvp" else max(tab["npart"], ext["npg"]),
+    )
     names, alias = _LAYOUT[kind]
     off, o = dict.fromkeys(NAMES, 0), 0
     for k in names:
@@ -255,8 +357,8 @@ __device__ __forceinline__ void svs2(const double* w1, const double* w2, double*
 }
 
 // The collision limit's derivative weights of a reaction from its pair before the limit (COLL's q): wA = 1 if
-// q > K_COLL, 1/2 at q = K_COLL (the tie of the min), else 0; wG = wA v, v = the reverse direction's share of the larger
-// (1/2 at a tie; a direction of fewer than two molecules does not count).
+// q > K_COLL, 1/2 at q = K_COLL (the tie of the min), else 0; wG = wA v, v = the reverse direction's share of the
+// larger (1/2 at a tie; a direction of fewer than two molecules does not count).
 __device__ __forceinline__ void cap_w(int fl, double kf, double kr, double nd, double& wA, double& wG) {
   const int mf = (fl >> 10) & 3, mr = (fl >> 12) & 3;
   const double qf = mf >= 2 ? kf * (mf == 3 ? nd : 1.0) : 0.0, qr = mr >= 2 ? kr * (mr == 3 ? nd : 1.0) : 0.0;
@@ -332,7 +434,8 @@ __device__ __forceinline__ void kpart(const double* q, int fl, double Tc, double
       const double u = 1.0 / (1.0 + y * y), sz = -2.0 * f * y * yz * u * u, tf = u - 2.0 * f * y * yf * u * u;
       ph += sz;
       pc -= sz;
-      fT = tf * (-ea / q[10] - eb / q[11] + ec * q[12] * iT * iT) / fc;   // ln F = ln 10 log10 F; df/dT = Fc' / (Fc ln 10)
+      // ln F = ln 10 log10 F; df/dT = Fc' / (Fc ln 10)
+      fT = tf * (-ea / q[10] - eb / q[11] + ec * q[12] * iT * iT) / fc;
     }
   }
   D[0] = ph * w0; D[1] = ph * w0 * lT; D[2] = -ph * w0 * iT;
@@ -432,7 +535,8 @@ __device__ __forceinline__ void wsolve(const double* M, const double* dinv, doub
 }
 
 // y <- W^-1 y with the attempt's factors: the sparse LU of M0 and the Sherman-Morrison step, or (DN: the recovery's
-// attempt) the dense threshold-pivoted LU of W in Wd with 1 / U_ii at S + A_DINV and the row order at S + A_M (as ints).
+// attempt) the dense threshold-pivoted LU of W in Wd with 1 / U_ii at S + A_DINV and the row order at S + A_M (as
+// ints).
 template <bool DN> __device__ __forceinline__ void xsolve(double* S, const double* Wd, const double (&c)[NT], double c0,
                                                           double* y, const u16* smap, int lane, int myt) {
   if (DN) dense_solve(Wd, S + A_DINV, (const int*)(S + A_M), y, lane);
@@ -443,10 +547,10 @@ template <bool DN> __device__ __forceinline__ void xsolve(double* S, const doubl
 // lane): the LU of M0 in M (leading slots and the trailing block's factors) and c (the block), dinv, u = M0^-1 w, c0,
 // K1..K4, Y = the new state; ok = accepted; returns the error (the call kernel's: the RMS, max(RMS, max-norm) while
 // first, i.e. no step of the call is accepted yet).
-__device__ __forceinline__ double attempt(double* S, double (&c)[NT], double ha, bool first, const double* kf, const double* kr,
-    double nd, double rtol, double atol, double& c0, bool& ok, const Tab& T, const unsigned* __restrict__ sst,
-    const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, int sround, int jround,
-    int lane, int myt)
+__device__ __forceinline__ double attempt(double* S, double (&c)[NT], double ha, bool first, const double* kf,
+    const double* kr, double nd, double rtol, double atol, double& c0, bool& ok, const Tab& T,
+    const unsigned* __restrict__ sst, const u64* __restrict__ jt, const u64* __restrict__ lu,
+    const int* __restrict__ optr, int sround, int jround, int lane, int myt)
 {
   double *M = S + A_M, *dinv = S + A_DINV, *n = S + A_N0, *v = S + A_V, *N = S + A_NN, *Y = S + A_Y, *F = S + A_F,
          *u = S + A_U, *K1 = S + A_K1, *K2 = S + A_K2, *K3 = S + A_K3, *K4 = S + A_K4, *part = S + A_PART;
@@ -594,11 +698,11 @@ __device__ __forceinline__ double attempt(double* S, double (&c)[NT], double ha,
   return en;
 }
 
-// One attempt of the recover kernel (kincuda) on one warp, its arithmetic bitwise: W = I / (gamma h) - Jn - w 1^T formed
-// densely in Wd from the call kernel's streams, dense_lu (1 / U_ii in dinv, the row order in pr = S + A_M as ints), the
-// stages with dense_solve; K1..K4, Y = the new state; ok = accepted; returns the error (as attempt).
-__device__ __forceinline__ double rattempt(double* S, double* Wd, double ha, bool first, const double* kf, const double* kr,
-    double nd, double rtol, double atol, bool& ok, const Tab& T, const unsigned* __restrict__ sst,
+// One attempt of the recover kernel (kincuda) on one warp, its arithmetic bitwise: W = I / (gamma h) - Jn - w 1^T
+// formed densely in Wd from the call kernel's streams, dense_lu (1 / U_ii in dinv, the row order in pr = S + A_M as
+// ints), the stages with dense_solve; K1..K4, Y = the new state; ok = accepted; returns the error (as attempt).
+__device__ __forceinline__ double rattempt(double* S, double* Wd, double ha, bool first, const double* kf,
+    const double* kr, double nd, double rtol, double atol, bool& ok, const Tab& T, const unsigned* __restrict__ sst,
     const u64* __restrict__ jt, const u16* __restrict__ didx, int sround, int jround, int lane)
 {
   double *dinv = S + A_DINV, *n = S + A_N0, *v = S + A_V, *N = S + A_NN, *Y = S + A_Y, *F = S + A_F, *u = S + A_U,
@@ -691,8 +795,8 @@ __device__ __forceinline__ double rattempt(double* S, double* Wd, double ha, boo
 
 // An attempt of the call kernel (attempt) or, DN, of the recover kernel (rattempt; c0 = 0, unused).
 template <bool DN> __device__ __forceinline__ double xattempt(double* S, double (&c)[NT], double* Wd, double ha,
-    bool first, const double* kf, const double* kr, double nd, double rtol, double atol, double& c0, bool& ok, const Tab& T,
-    const unsigned* __restrict__ sst, const u64* __restrict__ jt, const u64* __restrict__ lu,
+    bool first, const double* kf, const double* kr, double nd, double rtol, double atol, double& c0, bool& ok,
+    const Tab& T, const unsigned* __restrict__ sst, const u64* __restrict__ jt, const u64* __restrict__ lu,
     const int* __restrict__ optr, const u16* __restrict__ didx, int sround, int jround, int lane, int myt)
 {
   if (DN) {
@@ -734,19 +838,19 @@ __device__ __forceinline__ double factor(double en, bool ok, bool prej, double p
   return fac;
 }
 
-// One attempt with acceptance and step control (the call kernel's loop body; DN: the recover kernel's); returns ok, en =
-// its error, c0 = its Sherman-Morrison factor (its stages and factors stay in place).
+// One attempt with acceptance and step control (the call kernel's loop body; DN: the recover kernel's); returns ok, en
+// = its error, c0 = its Sherman-Morrison factor (its stages and factors stay in place).
 template <bool DN> __device__ __forceinline__ bool fstep(double* S, double (&c)[NT], double* Wd, double& h, double& t,
     double& nok, bool& prej, double& pen, double& pha, double dt, const double* kf, const double* kr, double nd,
-    double rtol, double atol, double& en, double& c0, const Tab& T, const unsigned* __restrict__ sst, const u64* __restrict__ jt,
-    const u64* __restrict__ lu, const int* __restrict__ optr, const u16* __restrict__ didx, int sround, int jround,
-    int lane, int myt)
+    double rtol, double atol, double& en, double& c0, const Tab& T, const unsigned* __restrict__ sst,
+    const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, const u16* __restrict__ didx,
+    int sround, int jround, int lane, int myt)
 {
   double *N = S + A_NN, *Y = S + A_Y;
   const double ha = fmin(h, dt - t);
   bool ok;
-  en = xattempt<DN>(S, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx, sround, jround, lane,
-                    myt);
+  en = xattempt<DN>(S, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx, sround, jround,
+                    lane, myt);
   if (ok) {
     for (int i = lane; i < NS; i += 32) N[i] = fmax(Y[i], 0.0);
     t += ha;
@@ -849,9 +953,9 @@ __device__ __forceinline__ void jdot(double* S, const double* N, const double* N
 // tangent (adapt) or 0: the RMS's, or on a first try (en = max(RMS, max-norm)) the selected norm's (half each at a
 // tie; the max-norm's shared evenly among the species attaining it).
 template <bool DN> __device__ __forceinline__ double tstep(double* S, const double (&c)[NT], const double* Wd,
-    double ha, double had, double c0, double en, bool first, int adapt, const double* kf, const double* kr, const double* dk,
-    double* va, double nd, double dlnd, double rtol, double atol, const Tab& T, const unsigned* __restrict__ sst,
-    int sround, int lane, int myt)
+    double ha, double had, double c0, double en, bool first, int adapt, const double* kf, const double* kr,
+    const double* dk, double* va, double nd, double dlnd, double rtol, double atol, const Tab& T,
+    const unsigned* __restrict__ sst, int sround, int lane, int myt)
 {
   double *N = S + A_NN, *Nd = S + A_ND, *Y = S + A_Y, *Yd = S + A_YD, *Fd = S + A_FD, *svN = S + A_SVN,
          *sv1N = S + A_SV1N, *Ys = S + A_YS, *Yds = S + A_YDS, *t1 = S + A_T1, *t2 = S + A_T2, *K = S + A_K1,
@@ -913,16 +1017,16 @@ template <bool DN> __device__ __forceinline__ double tstep(double* S, const doub
   return wr * (wsum(e) / (NS * er)) + (1.0 - wr) * dm;
 }
 
-#define JVP_ARGS                                                                                                   \
-    const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,                         \
-    const double* __restrict__ dta, const double* __restrict__ hin, const double* lm, const double* __restrict__ rc,     \
-    const double* __restrict__ dx0, const double* __restrict__ dTa, const double* __restrict__ dPa,                      \
-    const double* __restrict__ ddta, const double* __restrict__ dhin, const double* dlm, const double* drc, int D,       \
-    double* __restrict__ xout, double* __restrict__ hout, int* __restrict__ doneo, double* __restrict__ noko,            \
-    double* __restrict__ dxout, double* __restrict__ dhout, int* __restrict__ count, int B, double rtol, double atol,    \
-    int max_steps, int adapt, const int* __restrict__ perm, const unsigned* __restrict__ blob,                          \
-    const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, const unsigned* __restrict__ sst,     \
-    const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, int sround, int jround,    \
+#define JVP_ARGS                                                                                                       \
+    const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,                       \
+    const double* __restrict__ dta, const double* __restrict__ hin, const double* lm, const double* __restrict__ rc,   \
+    const double* __restrict__ dx0, const double* __restrict__ dTa, const double* __restrict__ dPa,                    \
+    const double* __restrict__ ddta, const double* __restrict__ dhin, const double* dlm, const double* drc, int D,     \
+    double* __restrict__ xout, double* __restrict__ hout, int* __restrict__ doneo, double* __restrict__ noko,          \
+    double* __restrict__ dxout, double* __restrict__ dhout, int* __restrict__ count, int B, double rtol, double atol,  \
+    int max_steps, int adapt, const int* __restrict__ perm, const unsigned* __restrict__ blob,                         \
+    const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, const unsigned* __restrict__ sst,    \
+    const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, int sround, int jround,      \
     const double* __restrict__ Jin, const double* dJin
 #define JVP_PASS x0, Ta, Pa, dta, hin, lm, rc, dx0, dTa, dPa, ddta, dhin, dlm, drc, D, xout, hout, doneo, noko, dxout, \
     dhout, count, B, rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, sst, jt, lu, optr, sround, jround,   \
@@ -969,7 +1073,10 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
     for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; }
     for (int d = 0; d < D; d++)
       for (int i = lane; i < NS; i += 32) Ng[d * NS + i] = dx0[((size_t)d * B + cell) * NS + perm[i]];
-    for (int b = lane; b < NJ; b += 32) { const double qj = Jin[(size_t)cell * NJ + b]; p += qj >= 0.0 ? 0.0 * qj : DNAN; }
+    for (int b = lane; b < NJ; b += 32) {
+      const double qj = Jin[(size_t)cell * NJ + b];
+      p += qj >= 0.0 ? 0.0 * qj : DNAN;
+    }
     const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
     if (fin && !cold) rates(S, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, T, lane);
@@ -996,8 +1103,8 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
       const double rem = dt - t, ha = fmin(h, rem);
       double c0, dfe, dfh, dfp, dfq;
       bool ok;
-      const double en = xattempt<DN>(S, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx, sround,
-                                     jround, lane, myt);
+      const double en = xattempt<DN>(S, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx,
+                                     sround, jround, lane, myt);
       const double fac = factor(en, ok, prej, pen, pha, ha, dfe, dfh, dfp, dfq);
       // the error's tangent where this factor depends on it, or the next attempt's secant may (a rejection, err > 1)
       const bool wte = ok || (adapt && (dfe != 0.0 || (!ok && isfinite(en) && en > 1.0)));
@@ -1009,8 +1116,8 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
           double* ng = Ng + d * NS;
           for (int i = lane; i < NS; i += 32) Nd[i] = ng[i];
           __syncwarp();
-          end = tstep<DN>(S, c, Wd, ha, had, c0, en, t == 0.0, adapt, kf, kr, dk + 2 * NR * d, va, nd, dlnd[d], rtol, atol, T,
-                          sst, sround, lane, myt);
+          end = tstep<DN>(S, c, Wd, ha, had, c0, en, t == 0.0, adapt, kf, kr, dk + 2 * NR * d, va, nd, dlnd[d], rtol,
+                          atol, T, sst, sround, lane, myt);
           if (ok) for (int i = lane; i < NS; i += 32) ng[i] = Y[i] >= 0.0 ? Yd[i] : 0.0;
           __syncwarp();
         }
@@ -1070,7 +1177,8 @@ extern "C" __global__ void __launch_bounds__(32 * WPB) jvp(JVP_ARGS) {
   jvp_cells<false>(JVP_PASS, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
-// After jvp and the guard: the listed cells redone on the recovery's path with their tangents (redo, list: the guard's).
+// After jvp and the guard: the listed cells redone on the recovery's path with their tangents (redo, list: the
+// guard's).
 extern "C" __global__ void __launch_bounds__(32 * WPB) jvp_rec(JVP_ARGS, int* __restrict__ redo,
     const int* __restrict__ list, double* __restrict__ wscr, const u16* __restrict__ didx,
     const double* __restrict__ atoms) {
@@ -1356,10 +1464,10 @@ __device__ __forceinline__ void rhs_vjp_n(double* S, double* lbk, double* rho, d
   __syncwarp();
 }
 
-// Reverse of the stages of the attempt in place (K1..K4, the full LU in M, dinv, u, c0; DN: the recovery's dense factors)
-// for the cotangents Yb of the new state and z of K4: Nb += the state's cotangent, lbk, lbnd += the rate cotangents;
-// returns the cotangent of the step size (adapt) or 0. The stages' W^-T solves come first (z4 in z, z3..z1 in place of
-// Kb3..Kb1), with the reverse of F at Y4 and Y3 between them; the terms at N follow in one pass.
+// Reverse of the stages of the attempt in place (K1..K4, the full LU in M, dinv, u, c0; DN: the recovery's dense
+// factors) for the cotangents Yb of the new state and z of K4: Nb += the state's cotangent, lbk, lbnd += the rate
+// cotangents; returns the cotangent of the step size (adapt) or 0. The stages' W^-T solves come first (z4 in z, z3..z1
+// in place of Kb3..Kb1), with the reverse of F at Y4 and Y3 between them; the terms at N follow in one pass.
 template <bool DN> __device__ __forceinline__ double sadj(double* S, const double* Wd, double ha, double c0, int adapt,
     const double* kf, const double* kr, double* lbk, double* rho, double& lbnd, double nd, const Tab& T,
     const u64* __restrict__ gt, const int* __restrict__ xg, int ground, int lane)
@@ -1422,21 +1530,21 @@ __device__ __forceinline__ void save(double* rp, const double* N, double h, doub
   if (lane == 0) { rp[NS] = h; rp[NS + 1] = t; rp[NS + 3] = pen; rp[NS + 4] = pha; rp[NS + 5] = prej ? 1.0 : 0.0; }
 }
 
-#define VJP_ARGS                                                                                                   \
-    const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,                         \
-    const double* __restrict__ dta, const double* __restrict__ hin, const double* lm, const double* __restrict__ rc,     \
-    const double* __restrict__ gx, const double* gh,                                                                    \
-    double* __restrict__ xout, double* __restrict__ hout, int* __restrict__ doneo, double* __restrict__ noko,            \
-    double* __restrict__ gx0, double* __restrict__ gT, double* __restrict__ gP, double* __restrict__ gdt,               \
-    double* __restrict__ ghin, double* __restrict__ glm, int* __restrict__ count, int B, double rtol, double atol,      \
-    int max_steps, int adapt, const int* __restrict__ perm, const unsigned* __restrict__ blob,                          \
-    const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, double* rec,                          \
-    const unsigned* __restrict__ sst, const u64* __restrict__ jt, const u64* __restrict__ lu,                           \
-    const int* __restrict__ optr, const u64* __restrict__ gt, const int* __restrict__ xg, int sround, int jround,       \
+#define VJP_ARGS                                                                                                       \
+    const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,                       \
+    const double* __restrict__ dta, const double* __restrict__ hin, const double* lm, const double* __restrict__ rc,   \
+    const double* __restrict__ gx, const double* gh,                                                                   \
+    double* __restrict__ xout, double* __restrict__ hout, int* __restrict__ doneo, double* __restrict__ noko,          \
+    double* __restrict__ gx0, double* __restrict__ gT, double* __restrict__ gP, double* __restrict__ gdt,              \
+    double* __restrict__ ghin, double* __restrict__ glm, int* __restrict__ count, int B, double rtol, double atol,     \
+    int max_steps, int adapt, const int* __restrict__ perm, const unsigned* __restrict__ blob,                         \
+    const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, double* rec,                         \
+    const unsigned* __restrict__ sst, const u64* __restrict__ jt, const u64* __restrict__ lu,                          \
+    const int* __restrict__ optr, const u64* __restrict__ gt, const int* __restrict__ xg, int sround, int jround,      \
     int ground, const double* __restrict__ Jin, double* __restrict__ gJ, double* __restrict__ gA
 #define VJP_PASS x0, Ta, Pa, dta, hin, lm, rc, gx, gh, xout, hout, doneo, noko, gx0, gT, gP, gdt, ghin, glm, count, B, \
-    rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, rec, sst, jt, lu, optr, gt, xg, sround, jround, ground, \
-    Jin, gJ, gA
+    rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, rec, sst, jt, lu, optr, gt, xg, sround, jround,       \
+    ground, Jin, gJ, gA
 
 // The call and the cotangents of its inputs, one warp per cell. DN = false: every cell, the call kernel's attempts
 // (queue count[0]; CAP stored attempts per cell in rec). DN = true: the first count[6] cells of list, the recover
@@ -1476,7 +1584,10 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
     double p = 0.0;
     for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; }
-    for (int b = lane; b < NJ; b += 32) { const double qj = Jin[(size_t)cell * NJ + b]; p += qj >= 0.0 ? 0.0 * qj : DNAN; }
+    for (int b = lane; b < NJ; b += 32) {
+      const double qj = Jin[(size_t)cell * NJ + b];
+      p += qj >= 0.0 ? 0.0 * qj : DNAN;
+    }
     const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
     if (fin && !cold) rates(S, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, T, lane);
     __syncwarp();
@@ -1562,8 +1673,8 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
         double c0 = c0_l, en = en_l, dfe, dfh, dfp, dfq;
         bool ok = rp[NS + 2] != 0.0;
         if (j < j1 - 1)                                       // else the attempt just run, still in place
-          en = xattempt<DN>(S, c, Wd, ha, tj == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx, sround, jround,
-                            lane, myt);
+          en = xattempt<DN>(S, c, Wd, ha, tj == 0.0, kf, kr, nd, rtol, atol, c0, ok, T, sst, jt, lu, optr, didx, sround,
+                            jround, lane, myt);
         if (!DN && myt >= 0) {                                // the dense block's factors back into M
           #pragma unroll
           for (int k = 0; k < NT; k++) M[TB0 + myt * NT + k] = c[k];
@@ -1731,13 +1842,37 @@ def source_ad(tab, ext, kind, wpb, cap=CAP, drift=None):
     m = lambda b: (1 << b) - 1  # noqa: E731
     j_a = w["k"] + 2
     return KC.source(tab, 1, drift=drift) + string.Template(_SRC_AD).substitute(
-        wpb=wpb, perwa=perwa, cap=cap, dmax=DMAX, npg=ext["npg"], urow=f"{ext['urow']}ull", lrow=f"{ext['lrow']}ull",
+        wpb=wpb,
+        perwa=perwa,
+        cap=cap,
+        dmax=DMAX,
+        npg=ext["npg"],
+        urow=f"{ext['urow']}ull",
+        lrow=f"{ext['lrow']}ull",
         offsets="\n".join([f"#define KIND {int(kind == 'vjp')}"] + [f"#define A_{k} {v}" for k, v in off.items()]),
-        sv_r=m(w["r"]), sv_sg=w["r"], sv_x2=w["r"] + 1, sv_dst=w["r"] + 2, sv_pm=m(w["part"]),
-        sv_end=w["r"] + 2 + w["part"], j_km=m(w["k"]), j_sg=w["k"], j_x2=w["k"] + 1, j_a=j_a, j_b=j_a + w["s"],
-        j_sm=m(w["s"]), j_end=j_a + 2 * w["s"], slm=m(w["slot"]), lu_b=w["slot"], lu_c=2 * w["slot"], kr=KC._KR,
-        nrt=tab["nrt"], nj=tab["nj"], kcoll=repr(KC.K_COLL), px=", ".join(map(str, ext["px"])),
-        jpass=", Jin" if tab["nj"] else "")
+        sv_r=m(w["r"]),
+        sv_sg=w["r"],
+        sv_x2=w["r"] + 1,
+        sv_dst=w["r"] + 2,
+        sv_pm=m(w["part"]),
+        sv_end=w["r"] + 2 + w["part"],
+        j_km=m(w["k"]),
+        j_sg=w["k"],
+        j_x2=w["k"] + 1,
+        j_a=j_a,
+        j_b=j_a + w["s"],
+        j_sm=m(w["s"]),
+        j_end=j_a + 2 * w["s"],
+        slm=m(w["slot"]),
+        lu_b=w["slot"],
+        lu_c=2 * w["slot"],
+        kr=KC._KR,
+        nrt=tab["nrt"],
+        nj=tab["nj"],
+        kcoll=repr(KC.K_COLL),
+        px=", ".join(map(str, ext["px"])),
+        jpass=", Jin" if tab["nj"] else "",
+    )
 
 
 class ADSolver:
@@ -1761,13 +1896,15 @@ class ADSolver:
 
     def __init__(self, net, device, cap=CAP, drift=None, photo=False):
         if photo and (not net.photo or net.photo_missing):
-            raise ValueError("photo=True needs a network with photolysis branches whose species are all in its species "
-                             f"list (branches {len(net.photo)}, missing species {net.photo_missing})")
+            raise ValueError(
+                "photo=True needs a network with photolysis branches whose species are all in its species "
+                f"list (branches {len(net.photo)}, missing species {net.photo_missing})"
+            )
         self.dev = torch.device(device)
         torch.zeros(1, device=self.dev)
         prop = torch.cuda.get_device_properties(self.dev)
         fit = lambda t: (prop.shared_memory_per_block_optin - len(KC._blob(t)[0])) // (8 * KC._perc(t))  # noqa: E731
-        tab = KC.tables(net, 2, photo)                        # the call kernel's warps per cell (CudaSolver's rule)
+        tab = KC.tables(net, 2, photo)  # the call kernel's warps per cell (CudaSolver's rule)
         if KC.warps(fit(tab)) != 2:
             tab = KC.tables(net, KC.warps(fit(tab)), photo)
         supported(tab)
@@ -1776,7 +1913,7 @@ class ADSolver:
         blob, _ = KC._blob(tab)
         cu = KC._cuda()
         self.wpb, self.smem, self.max_blocks, self.src, self._fn, self._mod = {}, {}, {}, {}, {}, {}
-        self.capr = 2 * cap                                   # CAPR of the source: the recovery's stored attempts
+        self.capr = 2 * cap  # CAPR of the source: the recovery's stored attempts
         for kind in ("jvp", "vjp"):
             _, perwa = layout(tab, ext, kind)
             wpb = min(32, (prop.shared_memory_per_block_optin - len(blob)) // (8 * perwa))
@@ -1785,8 +1922,12 @@ class ADSolver:
             self.wpb[kind], self.smem[kind] = wpb, 8 * wpb * perwa + len(blob)
             self.src[kind] = source_ad(tab, ext, kind, wpb, cap, drift)
             self._mod[kind] = ctypes.c_void_p()
-            KC._check(cu.cuModuleLoadData(ctypes.byref(self._mod[kind]),
-                                          KC.compile_cubin(self.src[kind], f"{prop.major}{prop.minor}")), "load")
+            KC._check(
+                cu.cuModuleLoadData(
+                    ctypes.byref(self._mod[kind]), KC.compile_cubin(self.src[kind], f"{prop.major}{prop.minor}")
+                ),
+                "load",
+            )
             for name in (kind, kind + "_rec", "arrh" if kind == "vjp" else "guard"):
                 f = ctypes.c_void_p()
                 KC._check(cu.cuModuleGetFunction(ctypes.byref(f), self._mod[kind], name.encode()), "function")
@@ -1795,12 +1936,17 @@ class ADSolver:
                 KC._check(cu.cuFuncSetAttribute(f, 8, self.smem[kind]), "shared memory")
             f = self._fn[kind]
             occ = ctypes.c_int()
-            KC._check(cu.cuOccupancyMaxActiveBlocksPerMultiprocessor(ctypes.byref(occ), f, 32 * wpb, self.smem[kind]),
-                      "occupancy")
+            KC._check(
+                cu.cuOccupancyMaxActiveBlocksPerMultiprocessor(ctypes.byref(occ), f, 32 * wpb, self.smem[kind]),
+                "occupancy",
+            )
             if occ.value < 1:
                 raise RuntimeError(f"kernel {kind} does not fit on this device")
             self.max_blocks[kind] = prop.multi_processor_count * occ.value
-        g = lambda a, view=None: torch.tensor(a if view is None else np.asarray(a).view(view), device=self.dev)
+
+        def g(a, view=None):
+            return torch.tensor(a if view is None else np.asarray(a).view(view), device=self.dev)
+
         self.rc0 = g(tab["rc"])
         self._tabs = [g(tab["perm"]), g(np.frombuffer(blob, np.int32).copy()), g(tab["rf"]), g(tab["nasa"])]
         self._nw = {k: self.max_blocks[k] * self.wpb[k] for k in ("jvp", "vjp")}
@@ -1808,12 +1954,19 @@ class ADSolver:
         self._jscr = self._scratch
         self._rec = torch.empty(self._nw["vjp"] * 2 * cap * (self.ns + 6), dtype=torch.float64, device=self.dev)
         self._rrec = torch.empty(self._nw["vjp"] * 2 * self.capr * (self.ns + 6), dtype=torch.float64, device=self.dev)
-        self._wscr = torch.empty(max(self._nw.values()) * self.ns ** 2, dtype=torch.float64, device=self.dev)
-        self._st = [g(tab["sst"].ravel(), np.int32), g(tab["jt"].ravel(), np.int64), g(tab["lu"], np.int64),
-                    g(tab["optr"])]
+        self._wscr = torch.empty(max(self._nw.values()) * self.ns**2, dtype=torch.float64, device=self.dev)
+        self._st = [
+            g(tab["sst"].ravel(), np.int32),
+            g(tab["jt"].ravel(), np.int64),
+            g(tab["lu"], np.int64),
+            g(tab["optr"]),
+        ]
         self._gt = [g(ext["gt"].ravel(), np.int64), g(ext["xg"])]
-        self._rounds = [ctypes.c_int(tab["sst"].shape[0]), ctypes.c_int(tab["jround"]),
-                        ctypes.c_int(ext["gt"].shape[0])]
+        self._rounds = [
+            ctypes.c_int(tab["sst"].shape[0]),
+            ctypes.c_int(tab["jround"]),
+            ctypes.c_int(ext["gt"].shape[0]),
+        ]
         self._atoms, self._didx = g(tab["atoms"]), g(tab["didx"], np.int16)
         self.count = torch.zeros(10, dtype=torch.int32, device=self.dev)
         self.total = torch.zeros(10, dtype=torch.int32, device=self.dev)
@@ -1822,13 +1975,17 @@ class ADSolver:
     def _prep(self, x, T, P, dt, h, lm, rc, J, max_steps):
         if not all(a.is_cuda and a.dtype == torch.float64 for a in (x, T, P, dt, h)) or x.shape[1] != self.ns:
             raise ValueError(f"x [B, {self.ns}], T, P, dt, h [B]: float64 CUDA tensors")
-        if max_steps > self.cap * self.cap or KC.REC_STEPS * max_steps > self.capr ** 2:
-            raise ValueError(f"max_steps above {self.cap ** 2} (CAP^2) or the recovery's tries above {self.capr ** 2}")
+        if max_steps > self.cap * self.cap or KC.REC_STEPS * max_steps > self.capr**2:
+            raise ValueError(f"max_steps above {self.cap**2} (CAP^2) or the recovery's tries above {self.capr**2}")
         B = x.shape[0]
         lm = None if lm is None else lm.contiguous()
         rc = self.rc0 if rc is None else rc.contiguous()
-        if lm is not None and tuple(lm.shape) != (B, self.nr) or tuple(rc.shape) != (self.nr, self.rcw) or not all(
-                a.dtype == torch.float64 and a.device == x.device for a in (lm, rc) if a is not None):
+        if (
+            lm is not None
+            and tuple(lm.shape) != (B, self.nr)
+            or tuple(rc.shape) != (self.nr, self.rcw)
+            or not all(a.dtype == torch.float64 and a.device == x.device for a in (lm, rc) if a is not None)
+        ):
             raise ValueError(f"lm [B, {self.nr}], rc [{self.nr}, {self.rcw}]: float64 on the device of x")
         if J is not None and not self.nj:
             raise ValueError("J given, but the solver was built without photolysis (photo=False)")
@@ -1845,9 +2002,15 @@ class ADSolver:
         """The call kernel's guard on the kernel's result: (redo, list) of the cells to redo on the recovery's path."""
         B = x.shape[0]
         redo, lst = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(2))
-        KC._launch(self._fn["guard"], -(-B // 128) or 1, 128, 0, stream,
-                   [x, T, P, dt, xo, done, nok, self._atoms, redo, lst, self.count, ctypes.c_int(B),
-                    ctypes.c_double(atol)] + ([J] if self.nj else []))
+        KC._launch(
+            self._fn["guard"],
+            -(-B // 128) or 1,
+            128,
+            0,
+            stream,
+            [x, T, P, dt, xo, done, nok, self._atoms, redo, lst, self.count, ctypes.c_int(B), ctypes.c_double(atol)]
+            + ([J] if self.nj else []),
+        )
         return redo, lst
 
     def _finish(self, redo):
@@ -1867,8 +2030,29 @@ class ADSolver:
             raise ValueError(f"{n['cold']} cells below {KC.T_MIN:g} K: outside the chemistry solver's domain")
         return n
 
-    def jvp(self, x, T, P, dt, h, dx, dT, dP, ddt, dh, lm=None, dlm=None, rc=None, drc=None, adapt=True, rtol=1e-3,
-            atol=KC.ATOL, max_steps=4000, J=None, dJ=None):
+    def jvp(
+        self,
+        x,
+        T,
+        P,
+        dt,
+        h,
+        dx,
+        dT,
+        dP,
+        ddt,
+        dh,
+        lm=None,
+        dlm=None,
+        rc=None,
+        drc=None,
+        adapt=True,
+        rtol=1e-3,
+        atol=KC.ATOL,
+        max_steps=4000,
+        J=None,
+        dJ=None,
+    ):
         """The call and its tangent: (x, h, done, accepted steps, dx, dh) for the tangents dx [B, S], dT, dP, ddt,
         dh [B], dlm [B, R], drc [R, 9] and dJ [B, branches] (dlm, drc, dJ optional); with a leading axis of D <= DMAX
         directions on every tangent (dx [D, B, S], dT [D, B], ..., dlm [D, B, R], drc [D, R, 9], dJ [D, B, branches])
@@ -1877,15 +2061,23 @@ class ADSolver:
         one = dx.dim() == 2
         D = 1 if one else dx.shape[0]
         lead = () if one else (D,)
-        if not 1 <= D <= DMAX or tuple(dx.shape) != lead + (B, self.ns) or any(
-                tuple(a.shape) != lead + (B,) for a in (dT, dP, ddt, dh)) or (
-                dlm is not None and tuple(dlm.shape) != lead + (B, self.nr)) or (
-                drc is not None and tuple(drc.shape) != lead + (self.nr, 9)) or (
-                dJ is not None and (not self.nj or tuple(dJ.shape) != lead + (B, self.nj))):
-            raise ValueError(f"tangents: dx [D, B, S], dT, dP, ddt, dh [D, B], dlm [D, B, R], drc [D, R, 9], "
-                             f"dJ [D, B, branches] (photo=True only) (D <= {DMAX}), or the same without the D axis")
-        if not all(a.dtype == torch.float64 and a.device == x.device for a in (dx, dT, dP, ddt, dh, dlm, drc, dJ)
-                   if a is not None):
+        if (
+            not 1 <= D <= DMAX
+            or tuple(dx.shape) != lead + (B, self.ns)
+            or any(tuple(a.shape) != lead + (B,) for a in (dT, dP, ddt, dh))
+            or (dlm is not None and tuple(dlm.shape) != lead + (B, self.nr))
+            or (drc is not None and tuple(drc.shape) != lead + (self.nr, 9))
+            or (dJ is not None and (not self.nj or tuple(dJ.shape) != lead + (B, self.nj)))
+        ):
+            raise ValueError(
+                f"tangents: dx [D, B, S], dT, dP, ddt, dh [D, B], dlm [D, B, R], drc [D, R, 9], "
+                f"dJ [D, B, branches] (photo=True only) (D <= {DMAX}), or the same without the D axis"
+            )
+        if not all(
+            a.dtype == torch.float64 and a.device == x.device
+            for a in (dx, dT, dP, ddt, dh, dlm, drc, dJ)
+            if a is not None
+        ):
             raise ValueError("tangents: float64 on the device of x")
         tan = [a.contiguous() for a in (dx, dT, dP, ddt, dh)]
         dlm = None if dlm is None else dlm.contiguous()
@@ -1901,49 +2093,135 @@ class ADSolver:
         nb = max(1, min(-(-B // self.wpb["jvp"]), self.max_blocks["jvp"]))
         self.count.zero_()
         stream = torch.cuda.current_stream(self.dev).cuda_stream
-        args = lambda ms: [x, T, P, dt, h, self._ptr(lm), rc, *tan, self._ptr(dlm), self._ptr(drc), ctypes.c_int(D),
-                           xo, ho, done, nok, dxo, dho, self.count, ctypes.c_int(B), ctypes.c_double(rtol),
-                           ctypes.c_double(atol), ctypes.c_int(ms), ctypes.c_int(int(adapt)), *self._tabs, self._jscr,
-                           *self._st, *self._rounds[:2], self._ptr(J), self._ptr(dJ)]  # noqa: E731
+
+        def args(ms):
+            return [
+                x,
+                T,
+                P,
+                dt,
+                h,
+                self._ptr(lm),
+                rc,
+                *tan,
+                self._ptr(dlm),
+                self._ptr(drc),
+                ctypes.c_int(D),
+                xo,
+                ho,
+                done,
+                nok,
+                dxo,
+                dho,
+                self.count,
+                ctypes.c_int(B),
+                ctypes.c_double(rtol),
+                ctypes.c_double(atol),
+                ctypes.c_int(ms),
+                ctypes.c_int(int(adapt)),
+                *self._tabs,
+                self._jscr,
+                *self._st,
+                *self._rounds[:2],
+                self._ptr(J),
+                self._ptr(dJ),
+            ]  # noqa: E731
+
         KC._launch(self._fn["jvp"], nb, 32 * self.wpb["jvp"], self.smem["jvp"], stream, args(max_steps))
         redo, lst = self._guard(x, T, P, dt, xo, done, nok, atol, J, stream)
-        KC._launch(self._fn["jvp_rec"], nb, 32 * self.wpb["jvp"], self.smem["jvp"], stream,
-                   args(KC.REC_STEPS * max_steps) + [redo, lst, self._wscr, self._didx, self._atoms])
+        KC._launch(
+            self._fn["jvp_rec"],
+            nb,
+            32 * self.wpb["jvp"],
+            self.smem["jvp"],
+            stream,
+            args(KC.REC_STEPS * max_steps) + [redo, lst, self._wscr, self._didx, self._atoms],
+        )
         self._finish(redo)
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
-    def vjp(self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=KC.ATOL, max_steps=4000,
-            J=None):
+    def vjp(
+        self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=KC.ATOL, max_steps=4000, J=None
+    ):
         """The call and the cotangents of its inputs for the cotangents gx [B, S] of x_out and gh [B] of h_out
         (optional): (x, h, done, accepted steps, dict x, T, P, dt, h, lm [B, R] (of each reaction's log multiplier),
         rc [R, 9] (of the Arrhenius columns), J [B, branches] (photo=True))."""
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps)
-        if tuple(gx.shape) != (B, self.ns) or (gh is not None and tuple(gh.shape) != (B,)) or not all(
-                a.dtype == torch.float64 and a.device == x.device for a in (gx, gh) if a is not None):
+        if (
+            tuple(gx.shape) != (B, self.ns)
+            or (gh is not None and tuple(gh.shape) != (B,))
+            or not all(a.dtype == torch.float64 and a.device == x.device for a in (gx, gh) if a is not None)
+        ):
             raise ValueError(f"cotangents gx [B, {self.ns}], gh [B]: float64 on the device of x")
         gx = gx.contiguous()
         gh = None if gh is None else gh.contiguous()
         xo = torch.empty_like(x)
         ho, nok = (torch.empty(B, dtype=torch.float64, device=self.dev) for _ in range(2))
         done = torch.empty(B, dtype=torch.int32, device=self.dev)
-        g = dict(x=torch.empty_like(x), T=torch.empty_like(T), P=torch.empty_like(T), dt=torch.empty_like(T),
-                 h=torch.empty_like(T), lm=torch.empty(B, self.nr, dtype=torch.float64, device=self.dev),
-                 rc=torch.empty(self.nr, 9, dtype=torch.float64, device=self.dev))
+        g = dict(
+            x=torch.empty_like(x),
+            T=torch.empty_like(T),
+            P=torch.empty_like(T),
+            dt=torch.empty_like(T),
+            h=torch.empty_like(T),
+            lm=torch.empty(B, self.nr, dtype=torch.float64, device=self.dev),
+            rc=torch.empty(self.nr, 9, dtype=torch.float64, device=self.dev),
+        )
         if self.nj:
             g["J"] = torch.empty(B, self.nj, dtype=torch.float64, device=self.dev)
         gA = torch.empty(B, self.nr, dtype=torch.float64, device=self.dev)
         nb = max(1, min(-(-B // self.wpb["vjp"]), self.max_blocks["vjp"]))
         self.count.zero_()
         stream = torch.cuda.current_stream(self.dev).cuda_stream
-        args = lambda ms, rec: [x, T, P, dt, h, self._ptr(lm), rc, gx, self._ptr(gh), xo, ho, done, nok, g["x"],
-                                g["T"], g["P"], g["dt"], g["h"], g["lm"], self.count, ctypes.c_int(B),
-                                ctypes.c_double(rtol), ctypes.c_double(atol), ctypes.c_int(ms),
-                                ctypes.c_int(int(adapt)), *self._tabs, self._scratch, rec, *self._st, *self._gt,
-                                *self._rounds, self._ptr(J), self._ptr(g.get("J")), gA]  # noqa: E731
+
+        def args(ms, rec):
+            return [
+                x,
+                T,
+                P,
+                dt,
+                h,
+                self._ptr(lm),
+                rc,
+                gx,
+                self._ptr(gh),
+                xo,
+                ho,
+                done,
+                nok,
+                g["x"],
+                g["T"],
+                g["P"],
+                g["dt"],
+                g["h"],
+                g["lm"],
+                self.count,
+                ctypes.c_int(B),
+                ctypes.c_double(rtol),
+                ctypes.c_double(atol),
+                ctypes.c_int(ms),
+                ctypes.c_int(int(adapt)),
+                *self._tabs,
+                self._scratch,
+                rec,
+                *self._st,
+                *self._gt,
+                *self._rounds,
+                self._ptr(J),
+                self._ptr(g.get("J")),
+                gA,
+            ]  # noqa: E731
+
         KC._launch(self._fn["vjp"], nb, 32 * self.wpb["vjp"], self.smem["vjp"], stream, args(max_steps, self._rec))
         redo, lst = self._guard(x, T, P, dt, xo, done, nok, atol, J, stream)
-        KC._launch(self._fn["vjp_rec"], nb, 32 * self.wpb["vjp"], self.smem["vjp"], stream,
-                   args(KC.REC_STEPS * max_steps, self._rrec) + [redo, lst, self._wscr, self._didx, self._atoms])
+        KC._launch(
+            self._fn["vjp_rec"],
+            nb,
+            32 * self.wpb["vjp"],
+            self.smem["vjp"],
+            stream,
+            args(KC.REC_STEPS * max_steps, self._rrec) + [redo, lst, self._wscr, self._didx, self._atoms],
+        )
         KC._launch(self._fn["arrh"], self.nr, 256, 0, stream, [gA, T, P, rc, self._tabs[2], g["rc"], ctypes.c_int(B)])
         self._finish(redo)
         return xo, ho, done.bool(), nok, g

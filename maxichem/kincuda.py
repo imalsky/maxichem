@@ -5,36 +5,35 @@ side, |S| <= 2).
 The cell's threads compute its rate coefficients from T and P (NASA-9 Gibbs energies, low range below 1000 K; each
 reaction's law from the network: one or two Arrhenius k0 terms, falloff, Troe factor, efficiency; reverse rates from the
 equilibrium constants or an explicit reverse law; n_tot folded into the three-body coefficients; the collision limit: a
-direction of two or three molecules may not exceed K_COLL = 1e-9 cm3/s as a bimolecular-equivalent rate (k n_tot^(m - 2),
-M folded in), so where one does, both directions of the reaction are scaled by K_COLL / q (the larger direction's q):
-their ratio, and so the equilibrium, is kept; this bounds rate fits extrapolated far from their range, such as the
-reverses of CH + M -> C + H + M and C2H + M -> C2 + H + M at low T), then integrate the
-constant-T, P reactor dN/dt = (sum N / n_tot) S v (N: molecules per starting molecule, n = n_tot N / sum N) over dt
-with Rodas3 (4 stages, order 3, L-stable, stiffly accurate; gamma = 1/2) in the form W = I / (gamma h) - J,
-K_i = W^-1 (f(Y_i) + sum_j C_ij K_j / h), Y_i = N + sum_j A_ij K_j: Y_2 = N (stage 2 reuses f(N)), Y_3 = N + 2 K_1,
-Y_4 = N + 2 K_1 + K_3; C_21 = 4, C_3j = (1, -1), C_4j = (1, -1, -8/3); N' = N + 2 K_1 + K_3 + K_4, error estimate K_4.
-The stage right-hand sides are written as explicit fma, f + (4 / h) K_1, f + (K_1 - K_2) / h and
-f + (K_1 - K_2 - 8/3 K_3) / h (fma(-8/3, K_3, K_1 - K_2)), so that every kernel that repeats the call's arithmetic
-(the recover kernel, kincuda_ad) gets the same bits whatever the compiler contracts.
-Step control: the first try is max(min(h, dt), 1e-12) with h the cell's step size carried from its last call, each try
-min(h, dt - t); with q_i = K_4,i / (atol + rtol max(|N_i|, |N'_i|)), err is the RMS (mean_i q_i^2)^(1/2), except
-while the call has no accepted step (t = 0), when it is max(RMS, max_i |q_i|), the worst species: the first try uses the
-step size carried from the last call, often the whole call, and the gas may have changed abruptly since, so one fast
-species' error must not hide in the mean over all species; a step is accepted when err <= 1, err is finite and no
-species is below -atol (rtol 1e-3, atol ATOL = 1e-25 by default: trace species well below 1e-20 can grow by many orders
-of magnitude, as sulfur species do in lit gas below 800 K, so the error control must follow them; atol also sets the
-guard's clamping allowance); accepted states are clamped at 0. The next step is f times the last try's, f = 0.9 err^(-1/3) with the same err (so a first try
-rejected by its worst species shrinks by that species' error; 0.1 for a non-finite err), within [0.2, 20] after an
-accepted step or a rejected try, at most 0.5 after a rejection; a rejection that follows a rejection
-(both at the same state, both err > 1, the second try shorter) instead fits err ~ h^p to the two tries,
-p = ln(err_1 / err_2) / ln(h_1 / h_2), and aims at err 0.5: f = max((0.5 / err)^(1 / min(p, 3)), 1e-4), or 1e-4 when
-p <= 0.05 (after an abrupt change of the gas the error of a long try falls far more slowly than h^3, so the plain shrink
-takes many tries). A try after a rejection starts from the same state, so it reuses that try's f(N), Jn and w (a copy
-per cell in global memory) and redoes only the factorization and the stages. The call ends at t >= dt (1 - 1e-14) or
-after max_steps tries, and returns the mole fractions N / sum N, the next step size, done and the accepted steps. The
-exact Jacobian J = Jn + w 1^T (Jn = d(S v)/dn, w the constant-P term) enters through an LU
-factor without row exchanges of M0 = I / (gamma h) - Jn on its sparse pattern, in a minimum-degree order, and the
-Sherman-Morrison formula for the rank-one term.
+direction of two or three molecules may not exceed K_COLL = 1e-9 cm3/s as a bimolecular-equivalent rate (k n_tot^(m -
+2), M folded in), so where one does, both directions of the reaction are scaled by K_COLL / q (the larger direction's
+q): their ratio, and so the equilibrium, is kept; this bounds rate fits extrapolated far from their range, such as the
+reverses of CH + M -> C + H + M and C2H + M -> C2 + H + M at low T), then integrate the constant-T, P reactor dN/dt =
+(sum N / n_tot) S v (N: molecules per starting molecule, n = n_tot N / sum N) over dt with Rodas3 (4 stages, order 3,
+L-stable, stiffly accurate; gamma = 1/2) in the form W = I / (gamma h) - J, K_i = W^-1 (f(Y_i) + sum_j C_ij K_j / h),
+Y_i = N + sum_j A_ij K_j: Y_2 = N (stage 2 reuses f(N)), Y_3 = N + 2 K_1, Y_4 = N + 2 K_1 + K_3; C_21 = 4, C_3j = (1,
+-1), C_4j = (1, -1, -8/3); N' = N + 2 K_1 + K_3 + K_4, error estimate K_4. The stage right-hand sides are written as
+explicit fma, f + (4 / h) K_1, f + (K_1 - K_2) / h and f + (K_1 - K_2 - 8/3 K_3) / h (fma(-8/3, K_3, K_1 - K_2)), so
+that every kernel that repeats the call's arithmetic (the recover kernel, kincuda_ad) gets the same bits whatever the
+compiler contracts. Step control: the first try is max(min(h, dt), 1e-12) with h the cell's step size carried from its
+last call, each try min(h, dt - t); with q_i = K_4,i / (atol + rtol max(|N_i|, |N'_i|)), err is the RMS (mean_i
+q_i^2)^(1/2), except while the call has no accepted step (t = 0), when it is max(RMS, max_i |q_i|), the worst species:
+the first try uses the step size carried from the last call, often the whole call, and the gas may have changed abruptly
+since, so one fast species' error must not hide in the mean over all species; a step is accepted when err <= 1, err is
+finite and no species is below -atol (rtol 1e-3, atol ATOL = 1e-25 by default: trace species well below 1e-20 can grow
+by many orders of magnitude, as sulfur species do in lit gas below 800 K, so the error control must follow them; atol
+also sets the guard's clamping allowance); accepted states are clamped at 0. The next step is f times the last try's, f
+= 0.9 err^(-1/3) with the same err (so a first try rejected by its worst species shrinks by that species' error; 0.1 for
+a non-finite err), within [0.2, 20] after an accepted step or a rejected try, at most 0.5 after a rejection; a rejection
+that follows a rejection (both at the same state, both err > 1, the second try shorter) instead fits err ~ h^p to the
+two tries, p = ln(err_1 / err_2) / ln(h_1 / h_2), and aims at err 0.5: f = max((0.5 / err)^(1 / min(p, 3)), 1e-4), or
+1e-4 when p <= 0.05 (after an abrupt change of the gas the error of a long try falls far more slowly than h^3, so the
+plain shrink takes many tries). A try after a rejection starts from the same state, so it reuses that try's f(N), Jn and
+w (a copy per cell in global memory) and redoes only the factorization and the stages. The call ends at t >= dt (1 -
+1e-14) or after max_steps tries, and returns the mole fractions N / sum N, the next step size, done and the accepted
+steps. The exact Jacobian J = Jn + w 1^T (Jn = d(S v)/dn, w the constant-P term) enters through an LU factor without row
+exchanges of M0 = I / (gamma h) - Jn on its sparse pattern, in a minimum-degree order, and the Sherman-Morrison formula
+for the rank-one term.
 
 Layout. W warps per cell (warps(): 2, or 4 when the shared memory holds at most 3 cells per block). The last NT =
 min(NTAIL, NS) rows and columns of the order (the trailing block, dense or nearly so after the fill; structural zeros
@@ -47,28 +46,29 @@ cell's 32 W lanes, with descriptor bit widths set by the network's sizes; the re
 in batches of consecutive independent pivots. The four stage solves run from one copy of the triangular solve: stage 1
 solves K1 on the first warp and M0^-1 w on the second, each stage ends with the Sherman-Morrison update on the first
 warp. Cells per block: as many as the shared memory (per-cell arrays plus one copy of the small tables per block), the
-named barriers and the registers (without spilling) allow; the cells per block change no arithmetic. Persistent cells
-take work from an atomic queue, so no cell waits for the stiffest one. Results do not depend on the batch size or
-order.
+named barriers and the registers (no more local memory than a one-cell build) allow; the cells per block change no
+arithmetic. Persistent cells take work from an atomic queue, so no cell waits for the stiffest one. Results do not
+depend on the batch size or order.
 
 The CUDA source is generated from the network at construction and compiled once with NVRTC through ctypes (the library
 of torch's CUDA wheels); the kernel runs on torch's current stream.
 
 Guard and recovery: after the call a small kernel checks every cell (new state finite, call finished, each element's
 share of the atoms unchanged up to rounding (relative change at most drift) and what the clamping of accepted small
-negatives can add), counts the failures and lists the failed cells; a third kernel recomputes the listed cells from their inputs (x, T, P, dt and the
-starting h, which the call leaves unchanged), one cell per block of 32 W threads: the same rates, S v and Jacobian
-streams, Rodas3 stages, step control (with the reuse after a rejection) and tolerances, with W = I / (gamma h) - J formed densely (no Sherman-Morrison
-term; in shared memory when it fits, else in global memory) and factored by the cell's first warp with threshold partial
-pivoting (a row exchange only where the diagonal entry is below PIVTAU = 0.1 of the column's largest; plain partial
-pivoting loses the trace species' accuracy at the scale of atol), and REC_STEPS times the tries. It applies the guard's
-test to its result, writes it over the call's and counts the cell as recovered or still failed. It returns at once when
-no cell is listed. Nothing is read back to the host during a call: the counts stay on the device (CudaSolver.fallback
-and check() read them). Each cell's arithmetic depends only on its inputs, so results are bitwise reproducible on one
-GPU whatever the batch order. The element test checks the linear solves: E^T W = E^T / (gamma h) for the element matrix
-E (E^T S = 0), so every stage moves the element budget by gamma h E^T (residual of its solve); a factor without row
-exchanges that has lost accuracy shows up there. Cells with non-finite inputs are counted, not recomputed (they come
-back non-finite); cells below 300 K are not stepped and are counted, and check() raises for them.
+negatives can add), counts the failures and lists the failed cells; a third kernel recomputes the listed cells from
+their inputs (x, T, P, dt and the starting h, which the call leaves unchanged), one cell per block of 32 W threads: the
+same rates, S v and Jacobian streams, Rodas3 stages, step control (with the reuse after a rejection) and tolerances,
+with W = I / (gamma h) - J formed densely (no Sherman-Morrison term; in shared memory when it fits, else in global
+memory) and factored by the cell's first warp with threshold partial pivoting (a row exchange only where the diagonal
+entry is below PIVTAU = 0.1 of the column's largest; plain partial pivoting loses the trace species' accuracy at the
+scale of atol), and REC_STEPS times the tries. It applies the guard's test to its result, writes it over the call's and
+counts the cell as recovered or still failed. It returns at once when no cell is listed. Nothing is read back to the
+host during a call: the counts stay on the device (CudaSolver.fallback and check() read them). Each cell's arithmetic
+depends only on its inputs, so results are bitwise reproducible on one GPU whatever the batch order. The element test
+checks the linear solves: E^T W = E^T / (gamma h) for the element matrix E (E^T S = 0), so every stage moves the element
+budget by gamma h E^T (residual of its solve); a factor without row exchanges that has lost accuracy shows up there.
+Cells with non-finite inputs are counted, not recomputed (they come back non-finite); cells below 300 K are not stepped
+and are counted, and check() raises for them.
 
 The element-drift allowance is per network: the rounding drift of the element shares depends on the network's
 chemistry, not only on the factorization (a network can drift the same on the recover kernel's pivoted path). A
@@ -76,6 +76,7 @@ network takes drift = max(DRIFT, 10 r), with r its rounding drift: the largest r
 beyond the clamping term over the parity stress cases (recorded starts and their scrambles to 2 dex at dt up to 500 s)
 with the guard's drift test off. DRIFT is NCHO's (r 2e-9).
 """
+
 import ctypes
 import os
 import string
@@ -85,20 +86,21 @@ import torch
 
 from . import kinvulcan as KV
 
-T_MIN = 300.0   # K: the solver's domain starts here (colder cells are counted, not stepped)
-DRIFT = 1e-6    # default drift allowance (NCHO): relative change of an element's share left to rounding
+T_MIN = 300.0  # K: the solver's domain starts here (colder cells are counted, not stepped)
+DRIFT = 1e-6  # default drift allowance (NCHO): relative change of an element's share left to rounding
 REC_STEPS = 10  # the recovery's tries, in units of the call's max_steps (40,000 at the default 4,000)
-ATOL = 1e-25    # default absolute tolerance, in mole fraction (module docstring)
-K_COLL = 1e-9   # cm3 s^-1: no thermal rate may exceed this as a bimolecular-equivalent rate (module docstring)
+ATOL = 1e-25  # default absolute tolerance, in mole fraction (module docstring)
+K_COLL = 1e-9  # cm3 s^-1: no thermal rate may exceed this as a bimolecular-equivalent rate (module docstring)
 COUNTS = ("bad_input", "cold", "nonfinite", "unfinished", "drift", "recomputed", "recovered", "still_failed")
 
 
-NTAIL = 32      # rows of the trailing block factored in registers (at most 32)
+NTAIL = 32  # rows of the trailing block factored in registers (at most 32)
 
 
 def warps(fit):
-    """Warps per cell for a network whose per-cell arrays fit fit times in a block's shared memory: 4 when fit <= 3 (4
-    warps x 32 lanes x about 160 registers already cap a block at 3 cells, so the extra lanes cost no cells), else 2."""
+    """Warps per cell for a network whose per-cell arrays fit fit times in a block's shared memory: 4 when fit <= 3 (at
+    4 warps x 32 lanes and 160-190 registers per thread the register file already caps a block at 2-3 cells, so the
+    extra lanes cost no cells), else 2."""
     return 4 if fit <= 3 else 2
 
 
@@ -139,7 +141,10 @@ def _law(r):
     """Kernel row of a rate law: ln A0, B0, C0, ln A1, B1, C1 (second k0 term), ln A_inf, B_inf, C_inf, Troe a, T3, T1,
     T2, efficiency; flags: 1 falloff, 2 second k0 term, 64 Troe, 128 efficiency, 512 the Troe factor's "vm11" width
     (log10 F = log10 Fc / (1 + (log10 Pr / (0.75 - 1.27 log10 Fc))^2), kinvulcan.SPECIAL)."""
-    ln = lambda a: np.log(a) if a > 0 else -np.inf
+
+    def ln(a):
+        return np.log(a) if a > 0 else -np.inf
+
     if r["kind"] == 2:
         a0, a1, ai = (r["A"], r["B"], r["C"]), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0)
     else:
@@ -148,19 +153,35 @@ def _law(r):
         ai = (r["Ai"], r["Bi"], r["Ci"]) if r["kind"] in (3, 6) else (1.0, 0.0, 0.0)
     if min(a0[0], a1[0], ai[0]) < 0:
         raise ValueError(f"negative Arrhenius prefactor in {r.get('eq', r)}: the kernel takes ln A")
-    row = [ln(a0[0]), a0[1], a0[2], ln(a1[0]), a1[1], a1[2], ln(ai[0]), ai[1], ai[2],
-           *r.get("troe", (0.0, 1.0, 1.0, 0.0)), r.get("eff", 1.0)]
-    fl = int(r["kind"] in (3, 6)) | int("A1" in r) << 1 | int("troe" in r) << 6 | int("eff" in r) << 7 \
+    row = [
+        ln(a0[0]),
+        a0[1],
+        a0[2],
+        ln(a1[0]),
+        a1[1],
+        a1[2],
+        ln(ai[0]),
+        ai[1],
+        ai[2],
+        *r.get("troe", (0.0, 1.0, 1.0, 0.0)),
+        r.get("eff", 1.0),
+    ]
+    fl = (
+        int(r["kind"] in (3, 6))
+        | int("A1" in r) << 1
+        | int("troe" in r) << 6
+        | int("eff" in r) << 7
         | int(r.get("width") == "vm11") << 9
+    )
     return row, fl
 
 
 def tables(net, w, photo=False):
     """The kernel's tables from a VulcanNetwork (rate laws in the reaction dicts) for w >= 2 warps per cell: species
     order, rate laws, S v and Jacobian term streams, LU pattern and update operations (species in the kernel's order:
-    perm[i] = network index of row i), descriptor bit widths. photo: the network's photolysis branches (net.photo) follow
-    the thermal reactions as reactions nrt..nr-1, irreversible (no reverse side, no reverse Jacobian terms), their
-    forward rate coefficient the call's per-cell input J."""
+    perm[i] = network index of row i), descriptor bit widths. photo: the network's photolysis branches (net.photo)
+    follow the thermal reactions as reactions nrt..nr-1, irreversible (no reverse side, no reverse Jacobian terms),
+    their forward rate coefficient the call's per-cell input J."""
     reac = net.reac + (net.photo if photo else [])
     S = np.hstack([np.asarray(net.S), np.asarray(net.Sp)]) if photo else np.asarray(net.S)
     ns, nr = S.shape
@@ -171,20 +192,20 @@ def tables(net, w, photo=False):
     if ns > 254 or max(len(q) for q in re + pr) > 3 or np.abs(S).max() > 2:
         raise ValueError("the kernel holds at most 254 species, 3 species per side, |S| <= 2")
     live = [r for r in range(nr) if np.any(S[:, r] != 0)]
-    dv = {}                                   # d v_r / d n_q: (sign, rate index (kf r, kr nr + r), other species)
+    dv = {}  # d v_r / d n_q: (sign, rate index (kf r, kr nr + r), other species)
     for r in live:
-        for side, k, sgn in ((re[r], r, 1.0), (pr[r], nr + r, -1.0))[:1 if r >= nrt else 2]:
+        for side, k, sgn in ((re[r], r, 1.0), (pr[r], nr + r, -1.0))[: 1 if r >= nrt else 2]:
             for m in range(len(side)):
-                dv.setdefault((r, side[m]), []).append((sgn, k, side[:m] + side[m + 1:]))
-    jn = {}                                   # entry (p, q) of Jn: (S[p, r], (r, q))
-    for (r, q) in dv:
+                dv.setdefault((r, side[m]), []).append((sgn, k, side[:m] + side[m + 1 :]))
+    jn = {}  # entry (p, q) of Jn: (S[p, r], (r, q))
+    for r, q in dv:
         for p in np.flatnonzero(S[:, r]):
             jn.setdefault((int(p), q), []).append((S[p, r], (r, q)))
     pat = set(jn) | {(i, i) for i in range(ns)}
     perm = _order(pat, ns)
     pos = {s: k for k, s in enumerate(perm)}
     P = {(pos[i], pos[j]) for i, j in pat}
-    ops = [[] for _ in range(ns)]             # symbolic LU without exchanges: ops[k] = (i, j) updated by pivot k
+    ops = [[] for _ in range(ns)]  # symbolic LU without exchanges: ops[k] = (i, j) updated by pivot k
     for k in range(ns):
         rows = sorted(i for (i, j) in P if j == k and i > k)
         cols = sorted(j for (i, j) in P if i == k and j > k)
@@ -193,9 +214,9 @@ def tables(net, w, photo=False):
                 P.add((i, j))
                 ops[k].append((i, j))
     nt = min(NTAIL, ns)
-    k0 = ns - nt                              # rows < k0: sparse leading part; rows >= k0: the trailing block
+    k0 = ns - nt  # rows < k0: sparse leading part; rows >= k0: the trailing block
     P |= {(i, j) for i in range(k0, ns) for j in range(k0, ns)}
-    lead = sorted(e for e in P if not (e[0] >= k0 and e[1] >= k0))   # row-major, then the trailing block row-major
+    lead = sorted(e for e in P if not (e[0] >= k0 and e[1] >= k0))  # row-major, then the trailing block row-major
     slot = {e: n for n, e in enumerate(lead)}
     tb0 = len(lead)
     for i in range(k0, ns):
@@ -208,22 +229,30 @@ def tables(net, w, photo=False):
     rc = np.zeros((2 * nr if rev else nr, 14))
     rf = np.zeros(len(rc), np.int32)
     for j, r in enumerate(reac):
-        rx[j, :len(re[j])] = [pos[q] for q in re[j]]
-        if j >= nrt:                          # photolysis: no reverse side, no law (kf = J, kr = 0 in the kernel)
+        rx[j, : len(re[j])] = [pos[q] for q in re[j]]
+        if j >= nrt:  # photolysis: no reverse side, no law (kf = J, kr = 0 in the kernel)
             continue
-        rx[j, 3:3 + len(pr[j])] = [pos[q] for q in pr[j]]
+        rx[j, 3 : 3 + len(pr[j])] = [pos[q] for q in pr[j]]
         rc[j], rf[j] = _law(r)
-        rf[j] |= (r["kind"] in (3, 5, 6)) << 2 | (len(pr[j]) - len(re[j]) + 4) << 3 | ("rev" in r) << 8 \
-            | len(re[j]) << 10 | len(pr[j]) << 12
+        rf[j] |= (
+            (r["kind"] in (3, 5, 6)) << 2
+            | (len(pr[j]) - len(re[j]) + 4) << 3
+            | ("rev" in r) << 8
+            | len(re[j]) << 10
+            | len(pr[j]) << 12
+        )
         if "rev" in r:
             rc[nr + j], rf[nr + j] = _law(r["rev"])
-    law = sorted({"troe" for r in reac if "troe" in r or "troe" in r.get("rev", {})}
-                 | {"eff" for r in reac if "eff" in r or "eff" in r.get("rev", {})} | ({"rev"} if rev else set()))
+    law = sorted(
+        {"troe" for r in reac if "troe" in r or "troe" in r.get("rev", {})}
+        | {"eff" for r in reac if "eff" in r or "eff" in r.get("rev", {})}
+        | ({"rev"} if rev else set())
+    )
     if not {"troe", "eff"} & set(law):
         rc = rc[:, :9]
     # widest forward and reverse side of each round of nl reactions
-    wid = [(rx[:, o:o + 3] != ns).sum(1) for o in (0, 3)]
-    vs = [[int(q[c:c + nl].max()) for c in range(0, nr, nl)] for q in wid]
+    wid = [(rx[:, o : o + 3] != ns).sum(1) for o in (0, 3)]
+    vs = [[int(q[c : c + nl].max()) for c in range(0, nr, nl)] for q in wid]
     # descriptor widths: reaction, rate (kf, kr, the zero rate 2 nr), species (padding ns), LU slot, S v piece
     w_ = dict(r=_bits(nr - 1), k=_bits(2 * nr), s=_bits(ns), slot=_bits(nnz - 1))
     # S v: each row's terms cut into pieces of <= ch; a row's first piece writes part[i], the others part[ns + e]
@@ -232,7 +261,7 @@ def tables(net, w, photo=False):
     pieces, xp, nx = [], [0], 0
     for i, t in enumerate(rows):
         for c in range(0, len(t), ch):
-            pieces.append((i if c == 0 else ns + nx, t[c:c + ch]))
+            pieces.append((i if c == 0 else ns + nx, t[c : c + ch]))
             nx += c > 0
         xp.append(nx)
     npart = ns + nx
@@ -249,8 +278,14 @@ def tables(net, w, photo=False):
         for it in its:
             dst, terms = pieces[it]
             for e, (r, c) in enumerate(terms):
-                sst[q, l_] = (r | int(c < 0) << w_["r"] | int(abs(c) == 2) << (w_["r"] + 1) | dst << o_dst
-                              | int(e == len(terms) - 1) << (o_dst + w_["part"]) | 1 << 31)
+                sst[q, l_] = (
+                    r
+                    | int(c < 0) << w_["r"]
+                    | int(abs(c) == 2) << (w_["r"] + 1)
+                    | dst << o_dst
+                    | int(e == len(terms) - 1) << (o_dst + w_["part"])
+                    | 1 << 31
+                )
                 q += 1
     # Jacobian: the terms of each slot (one lane each): coefficient * k * n_a * n_b, as 32-bit words (rate, sign, x2,
     # a, b, end of slot); padding words take the zero rate at index 2 nr; each lane's finished slots in order in jsl
@@ -264,10 +299,10 @@ def tables(net, w, photo=False):
     # a slot longer than the even share is cut into pieces: the first writes the slot, the others Y[e] (free during the
     # Jacobian), added to the slot afterwards in order (fix: slot of each extra piece)
     cap = -(-sum(len(t) for t in terms) // nl)
-    jp, fix = [], []                          # pieces: (destination, terms); destination >= nnz: Y[dest - nnz]
+    jp, fix = [], []  # pieces: (destination, terms); destination >= nnz: Y[dest - nnz]
     for s in range(nnz):
         for c in range(0, len(terms[s]), cap):
-            jp.append((s if c == 0 else nnz + len(fix), terms[s][c:c + cap]))
+            jp.append((s if c == 0 else nnz + len(fix), terms[s][c : c + cap]))
             if c:
                 fix.append(s)
     if len(fix) > ns or nnz + len(fix) > 0xFFFF:
@@ -281,21 +316,30 @@ def tables(net, w, photo=False):
         for it in its:
             tl = jp[it][1]
             for e, (k, c, a, b) in enumerate(tl):
-                jw[q, l_] = (int(k) | int(c < 0) << w_["k"] | int(abs(c) == 2) << (w_["k"] + 1) | a << o_a
-                             | b << (o_a + w_["s"]) | int(e == len(tl) - 1) << o_end)
+                jw[q, l_] = (
+                    int(k)
+                    | int(c < 0) << w_["k"]
+                    | int(abs(c) == 2) << (w_["k"] + 1)
+                    | a << o_a
+                    | b << (o_a + w_["s"])
+                    | int(e == len(tl) - 1) << o_end
+                )
                 q += 1
         jw[q:, l_] = 2 * nr | ns << o_a | ns << (o_a + w_["s"])
     lanes = [[jp[it][0] for it in its] for its in lanes]
     jsmax = max(len(its) for its in lanes)
     jsl = np.zeros((nl, jsmax), np.uint16)
     for l_, its in enumerate(lanes):
-        jsl[l_, :len(its)] = its
+        jsl[l_, : len(its)] = its
     jb = jw.tobytes() + jsl.tobytes() + np.array(fix, np.uint16).tobytes()
     jt = np.frombuffer(jb + b"\0" * (-len(jb) % 8), np.uint64)
     # LU of the sparse leading part (pivots < k0; their updates reach the trailing block too); batches of consecutive
     # mutually independent pivots (blen[k]: length of the batch starting at pivot k, else 0)
-    lu = [(slot[(i, j)] | slot[(i, k)] << w_["slot"] | slot[(k, j)] << 2 * w_["slot"]) for k in range(k0)
-          for (i, j) in ops[k]]
+    lu = [
+        (slot[(i, j)] | slot[(i, k)] << w_["slot"] | slot[(k, j)] << 2 * w_["slot"])
+        for k in range(k0)
+        for (i, j) in ops[k]
+    ]
     optr = np.cumsum([0] + [len(ops[k]) for k in range(k0)]).astype(np.int32)
     blen, cur = np.zeros(k0, np.uint8), None
     for k in range(k0):
@@ -309,13 +353,44 @@ def tables(net, w, photo=False):
     colof = np.array([j for (i, j) in lead], np.uint8)
     diag = np.array([slot[(i, i)] for i in range(ns)], np.uint16)
     nasa = np.concatenate([np.asarray(net.lo)[perm], np.asarray(net.hi)[perm]], 0)
-    didx = np.zeros(nnz, np.uint16)           # dense position of each slot (recovery)
+    didx = np.zeros(nnz, np.uint16)  # dense position of each slot (recovery)
     for (i, j), s in slot.items():
         didx[s] = i * ns + j
-    return dict(ns=ns, nr=nr, nrt=nrt, nj=nr - nrt, nnz=nnz, k0=k0, tb0=tb0, w=w, P=P, perm=np.array(perm, np.int32), rx=rx, rc=rc, rf=rf,
-                law=law, nasa=nasa, npart=npart, xp=np.array(xp, np.uint8), sst=sst, jt=jt, jround=jround,
-                jsmax=jsmax, nfix=len(fix), lu=np.array(lu, np.uint64), optr=optr, blen=blen, vs=vs, smap=smap,
-                rowptr=rowptr, colof=colof, diag=diag, didx=didx, atoms=np.asarray(net.atoms, float), wd=w_)
+    return dict(
+        ns=ns,
+        nr=nr,
+        nrt=nrt,
+        nj=nr - nrt,
+        nnz=nnz,
+        k0=k0,
+        tb0=tb0,
+        w=w,
+        P=P,
+        perm=np.array(perm, np.int32),
+        rx=rx,
+        rc=rc,
+        rf=rf,
+        law=law,
+        nasa=nasa,
+        npart=npart,
+        xp=np.array(xp, np.uint8),
+        sst=sst,
+        jt=jt,
+        jround=jround,
+        jsmax=jsmax,
+        nfix=len(fix),
+        lu=np.array(lu, np.uint64),
+        optr=optr,
+        blen=blen,
+        vs=vs,
+        smap=smap,
+        rowptr=rowptr,
+        colof=colof,
+        diag=diag,
+        didx=didx,
+        atoms=np.asarray(net.atoms, float),
+        wd=w_,
+    )
 
 
 _SRC = r"""
@@ -386,8 +461,8 @@ __device__ __forceinline__ double wmax(double v) {
   return v;
 }
 
-// Step-size factor after a try of size ha with err en, accepted or not (ok); prej, pen, pha: the call's previous try was
-// rejected, its err, its size (module docstring).
+// Step-size factor after a try of size ha with err en, accepted or not (ok); prej, pen, pha: the call's previous try
+// was rejected, its err, its size (module docstring).
 __device__ __forceinline__ double step_factor(double en, bool ok, bool prej, double pen, double pha, double ha) {
   const bool efin = isfinite(en);
   double fac = efin ? 0.9 / cbrt(fmax(en, 1e-10)) : 0.1;
@@ -404,7 +479,8 @@ __device__ __forceinline__ double step_factor(double en, bool ok, bool prej, dou
 // The collision limit: q, the larger of the two directions' bimolecular-equivalent rates (k, M folded in, times
 // nd^(molecules - 2), for directions of two or three molecules); if q > K_COLL both directions take K_COLL / q.
 #define COLL(fl, kf, kr, nd) do { const int mf_ = ((fl) >> 10) & 3, mr_ = ((fl) >> 12) & 3; \
-    const double q_ = fmax(mf_ >= 2 ? (kf) * (mf_ == 3 ? (nd) : 1.0) : 0.0, mr_ >= 2 ? (kr) * (mr_ == 3 ? (nd) : 1.0) : 0.0); \
+    const double q_ = fmax(mf_ >= 2 ? (kf) * (mf_ == 3 ? (nd) : 1.0) : 0.0, \
+                           mr_ >= 2 ? (kr) * (mr_ == 3 ? (nd) : 1.0) : 0.0); \
     if (q_ > $kcoll) { const double c_ = $kcoll / q_; (kf) *= c_; (kr) *= c_; } } while (0)
 
 __device__ __forceinline__ double law(const double* q, int fl, double Tc, double lT, double iT, double nd) {
@@ -596,7 +672,7 @@ $jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && i
       if (cl == 0) g[NS] = 0.0;
       CSYNC(grp);
       for (int r = cl; r < NR; r += NL) {
-        ${jrate}const int fl = rf[r];                 // law flags (law()), 4 three-body, (dmu + 4) << 3, 256 explicit reverse
+        ${jrate}const int fl = rf[r];  // law flags (law()): 4 three-body, (dmu + 4) << 3, 256 explicit reverse
         const double k = law(rc + RCW * r, fl, Tc, lT, iT, nd);
         const u8* x = T.rx + 6 * r;
         const double dg = g[x[3]] + g[x[4]] + g[x[5]] - g[x[0]] - g[x[1]] - g[x[2]];
@@ -866,7 +942,7 @@ extern "C" __global__ void guard(const double* __restrict__ x0, const double* __
 }
 
 // Dense LU of A (row-major NS x NS) on one warp with threshold partial pivoting, in place: row k is exchanged with the
-// row of the largest |entry| of column k (ties to the lower row; non-finite entries are never chosen) only when |W_kk|
+// row of the largest |entry| of column k (ties to the lower row; a NaN entry is never chosen) only when |W_kk|
 // is below PIVTAU times that entry or not finite; unit L below the diagonal, U on and above it; pr[i] = the row of the
 // original A now in row i; dinv = 1 / U_ii.
 __device__ __forceinline__ void dense_lu(double* A, double* dinv, int* pr, int lane) {
@@ -943,7 +1019,8 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
     double* noko, int* redo, const int* __restrict__ list, int* count, double rtol, double atol, int max_steps,
     const int* __restrict__ perm, const unsigned* __restrict__ blob, const double* __restrict__ rc,
     const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, const unsigned* __restrict__ sst,
-    const u64* __restrict__ jt, const u16* __restrict__ didx, const double* __restrict__ atoms, int sround, int jround$jarg)
+    const u64* __restrict__ jt, const u16* __restrict__ didx, const double* __restrict__ atoms, int sround,
+    int jround$jarg)
 {
   const int nfl = count[6];
   if ((int)blockIdx.x >= nfl) return;
@@ -1177,8 +1254,10 @@ def _mask(name, ks, n):
 
 def _field(name, vals):
     """#define name(q): the 2-bit value vals[q], as 64-bit words."""
-    words = [sum(int(v) << (2 * (q - 32 * w)) for q, v in enumerate(vals) if 32 * w <= q < 32 * w + 32)
-             for w in range(max(1, -(-len(vals) // 32)))]
+    words = [
+        sum(int(v) << (2 * (q - 32 * w)) for q, v in enumerate(vals) if 32 * w <= q < 32 * w + 32)
+        for w in range(max(1, -(-len(vals) // 32)))
+    ]
     e = f"((int)(({words[-1]:#x}ull >> (2 * ((q) & 31))) & 3ull))"
     for w in range(len(words) - 2, -1, -1):
         e = f"((q) < {32 * w + 32} ? ((int)(({words[w]:#x}ull >> (2 * ((q) & 31))) & 3ull)) : {e})"
@@ -1208,36 +1287,89 @@ def source(tab, cpb, wsh=True, drift=None):
     ns, k0, P, w = tab["ns"], tab["k0"], tab["P"], tab["wd"]
     nt = ns - k0
     blob, offs = _blob(tab)
-    m = lambda b: (1 << b) - 1
-    masks = "\n".join([
-        _mask("LPRE", (k for k in range(k0) if any((i, k) in P for i in range(k + 1, k0))), k0),
-        _mask("LTAIL", (k for k in range(k0) if any((i, k) in P for i in range(k0, ns))), k0),
-        _mask("UPRE", (k for k in range(k0) if any((i, k) in P for i in range(k))), k0),
-        _mask("UTAIL", (j for j in range(nt) if any((i, k0 + j) in P for i in range(k0))), nt),
-        _field("VSA", tab["vs"][0]), _field("VSB", tab["vs"][1])])
+
+    def m(b):
+        return (1 << b) - 1
+
+    masks = "\n".join(
+        [
+            _mask("LPRE", (k for k in range(k0) if any((i, k) in P for i in range(k + 1, k0))), k0),
+            _mask("LTAIL", (k for k in range(k0) if any((i, k) in P for i in range(k0, ns))), k0),
+            _mask("UPRE", (k for k in range(k0) if any((i, k) in P for i in range(k))), k0),
+            _mask("UTAIL", (j for j in range(nt) if any((i, k0 + j) in P for i in range(k0))), nt),
+            _field("VSA", tab["vs"][0]),
+            _field("VSB", tab["vs"][1]),
+        ]
+    )
     law = tab["law"]
     falloff = (_TROE if "troe" in law else _FALLOFF) + (_EFF if "eff" in law else "")
     nj, nrt = tab["nj"], tab["nrt"]
-    bad = "q >= 0.0 ? 0.0 * q : __longlong_as_double(0x7ff8000000000000ull)"   # NaN unless 0 <= J < inf
-    jslots = dict(jarg="", jpass="", jchk="", jchk1="", jrate="") if not nj else dict(
-        jarg=", const double* __restrict__ Jin", jpass=", Jin",
-        jchk=f"    for (int b = lane; b < {nj}; b += 32) {{ const double q = Jin[(size_t)cell * {nj} + b]; p += {bad}; }}\n",
-        jchk1=f"  for (int b = 0; b < {nj}; b++) {{ const double q = Jin[(size_t)cell * {nj} + b]; p += {bad}; }}\n",
-        jrate=f"if (r >= {nrt}) {{ kf[r] = Jin[(size_t)cell * {nj} + r - {nrt}]; kr[r] = 0.0; continue; }}\n        ")
+    bad = "q >= 0.0 ? 0.0 * q : __longlong_as_double(0x7ff8000000000000ull)"  # NaN unless 0 <= J < inf
+    jslots = (
+        dict(jarg="", jpass="", jchk="", jchk1="", jrate="")
+        if not nj
+        else dict(
+            jarg=", const double* __restrict__ Jin",
+            jpass=", Jin",
+            jchk=f"    for (int b = lane; b < {nj}; b += 32) {{ const double q = Jin[(size_t)cell * {nj} + b]; "
+            f"p += {bad}; }}\n",
+            jchk1=f"  for (int b = 0; b < {nj}; b++) {{ const double q = Jin[(size_t)cell * {nj} + b]; "
+            f"p += {bad}; }}\n",
+            jrate=f"if (r >= {nrt}) {{ kf[r] = Jin[(size_t)cell * {nj} + r - {nrt}]; kr[r] = 0.0; continue; }}"
+            "\n        ",
+        )
+    )
     j_a = w["k"] + 2
     return string.Template(_SRC).substitute(
-        ns=ns, nr=tab["nr"], nnz=tab["nnz"], tb0=tab["tb0"], npart=tab["npart"], k0=k0, nt=nt,
-        rp=max(1, -(-k0 // 32)), rcw=tab["rc"].shape[1], cpb=cpb, w=tab["w"], perc=_perc(tab),
-        voff=tab["tb0"] if _alias(tab) else tab["nnz"] + 10 * ns + 3, tbytes=len(blob), jsmax=tab["jsmax"],
-        nfix=tab["nfix"], masks=masks, falloff=falloff, kr=_KREV if "rev" in law else _KR, kcoll=repr(K_COLL),
-        sv_r=m(w["r"]), sv_sg=w["r"], sv_x2=w["r"] + 1, sv_dst=w["r"] + 2, sv_pm=m(w["part"]),
+        ns=ns,
+        nr=tab["nr"],
+        nnz=tab["nnz"],
+        tb0=tab["tb0"],
+        npart=tab["npart"],
+        k0=k0,
+        nt=nt,
+        rp=max(1, -(-k0 // 32)),
+        rcw=tab["rc"].shape[1],
+        cpb=cpb,
+        w=tab["w"],
+        perc=_perc(tab),
+        voff=tab["tb0"] if _alias(tab) else tab["nnz"] + 10 * ns + 3,
+        tbytes=len(blob),
+        jsmax=tab["jsmax"],
+        nfix=tab["nfix"],
+        masks=masks,
+        falloff=falloff,
+        kr=_KREV if "rev" in law else _KR,
+        kcoll=repr(K_COLL),
+        sv_r=m(w["r"]),
+        sv_sg=w["r"],
+        sv_x2=w["r"] + 1,
+        sv_dst=w["r"] + 2,
+        sv_pm=m(w["part"]),
         sv_end=w["r"] + 2 + w["part"],
-        j_km=m(w["k"]), j_sg=w["k"], j_x2=w["k"] + 1, j_a=j_a, j_b=j_a + w["s"], j_sm=m(w["s"]),
-        j_end=j_a + 2 * w["s"], slm=m(w["slot"]), lu_b=w["slot"], lu_c=2 * w["slot"],
-        nel=tab["atoms"].shape[1], etot=repr(float(tab["atoms"].sum())), tmin=repr(T_MIN),
+        j_km=m(w["k"]),
+        j_sg=w["k"],
+        j_x2=w["k"] + 1,
+        j_a=j_a,
+        j_b=j_a + w["s"],
+        j_sm=m(w["s"]),
+        j_end=j_a + 2 * w["s"],
+        slm=m(w["slot"]),
+        lu_b=w["slot"],
+        lu_c=2 * w["slot"],
+        nel=tab["atoms"].shape[1],
+        etot=repr(float(tab["atoms"].sum())),
+        tmin=repr(T_MIN),
         drift=repr(float(DRIFT if drift is None else drift)),
-        kb=repr(KV.KB), p0=repr(KV.P0), wsh=int(wsh), vr=max(tab["nr"], ns + 1), rpd=-(-ns // 32),
-        perwr=_perw_rec(tab, wsh), **jslots, **{f"o_{k}": v for k, v in offs.items()})
+        kb=repr(KV.KB),
+        p0=repr(KV.P0),
+        wsh=int(wsh),
+        vr=max(tab["nr"], ns + 1),
+        rpd=-(-ns // 32),
+        perwr=_perw_rec(tab, wsh),
+        **jslots,
+        **{f"o_{k}": v for k, v in offs.items()},
+    )
 
 
 _CUDA = []
@@ -1254,8 +1386,12 @@ def _cuda():
         lib.cuModuleUnload.argtypes = [vp]
         lib.cuFuncSetAttribute.argtypes = [vp, ctypes.c_int, ctypes.c_int]
         lib.cuFuncGetAttribute.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, vp]
-        lib.cuOccupancyMaxActiveBlocksPerMultiprocessor.argtypes = [ctypes.POINTER(ctypes.c_int), vp, ctypes.c_int,
-                                                                    ctypes.c_size_t]
+        lib.cuOccupancyMaxActiveBlocksPerMultiprocessor.argtypes = [
+            ctypes.POINTER(ctypes.c_int),
+            vp,
+            ctypes.c_int,
+            ctypes.c_size_t,
+        ]
         _CUDA.append(lib)
     return _CUDA[0]
 
@@ -1270,6 +1406,7 @@ def _check(r, what):
 def compile_cubin(src, arch):
     """CUDA source -> cubin for sm_<arch> with NVRTC (the libnvrtc of the nvidia-cuda-nvrtc wheel)."""
     import nvidia.cuda_nvrtc
+
     nv = ctypes.CDLL(os.path.join(list(nvidia.cuda_nvrtc.__path__)[0], "lib", "libnvrtc.so.12"))
     nv.nvrtcGetErrorString.restype = ctypes.c_char_p
 
@@ -1318,34 +1455,39 @@ def _attr(fn, a):
 
 
 class CudaSolver:
-    """CudaSolver(net, device, drift=None, photo=False)(x, T, P, dt, h, J=None) -> (x, h, done, accepted steps): the call of the module
-    docstring for x [B, S] mole fractions in the network's species order, T [B] K, P [B] dyn cm^-2, dt [B] s and
-    starting step sizes h [B] (float64 CUDA tensors), with the cells the guard flags recomputed on the device (see the
-    module docstring); no host sync. count: the last call's counts (device int32 [10]: queue, then COUNTS, then the
-    recovery's queue); total: the counts since construction (device int64 [10], added on the stream after each call);
-    fallback: the last call's counts as a dict (reads them from the device); check(): the totals as a dict, raises if
-    any cell was below T_MIN; info: the kernel's layout (sizes, warps per cell, leading / trailing split, registers and
-    local bytes per thread, cells and warps per block, shared memory per block, resident cells per SM; the recover
-    kernel's shared memory, W in shared memory or not, resident blocks). stride, stride_rec: the global scratch in doubles per cell slot of the call kernel and per
-    block of the recover kernel (rates, the copy for a retry, the recover kernel's W when not in shared memory). drift:
-    the network's element-drift allowance (module docstring; default DRIFT). photo: the network's photolysis branches
-    (net.photo) enter the call, each an irreversible first-order reaction absorber -> products with the rate J n_absorber;
-    the call then takes J [B, len(net.photo)] (s^-1, float64 on the device of x, columns in net.photo's order; None =
-    0), held constant within the call like T and P; a row with a negative or non-finite J is a bad input (the cell is
-    not stepped and is counted; a cell below T_MIN is counted as cold whatever its J). With photo=False (default) the
-    kernels are those of the thermal network alone. Calls run one at a time on torch's current stream (the queues, the
-    counts and the scratch are shared)."""
+    """CudaSolver(net, device, drift=None, photo=False)(x, T, P, dt, h, J=None) -> (x, h, done, accepted steps): the
+    call of the module docstring for x [B, S] mole fractions in the network's species order, T [B] K, P [B] dyn cm^-2,
+    dt [B] s and starting step sizes h [B] (float64 CUDA tensors), with the cells the guard flags recomputed on the
+    device (see the module docstring); no host sync. count: the last call's counts (device int32 [10]: queue, then
+    COUNTS, then the recovery's queue); total: the counts since construction (device int64 [10], added on the stream
+    after each call); fallback: the last call's counts as a dict (reads them from the device); check(): the totals as a
+    dict, raises if any cell was below T_MIN; info: the kernel's layout (sizes, warps per cell, leading / trailing
+    split, registers and local bytes per thread, cells and warps per block, shared memory per block, resident cells per
+    SM; the recover kernel's shared memory, W in shared memory or not, resident blocks). stride, stride_rec: the global
+    scratch in doubles per cell slot of the call kernel and per block of the recover kernel (rates, the copy for a
+    retry, the recover kernel's W when not in shared memory). drift: the network's element-drift allowance (module
+    docstring; default DRIFT). photo: the network's photolysis branches (net.photo) enter the call, each an irreversible
+    first-order reaction absorber -> products with the rate J n_absorber; the call then takes J [B, len(net.photo)]
+    (s^-1, float64 on the device of x, columns in net.photo's order; None = 0), held constant within the call like T and
+    P; a row with a negative or non-finite J is a bad input (the cell is not stepped and is counted; a cell below T_MIN
+    is counted as cold whatever its J). With photo=False (default) the kernels are those of the thermal network alone.
+    Calls run one at a time on torch's current stream (the queues, the counts and the scratch are shared)."""
 
     def __init__(self, net, device, drift=None, photo=False):
         if photo and (not net.photo or net.photo_missing):
-            raise ValueError("photo=True needs a network with photolysis branches whose species are all in its species "
-                             f"list (branches {len(net.photo)}, missing species {net.photo_missing})")
+            raise ValueError(
+                "photo=True needs a network with photolysis branches whose species are all in its species "
+                f"list (branches {len(net.photo)}, missing species {net.photo_missing})"
+            )
         self.dev = torch.device(device)
         self.drift = float(DRIFT if drift is None else drift)
-        torch.zeros(1, device=self.dev)                       # torch's context is current from here on
+        torch.zeros(1, device=self.dev)  # torch's context is current from here on
         prop = torch.cuda.get_device_properties(self.dev)
         optin = prop.shared_memory_per_block_optin
-        fit = lambda t: (optin - len(_blob(t)[0])) // (8 * _perc(t))     # cells per block the shared memory holds
+
+        def fit(t):
+            return (optin - len(_blob(t)[0])) // (8 * _perc(t))  # cells per block the shared memory holds
+
         tab = tables(net, 2, photo)
         if warps(fit(tab)) != 2:
             tab = tables(net, warps(fit(tab)), photo)
@@ -1353,15 +1495,16 @@ class CudaSolver:
         nl = 32 * self.w
         blob, _ = _blob(tab)
         if fit(tab) < 1:
-            raise ValueError(f"one cell needs {8 * _perc(tab) + len(blob)} B of shared memory per block; the device "
-                             f"has {optin}")
+            raise ValueError(
+                f"one cell needs {8 * _perc(tab) + len(blob)} B of shared memory per block; the device has {optin}"
+            )
         wsh = 8 * _perw_rec(tab, True) + len(blob) <= optin  # the recover kernel's W in shared memory if it fits
         # cells per block: from the registers of a one-cell compile, then more while the shared memory and the named
         # barriers (15) allow them and the compiler fits them in the registers without more local memory
         arch = f"{prop.major}{prop.minor}"
         top = min(1024 // nl, 15, fit(tab))
-        one = _load(source(tab, 1, wsh, self.drift), arch)    # one cell per block: its registers size the packing
-        regs, local = -(-_attr(one[1], 4) // 8) * 8, _attr(one[1], 3)   # registers (allocation unit 8), local bytes
+        one = _load(source(tab, 1, wsh, self.drift), arch)  # one cell per block: its registers size the packing
+        regs, local = -(-_attr(one[1], 4) // 8) * 8, _attr(one[1], 3)  # registers (allocation unit 8), local bytes
         self.cpb = max(1, min(top, prop.regs_per_multiprocessor // (nl * regs)))
         mod = _load(source(tab, self.cpb, wsh, self.drift), arch) if self.cpb > 1 else one
         while self.cpb < top:
@@ -1373,15 +1516,15 @@ class CudaSolver:
                 _check(_cuda().cuModuleUnload(mod[0]), "unload")
             mod, self.cpb = nxt, self.cpb + 1
         self._mod, self._fn, self._guard, self._rec = mod
-        self._build = (tab, wsh, arch)                       # what export() recompiles
+        self._build = (tab, wsh, arch)  # what export() recompiles
         self._names = (list(net.species), list(net.elements))  # export() writes them
-        self.wpb = self.w * self.cpb                          # warps per block
+        self.wpb = self.w * self.cpb  # warps per block
         self.smem = 8 * self.cpb * _perc(tab) + len(blob)
         self.smem_rec = 8 * _perw_rec(tab, wsh) + len(blob)
         cu = _cuda()
         occ = []
         for fn, threads, smem in ((self._fn, nl * self.cpb, self.smem), (self._rec, nl, self.smem_rec)):
-            _check(cu.cuFuncSetAttribute(fn, 8, smem), "shared memory")   # MAX_DYNAMIC_SHARED_SIZE_BYTES
+            _check(cu.cuFuncSetAttribute(fn, 8, smem), "shared memory")  # MAX_DYNAMIC_SHARED_SIZE_BYTES
             o = ctypes.c_int()
             _check(cu.cuOccupancyMaxActiveBlocksPerMultiprocessor(ctypes.byref(o), fn, threads, smem), "occupancy")
             if o.value < 1:
@@ -1393,19 +1536,52 @@ class CudaSolver:
         # global scratch (doubles): per cell slot of the call kernel the rates and the copy for a retry (RSN), per
         # block of the recover kernel the same and W when it is not in shared memory
         rsn = 2 * self.ns + tab["nnz"]
-        self.stride, self.stride_rec = 2 * self.nr + 2 + rsn, 2 * self.nr + 2 + rsn + (0 if wsh else self.ns ** 2)
-        self.info = dict(ns=self.ns, nr=self.nr, nj=self.nj, nnz=tab["nnz"], k0=tab["k0"], nt=self.ns - tab["k0"], w=self.w,
-                         sround=tab["sst"].shape[0], jround=tab["jround"], lu_ops=len(tab["lu"]), alias=_alias(tab),
-                         regs=_attr(self._fn, 4), spill_bytes=_attr(self._fn, 3), cpb=self.cpb, wpb=self.wpb,
-                         smem=self.smem, blob=len(blob), cells_per_sm=self.cpb * occ[0], rec_smem=self.smem_rec,
-                         rec_w_shared=wsh, rec_blocks=self.rec_blocks, drift=self.drift)
-        f = lambda a, view=None: torch.tensor(a if view is None else np.asarray(a).view(view), device=self.dev)
-        self._tabs = [f(tab["perm"]), f(np.frombuffer(blob, np.int32).copy()), f(tab["rc"]), f(tab["rf"]),
-                      f(tab["nasa"])]
+        self.stride, self.stride_rec = 2 * self.nr + 2 + rsn, 2 * self.nr + 2 + rsn + (0 if wsh else self.ns**2)
+        self.info = dict(
+            ns=self.ns,
+            nr=self.nr,
+            nj=self.nj,
+            nnz=tab["nnz"],
+            k0=tab["k0"],
+            nt=self.ns - tab["k0"],
+            w=self.w,
+            sround=tab["sst"].shape[0],
+            jround=tab["jround"],
+            lu_ops=len(tab["lu"]),
+            alias=_alias(tab),
+            regs=_attr(self._fn, 4),
+            spill_bytes=_attr(self._fn, 3),
+            cpb=self.cpb,
+            wpb=self.wpb,
+            smem=self.smem,
+            blob=len(blob),
+            cells_per_sm=self.cpb * occ[0],
+            rec_smem=self.smem_rec,
+            rec_w_shared=wsh,
+            rec_blocks=self.rec_blocks,
+            drift=self.drift,
+        )
+
+        def f(a, view=None):
+            return torch.tensor(a if view is None else np.asarray(a).view(view), device=self.dev)
+
+        self._tabs = [
+            f(tab["perm"]),
+            f(np.frombuffer(blob, np.int32).copy()),
+            f(tab["rc"]),
+            f(tab["rf"]),
+            f(tab["nasa"]),
+        ]
         self._scratch = torch.empty(self.max_blocks * self.cpb * self.stride, dtype=torch.float64, device=self.dev)
         self._scratch_rec = torch.empty(self.rec_blocks * self.stride_rec, dtype=torch.float64, device=self.dev)
-        self._streams = [f(tab["sst"].ravel(), np.int32), f(tab["jt"], np.int64), f(tab["lu"], np.int64),
-                         f(tab["optr"]), ctypes.c_int(tab["sst"].shape[0]), ctypes.c_int(tab["jround"])]
+        self._streams = [
+            f(tab["sst"].ravel(), np.int32),
+            f(tab["jt"], np.int64),
+            f(tab["lu"], np.int64),
+            f(tab["optr"]),
+            ctypes.c_int(tab["sst"].shape[0]),
+            ctypes.c_int(tab["jround"]),
+        ]
         self._didx, self._atoms = f(tab["didx"], np.int16), f(tab["atoms"])
         self.count = torch.zeros(10, dtype=torch.int32, device=self.dev)
         self.total = torch.zeros(10, dtype=torch.int64, device=self.dev)
@@ -1434,16 +1610,86 @@ class CudaSolver:
         nb = max(1, min(-(-B // self.cpb), self.max_blocks))
         self.count.zero_()
         stream = torch.cuda.current_stream(self.dev).cuda_stream
-        _launch(self._fn, nb, 32 * self.w * self.cpb, self.smem, stream,
-                [x, T, P, dt, ho, xo, done, nok, self.count, ctypes.c_int(B), ctypes.c_double(rtol),
-                 ctypes.c_double(atol), ctypes.c_int(max_steps), *self._tabs, self._scratch, *self._streams, *jx])
-        _launch(self._guard, -(-B // 128) or 1, 128, 0, stream,
-                [x, T, P, dt, xo, done, nok, self._atoms, redo, lst, self.count, ctypes.c_int(B),
-                 ctypes.c_double(atol), *jx])
-        _launch(self._rec, max(1, min(B, self.rec_blocks)), 32 * self.w, self.smem_rec, stream,
-                [x, T, P, dt, h, xo, ho, done, nok, redo, lst, self.count, ctypes.c_double(rtol), ctypes.c_double(atol),
-                 ctypes.c_int(REC_STEPS * max_steps), *self._tabs, self._scratch_rec, *self._streams[:2], self._didx,
-                 self._atoms, *self._streams[4:], *jx])
+        _launch(
+            self._fn,
+            nb,
+            32 * self.w * self.cpb,
+            self.smem,
+            stream,
+            [
+                x,
+                T,
+                P,
+                dt,
+                ho,
+                xo,
+                done,
+                nok,
+                self.count,
+                ctypes.c_int(B),
+                ctypes.c_double(rtol),
+                ctypes.c_double(atol),
+                ctypes.c_int(max_steps),
+                *self._tabs,
+                self._scratch,
+                *self._streams,
+                *jx,
+            ],
+        )
+        _launch(
+            self._guard,
+            -(-B // 128) or 1,
+            128,
+            0,
+            stream,
+            [
+                x,
+                T,
+                P,
+                dt,
+                xo,
+                done,
+                nok,
+                self._atoms,
+                redo,
+                lst,
+                self.count,
+                ctypes.c_int(B),
+                ctypes.c_double(atol),
+                *jx,
+            ],
+        )
+        _launch(
+            self._rec,
+            max(1, min(B, self.rec_blocks)),
+            32 * self.w,
+            self.smem_rec,
+            stream,
+            [
+                x,
+                T,
+                P,
+                dt,
+                h,
+                xo,
+                ho,
+                done,
+                nok,
+                redo,
+                lst,
+                self.count,
+                ctypes.c_double(rtol),
+                ctypes.c_double(atol),
+                ctypes.c_int(REC_STEPS * max_steps),
+                *self._tabs,
+                self._scratch_rec,
+                *self._streams[:2],
+                self._didx,
+                self._atoms,
+                *self._streams[4:],
+                *jx,
+            ],
+        )
         return xo, ho, done.bool(), nok, redo
 
     def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=ATOL, max_steps=4000, J=None):
@@ -1460,6 +1706,7 @@ class CudaSolver:
         are those this object launches (same source, cells per block and options), so a call through the export
         gives the same bits. A cubin is for one GPU architecture: export on the machine that runs it."""
         import json
+
         tab, wsh, arch = self._build
         os.makedirs(os.path.join(folder, "tables"), exist_ok=True)
         src = source(tab, self.cpb, wsh, self.drift)
@@ -1469,18 +1716,35 @@ class CudaSolver:
             f.write(compile_cubin(src, arch))
         names = ["perm", "blob", "rc", "rf", "nasa", "sst", "jt", "lu", "optr", "didx", "atoms"]
         tensors = [*self._tabs, *self._streams[:4], self._didx, self._atoms]
-        meta = dict(arch=arch, ns=self.ns, nr=self.nr, nj=self.nj, w=self.w, cpb=self.cpb, smem=self.smem,
-                    smem_rec=self.smem_rec, stride=self.stride, stride_rec=self.stride_rec,
-                    sround=self._streams[4].value, jround=self._streams[5].value, rec_steps=REC_STEPS, atol=ATOL,
-                    t_min=T_MIN, drift=self.drift, counts=list(COUNTS), species=self._names[0],
-                    elements=self._names[1], tables={})
+        meta = dict(
+            arch=arch,
+            ns=self.ns,
+            nr=self.nr,
+            nj=self.nj,
+            w=self.w,
+            cpb=self.cpb,
+            smem=self.smem,
+            smem_rec=self.smem_rec,
+            stride=self.stride,
+            stride_rec=self.stride_rec,
+            sround=self._streams[4].value,
+            jround=self._streams[5].value,
+            rec_steps=REC_STEPS,
+            atol=ATOL,
+            t_min=T_MIN,
+            drift=self.drift,
+            counts=list(COUNTS),
+            species=self._names[0],
+            elements=self._names[1],
+            tables={},
+        )
         for name, t in zip(names, tensors):
             a = t.cpu().contiguous()
             a.numpy().tofile(os.path.join(folder, "tables", name + ".bin"))
             meta["tables"][name] = dict(dtype=str(a.dtype).replace("torch.", ""), shape=list(a.shape))
         with open(os.path.join(folder, "meta.json"), "w") as f:
             json.dump(meta, f, indent=1)
-        with open(os.path.join(folder, "meta.txt"), "w") as f:     # the same, one "key value..." per line, for C++
+        with open(os.path.join(folder, "meta.txt"), "w") as f:  # the same, one "key value..." per line, for C++
             for k, v in meta.items():
                 if k == "tables":
                     for name, d in v.items():

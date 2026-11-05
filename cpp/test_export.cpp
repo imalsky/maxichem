@@ -63,11 +63,11 @@ int main(int argc, char** argv) {
   auto same = [](torch::Tensor a, torch::Tensor b) {
     return torch::equal(a.cpu().contiguous().view(torch::kInt64), b.contiguous().view(torch::kInt64));
   };
-  bool ok = same(r[0], xo) && same(r[1], ho) && same(r[3], so) && torch::equal(r[2].cpu(), dn) &&
-            same(r2[0], xo) && same(r2[1], ho) && torch::equal(counts, co);
-  std::cout << "cells " << B << ", species " << chem.ns << ", branches " << chem.nj
-            << ": C++ call " << (ok ? "bitwise identical to the Python call" : "DIFFERENT")
-            << "; second call " << ms << " ms (" << 1e3 * ms / B << " us per cell)"
+  bool ok = same(r[0], xo) && same(r[1], ho) && same(r[3], so) && torch::equal(r[2].cpu(), dn) && same(r2[0], xo) &&
+            same(r2[1], ho) && torch::equal(counts, co);
+  std::cout << "cells " << B << ", species " << chem.ns << ", branches " << chem.nj << ": C++ call "
+            << (ok ? "bitwise identical to the Python call" : "DIFFERENT") << "; second call " << ms << " ms ("
+            << 1e3 * ms / B << " us per cell)"
             << "; max_steps " << max_steps << "; counts " << counts.view({1, 10}) << std::endl;
   return ok ? 0 : 1;
 }

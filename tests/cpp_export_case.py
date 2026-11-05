@@ -11,6 +11,7 @@ flags them and the recovery kernel recomputes them, and the counts are compared 
 0.03 bar) and the Python call's
 x, h, accepted steps and done, as raw little-endian files. Then: cpp/build/test_export <folder>/export <folder>/case
 """
+
 import os
 import sys
 
@@ -48,8 +49,17 @@ torch.cuda.synchronize()
 solver.export(os.path.join(out, "export"))
 case = os.path.join(out, "case")
 os.makedirs(case, exist_ok=True)
-for name, t in (("x", x), ("T", T), ("P", P), ("dt", dt), ("h", h), ("J", J), ("x_out", xo), ("h_out", ho),
-                ("steps_out", so)):
+for name, t in (
+    ("x", x),
+    ("T", T),
+    ("P", P),
+    ("dt", dt),
+    ("h", h),
+    ("J", J),
+    ("x_out", xo),
+    ("h_out", ho),
+    ("steps_out", so),
+):
     if t is None:
         continue
     t.cpu().contiguous().numpy().tofile(os.path.join(case, name + ".bin"))
@@ -59,5 +69,7 @@ with open(os.path.join(case, "max_steps.txt"), "w") as f:
     f.write(str(max_steps))
 with open(os.path.join(case, "B.txt"), "w") as f:
     f.write(str(B))
-print(f"export and case written to {out}: {network}, {B} cells, photo {photo}, max_steps {max_steps}, steps per call "
-      f"{float(so.mean()):.2f}, counts {solver.fallback}")
+print(
+    f"export and case written to {out}: {network}, {B} cells, photo {photo}, max_steps {max_steps}, steps per call "
+    f"{float(so.mean()):.2f}, counts {solver.fallback}"
+)

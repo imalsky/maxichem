@@ -33,17 +33,13 @@ class Solver {
   Solver(Solver const&) = delete;
   Solver& operator=(Solver const&) = delete;
 
-  std::array<torch::Tensor, 4> operator()(torch::Tensor x, torch::Tensor T,
-                                          torch::Tensor P, torch::Tensor dt,
-                                          torch::Tensor h,
-                                          torch::Tensor J = torch::Tensor(),
-                                          double rtol = 1e-3,
-                                          double atol = -1.0,
-                                          int max_steps = 4000);
+  std::array<torch::Tensor, 4> operator()(torch::Tensor x, torch::Tensor T, torch::Tensor P, torch::Tensor dt,
+                                          torch::Tensor h, torch::Tensor J = torch::Tensor(), double rtol = 1e-3,
+                                          double atol = -1.0, int max_steps = 4000);
 
-  int ns = 0;   // species
+  int ns = 0;                                  // species
   std::vector<std::string> species, elements;  // names; the atoms table is species x elements
-  int nj = 0;   // photolysis branches (0: thermal network)
+  int nj = 0;                                  // photolysis branches (0: thermal network)
   double default_atol = 0.0;
   //! species x elements (float64, on the device): atoms of each element in each species
   torch::Tensor atoms() const { return tab_.at("atoms"); }

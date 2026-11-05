@@ -10,28 +10,29 @@ lm = 0.
 (b) adaptive tangents against central differences of the primal (CudaSolver's at lm = 0, the derivative kernels' own
     with lm), per input class x, T, P, J (lit cells, relative), lm, rc; one random direction each. Per cell and step
     e in 1e-4..1e-7: err_e = max over species (x > 1e-20) |d ln x_fd - d ln x_ad| / S, S = max |d ln x| of the larger
-    of the two; a plateau where the steps agree (same accepted-step count both sides, two consecutive e within 1e-2 of S);
-    the best err over the plateau. Judged: cells with S > 1e-6 (from either side). Pass: >= 90 % of them with a plateau,
-    p90 <= 1e-4, p99 <= 1e-2.
+    of the two; a plateau where the steps agree (same accepted-step count both sides, two consecutive e within 1e-2 of
+    S); the best err over the plateau. Judged: cells with S > 1e-6 (from either side). Pass: >= 90 % of them with a
+    plateau, p90 <= 1e-4, p99 <= 1e-2.
 (b') J in dark cells, along dJ >= 0 (all branches |N(0, 1)|, or one branch per cell), 12 cases (case, one branch or all,
-    lm 0 or not); error in x / max |dx|; judged where max |dx / dJ| of either side > 1e-2; three steps, the largest scaled
-    per cell so that e max |dx_ad| = 1e-8 and capped, then smaller by ten twice; the plateau and pass rules of (b).
-    Near 0, at the default atol: the tangent at J = 1e-8 dJ against central differences (e <= 1e-9); pooled, every judged
-    cell counts (>= 90 % with a plateau), and each case with 20 judged cells has a plateau in >= 80 %. At the default atol
-    a tangent at exactly J = 0 holds only for rates far below any physical one, too small for differences to resolve.
-    At exactly 0, atol 1e-16: one-sided differences, Richardson 2 D(e) - D(2e), e <= 1e-6, with no coverage bar (a tiny J
-    often changes the accepted-step count, and such a cell has no plateau).
+    lm 0 or not); error in x / max |dx|; judged where max |dx / dJ| of either side > 1e-2; three steps, the largest
+    scaled per cell so that e max |dx_ad| = 1e-8 and capped, then smaller by ten twice; the plateau and pass rules of
+    (b). Near 0, at the default atol: the tangent at J = 1e-8 dJ against central differences (e <= 1e-9); pooled, every
+    judged cell counts (>= 90 % with a plateau), and each case with 20 judged cells has a plateau in >= 80 %. At the
+    default atol a tangent at exactly J = 0 holds only for rates far below any physical one, too small for differences
+    to resolve. At exactly 0, atol 1e-16: one-sided differences, Richardson 2 D(e) - D(2e), e <= 1e-6, with no coverage
+    bar (a tiny J often changes the accepted-step count, and such a cell has no plateau).
 (c) dot products <c, J v> vs <J^T c, v> per cell, both contracts, per class, c_i = N(0, 1) / x_i on species above
     1e-20 (0 below: trace species near 0 carry rounding of the clamp at 0); scale = the larger sum of absolute terms;
     judged where scale > 1e-10 sum |c x| (counts of the others printed). Pass: p99 <= 1e-6 (lm: 1e-4: a fast balanced
     reaction's multiplier changes nothing in exact arithmetic, its computed sensitivity is rounding of its one-way flux;
     the lm tangent itself is judged in (b)) and max <= 1e-3, no non-finite value.
-(d) recovered cells (max_steps 3): primal and flags; dot products as (c) with every class; the rc cotangent of a batch of
-    the recovered cells alone; finite derivatives on flags 0 / 1, NaN on flag 2 (state and h).
+(d) recovered cells (max_steps 3): primal and flags; dot products as (c) with every class; the rc cotangent of a batch
+    of the recovered cells alone; finite derivatives on flags 0 / 1, NaN on flag 2 (state and h).
 (e) the rc batch dot product (relative 1e-7: a sum over cells, reactions and columns), its photolysis rows zero;
     several directions in one call bitwise; determinism.
 Exit status 1 when any case fails.
     python tests/kincuda_ad_check.py [network stem or file in VULCAN_THERMO, default NCHO_photo]"""
+
 import sys
 
 import numpy as np
@@ -55,9 +56,11 @@ ad = KA.ADSolver(net, dev, photo=True)
 print(f"{NAME}: {len(sp)} species, {ad.nr} rows ({ad.nj} photolysis), rate table width {ad.rcw}", flush=True)
 z = np.load(paths.AD_BOXES)
 sp0, lines = [str(q) for q in z["species"]], [str(q) for q in z["lines"]]
-col = [lines.index(f"{q['absorber']},{q['branch']}") if f"{q['absorber']},{q['branch']}" in lines else -1
-       for q in net.photo]
-JREF = None                                        # J of the branches the boxes lack (columns of col < 0)
+col = [
+    lines.index(f"{q['absorber']},{q['branch']}") if f"{q['absorber']},{q['branch']}" in lines else -1
+    for q in net.photo
+]
+JREF = None  # J of the branches the boxes lack (columns of col < 0)
 if FILE == "SNCHO_photo_network_2025.txt":
     paths.need(paths.JREF_S)
     jr = np.load(paths.JREF_S)
@@ -71,8 +74,16 @@ def states(sel, k):
     if "H2S" in sp:
         x[:, sp.index("H2S")] = 1.41e-5 * x[:, sp.index("H2")]
     x = x / x.sum(1, keepdims=True)
-    J = np.stack([z["J"][sel, c] if c >= 0 else (JREF[sel % len(JREF), j] if JREF is not None else np.zeros(len(sel)))
-                  for j, c in enumerate(col)], 1) * z["lit"][sel, None]
+    J = (
+        np.stack(
+            [
+                z["J"][sel, c] if c >= 0 else (JREF[sel % len(JREF), j] if JREF is not None else np.zeros(len(sel)))
+                for j, c in enumerate(col)
+            ],
+            1,
+        )
+        * z["lit"][sel, None]
+    )
     return tt(x), tt(z["T"][sel]), tt(z["P"][sel]), tt(J)
 
 
@@ -80,9 +91,11 @@ rng = np.random.default_rng(3)
 n = len(z["T"])
 k4 = int(np.argmin(np.abs(z["stops"] - 1e4)))
 cold = np.flatnonzero(z["T"] < 650)
-CASES = {"settled dt 100": (*states(rng.choice(n, 1024, replace=False), k4), 100.0),
-         "starts dt 500": (*states(rng.choice(n, 1024, replace=False), 0), 500.0),
-         "cold dt 100": (*states(rng.choice(cold, min(1024, len(cold)), replace=False), k4), 100.0)}
+CASES = {
+    "settled dt 100": (*states(rng.choice(n, 1024, replace=False), k4), 100.0),
+    "starts dt 500": (*states(rng.choice(n, 1024, replace=False), 0), 500.0),
+    "cold dt 100": (*states(rng.choice(cold, min(1024, len(cold)), replace=False), k4), 100.0),
+}
 results = []
 
 
@@ -95,8 +108,10 @@ def pct(a):
     a = np.asarray(a, float)
     if not len(a):
         return "none judged"
-    return (f"median {np.median(a):.1e} p90 {np.quantile(a, 0.9):.1e} p99 {np.quantile(a, 0.99):.1e} max {a.max():.1e} "
-            f"(n {len(a)})")
+    return (
+        f"median {np.median(a):.1e} p90 {np.quantile(a, 0.9):.1e} p99 {np.quantile(a, 0.99):.1e} max {a.max():.1e} "
+        f"(n {len(a)})"
+    )
 
 
 def zt(x, D=None):
@@ -143,8 +158,11 @@ for name, (x, T, P, J, dt) in CASES.items():
     j = ad.jvp(x, T, P, d, h, *zt(x), J=J)[:4]
     v = ad.vjp(x, T, P, d, h, torch.zeros_like(x), J=J)[:4]
     same = all(torch.equal(p, q) and torch.equal(p, w) for p, q, w in zip(ref, j, v))
-    verdict(f"primal {name}", same, f"{x.shape[0]} cells ({int((J > 0).any(1).sum())} lit): jvp and vjp bitwise "
-                                    f"CudaSolver's: {same}")
+    verdict(
+        f"primal {name}",
+        same,
+        f"{x.shape[0]} cells ({int((J > 0).any(1).sum())} lit): jvp and vjp bitwise CudaSolver's: {same}",
+    )
 
 
 # ------------------------------------------------------------------------------------------------------------- (b)
@@ -222,7 +240,7 @@ def dark_fd(x, T, P, J, dt, single, with_lm, seed, J0, atol):
     x0, _, _, k0, tx, _ = ad.jvp(x, T, P, d, h, *zt(x), lm=lm, dJ=dJ, J=Jb, atol=atol)
     mt = tx.abs().amax(1).clamp_min(1e-300)
     big = torch.ones_like(x0, dtype=torch.bool)
-    e = (1e-8 / mt).clamp_max(0.1 * J0 if J0 > 0 else 1e-6)[:, None]     # capped once, then smaller by ten twice
+    e = (1e-8 / mt).clamp_max(0.1 * J0 if J0 > 0 else 1e-6)[:, None]  # capped once, then smaller by ten twice
     fds, ks = [], []
     for _ in range(3):
         if J0 > 0:
@@ -236,7 +254,7 @@ def dark_fd(x, T, P, J, dt, single, with_lm, seed, J0, atol):
         ks.append(torch.where((ka == kb), ka, torch.full_like(ka, -1.0)))
         e = e / 10
     best, S = plateau(fds, tx, big, k0, ks)
-    judged = dark & (S > 1e-2)                                # resolvable: J 1e-6 s^-1 moves x by > 1e-8 within dt
+    judged = dark & (S > 1e-2)  # resolvable: J 1e-6 s^-1 moves x by > 1e-8 within dt
     return best[judged].cpu().numpy(), int(judged.sum())
 
 
@@ -261,8 +279,11 @@ for name, (x, T, P, J, dt) in CASES.items():
             b, nj = dark_fd(x, T, P, J, dt, single, with_lm, 13, 0.0, 1e-16)
             fin = b[np.isfinite(b)]
             pool.append(fin)
-            print(f"INFO  FD J at exactly 0, atol 1e-16, {name} {'one branch' if single else 'all branches'}"
-                  f"{' (lm != 0)' if with_lm else ''}: judged {nj}, with a plateau {len(fin)}; {pct(fin)}", flush=True)
+            print(
+                f"INFO  FD J at exactly 0, atol 1e-16, {name} {'one branch' if single else 'all branches'}"
+                f"{' (lm != 0)' if with_lm else ''}: judged {nj}, with a plateau {len(fin)}; {pct(fin)}",
+                flush=True,
+            )
 fd_verdict("FD J at exactly 0, atol 1e-16, the 12 cases pooled", np.concatenate(pool), sum(len(q) for q in pool), 0.0)
 
 
@@ -288,8 +309,9 @@ def dot_terms(x, T, P, J, dt, cls, adapt, seed, max_steps=4000, sel=None):
         dlm = rn(B, ad.nr)
     elif cls == "J":
         dJ = J.clamp_min(1e-8) * rn(*J.shape)
-    x1, h1, _, _, tx, th = ad.jvp(x, T, P, d, h, dx, dT, dP, ddt, dh, lm=lm, dlm=dlm, dJ=dJ, J=J, adapt=adapt,
-                                  max_steps=max_steps)
+    x1, h1, _, _, tx, th = ad.jvp(
+        x, T, P, d, h, dx, dT, dP, ddt, dh, lm=lm, dlm=dlm, dJ=dJ, J=J, adapt=adapt, max_steps=max_steps
+    )
     flj = ad.flag.clone()
     c = torch.where(x1 > 1e-20, rn(*x.shape) / x1.clamp_min(1e-300), 0.0)
     ch = rn(B) / h1 if adapt else None
@@ -298,16 +320,31 @@ def dot_terms(x, T, P, J, dt, cls, adapt, seed, max_steps=4000, sel=None):
     lt = c * tx
     if adapt:
         lt = torch.cat([lt, (ch * th)[:, None]], 1)
-    rt = {"x": gg["x"] * dx, "T": (gg["T"] * dT)[:, None], "P": (gg["P"] * dP)[:, None],
-          "dt": (gg["dt"] * ddt)[:, None], "h": (gg["h"] * dh)[:, None], "lm": gg["lm"] * dlm, "J": gg["J"] * dJ}[cls]
+    rt = {
+        "x": gg["x"] * dx,
+        "T": (gg["T"] * dT)[:, None],
+        "P": (gg["P"] * dP)[:, None],
+        "dt": (gg["dt"] * ddt)[:, None],
+        "h": (gg["h"] * dh)[:, None],
+        "lm": gg["lm"] * dlm,
+        "J": gg["J"] * dJ,
+    }[cls]
     sc = torch.maximum(lt.abs().sum(1), rt.abs().sum(1))
     e = (lt.sum(1) - rt.sum(1)).abs() / sc.clamp_min(1e-300)
     judged = sc > 1e-10 * (c * x1).abs().sum(1)
     if sel is not None:
         judged &= sel(flj)
     nonfin = int((torch.logical_not(torch.isfinite(e)) & (flj != 2)).sum())
-    return e[judged & torch.isfinite(e)].cpu().numpy(), int(judged.sum()), int((flj != 2).sum()) - int(judged.sum()), \
-        nonfin, flj, tx, gg, th
+    return (
+        e[judged & torch.isfinite(e)].cpu().numpy(),
+        int(judged.sum()),
+        int((flj != 2).sum()) - int(judged.sum()),
+        nonfin,
+        flj,
+        tx,
+        gg,
+        th,
+    )
 
 
 def dot_verdict(label, e, nj, nex, nonfin, p99=1e-6):
@@ -321,8 +358,14 @@ for name, (x, T, P, J, dt) in CASES.items():
             if cls in ("dt", "h") and not adapt:
                 continue
             e, nj, nex, nonfin = dot_terms(x, T, P, J, dt, cls, adapt, 21)[:4]
-            dot_verdict(f"dot {name} {'adaptive' if adapt else 'frozen'} {cls}", e, nj, nex, nonfin,
-                        1e-4 if cls == "lm" else 1e-6)
+            dot_verdict(
+                f"dot {name} {'adaptive' if adapt else 'frozen'} {cls}",
+                e,
+                nj,
+                nex,
+                nonfin,
+                1e-4 if cls == "lm" else 1e-6,
+            )
 
 
 # ------------------------------------------------------------------------------------------------------------- (d)
@@ -334,21 +377,35 @@ j = ad.jvp(x, T, P, d, h, *zt(x), J=J, max_steps=3)
 fl_j = ad.flag.clone()
 v = ad.vjp(x, T, P, d, h, torch.zeros_like(x), J=J, max_steps=3)
 same = all(torch.equal(p, q) and torch.equal(p, w) for p, q, w in zip(ref[:4], j[:4], v[:4]))
-verdict("recovered cells: primal and flags", same and torch.equal(ref[4], fl_j) and torch.equal(ref[4], ad.flag),
-        f"max_steps 3: flags 0 / 1 / 2 = {[int((ref[4] == k).sum()) for k in range(3)]}, bitwise CudaSolver's: {same}")
+verdict(
+    "recovered cells: primal and flags",
+    same and torch.equal(ref[4], fl_j) and torch.equal(ref[4], ad.flag),
+    f"max_steps 3: flags 0 / 1 / 2 = {[int((ref[4] == k).sum()) for k in range(3)]}, bitwise CudaSolver's: {same}",
+)
 for adapt in (False, True):
     for cls in ("x", "T", "P", "dt", "h", "lm", "J"):
         if cls in ("dt", "h") and not adapt:
             continue
         e, nj, nex, nonfin, flj, tx, gg, th = dot_terms(x, T, P, J, dt, cls, adapt, 31, 3, lambda f: f == 1)
         bad2 = flj == 2
-        nan2 = bool(torch.isnan(tx[bad2]).all() and torch.isnan(gg["x"][bad2]).all() and torch.isnan(gg["T"][bad2]).all()
-                    and (not adapt or torch.isnan(th[bad2]).all()))
-        fin = bool(torch.isfinite(tx[torch.logical_not(bad2)]).all()
-                   and torch.isfinite(gg["x"][torch.logical_not(bad2)]).all())
-        dot_verdict(f"recovered cells dot {'adaptive' if adapt else 'frozen'} {cls} (finite on flags 0 / 1 {fin}, NaN on "
-                    f"flag 2 {nan2})", e if fin and nan2 else np.array([np.inf]), nj, nex, nonfin)
-keep = torch.nonzero(ref[4] == 1).flatten()                   # the recovered cells as their own batch: rc batch dot
+        nan2 = bool(
+            torch.isnan(tx[bad2]).all()
+            and torch.isnan(gg["x"][bad2]).all()
+            and torch.isnan(gg["T"][bad2]).all()
+            and (not adapt or torch.isnan(th[bad2]).all())
+        )
+        fin = bool(
+            torch.isfinite(tx[torch.logical_not(bad2)]).all() and torch.isfinite(gg["x"][torch.logical_not(bad2)]).all()
+        )
+        dot_verdict(
+            f"recovered cells dot {'adaptive' if adapt else 'frozen'} {cls} (finite on flags 0 / 1 {fin}, NaN on "
+            f"flag 2 {nan2})",
+            e if fin and nan2 else np.array([np.inf]),
+            nj,
+            nex,
+            nonfin,
+        )
+keep = torch.nonzero(ref[4] == 1).flatten()  # the recovered cells as their own batch: rc batch dot
 xr, Tr, Pr, Jr = x[keep], T[keep], P[keep], J[keep]
 for adapt in (False, True):
     rn = gen(43)
@@ -360,8 +417,11 @@ for adapt in (False, True):
     gg = ad.vjp(xr, Tr, Pr, dr, hr, c, J=Jr, adapt=adapt, max_steps=3)[4]
     lhs, rhs = float((c * tx).sum()), float((gg["rc"] * drc).sum())
     e = abs(lhs - rhs) / max(float((c * tx).abs().sum()), float((gg["rc"] * drc).abs().sum()))
-    verdict(f"recovered cells rc (batch) {'adaptive' if adapt else 'frozen'}", allrec and e <= 1e-7,
-            f"{len(keep)} cells, all recovered again {allrec}; relative {e:.1e}")
+    verdict(
+        f"recovered cells rc (batch) {'adaptive' if adapt else 'frozen'}",
+        allrec and e <= 1e-7,
+        f"{len(keep)} cells, all recovered again {allrec}; relative {e:.1e}",
+    )
 
 # ------------------------------------------------------------------------------------------------------------- (e)
 for name, (x, T, P, J, dt) in CASES.items():
@@ -374,9 +434,12 @@ for name, (x, T, P, J, dt) in CASES.items():
         gg = ad.vjp(x, T, P, d, h, c, J=J, adapt=adapt)[4]
         lhs, rhs = float((c * tx).sum()), float((gg["rc"] * drc).sum())
         e = abs(lhs - rhs) / max(float((c * tx).abs().sum()), float((gg["rc"] * drc).abs().sum()))
-        zero = bool((gg["rc"][ad.nr - ad.nj:] == 0).all())
-        verdict(f"dot rc (batch) {name} {'adaptive' if adapt else 'frozen'}", e <= 1e-7 and zero,
-                f"relative {e:.1e}; photolysis rows of the rc cotangent zero: {zero}")
+        zero = bool((gg["rc"][ad.nr - ad.nj :] == 0).all())
+        verdict(
+            f"dot rc (batch) {name} {'adaptive' if adapt else 'frozen'}",
+            e <= 1e-7 and zero,
+            f"relative {e:.1e}; photolysis rows of the rc cotangent zero: {zero}",
+        )
 x, T, P, J, dt = CASES["settled dt 100"]
 B = x.shape[0]
 h, d = torch.full_like(T, 1e-10), torch.full_like(T, dt)

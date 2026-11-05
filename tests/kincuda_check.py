@@ -1,8 +1,9 @@
-"""The whole-call CUDA kernel (maxichem/kincuda.py) against the stored reference on one GPU; prints PASS / FAIL per case.
+"""The whole-call CUDA kernel (maxichem/kincuda.py) against the stored reference on one GPU; prints PASS / FAIL per
+case.
 
 Reference = the call computed by batched fp64 Rodas3 in torch with the kernel's numerics (rates from T and P every call,
-exact Jacobian, LU without row exchanges, rtol 1e-3, atol kincuda.ATOL, the step control of maxichem/kincuda.py), stored for
-exactly these inputs (tests/libref.py, paths.LIBREF; a check of the inputs' digest refuses others). Each solver
+exact Jacobian, LU without row exchanges, rtol 1e-3, atol kincuda.ATOL, the step control of maxichem/kincuda.py), stored
+for exactly these inputs (tests/libref.py, paths.LIBREF; a check of the inputs' digest refuses others). Each solver
 advances its own state from the same inputs.
 (a) Parity. Pass: floored difference on the 12 scored gases (floors 1e-10 H2O CO CO2 CH4 NH3 HCN C2H2, 1e-8 H OH O,
     1e-6 H2 N2) <= 1e-6 dex on all but one cell-call in 100,000 (at least one per case) and <= 1e-5 dex on every
@@ -21,7 +22,8 @@ advances its own state from the same inputs.
       J of 1-D-model layers stored in the reference (the reference adds the branches by its own parser), the cold
       starts at dt 500 s with J = 0 against the thermal reference, a lit cell forced to fail (max_steps 10) and
       recomputed on the device, a lit 300-call panel-P chain (1,024 cells), and bad J (negative, NaN, inf: counted,
-      not stepped, returned as the normalized input, the other cells bitwise unchanged; a cell below 300 K with a bad J counted cold).
+      not stepped, returned as the normalized input, the other cells bitwise unchanged; a cell below 300 K with a bad J
+      counted cold).
 (b) Guard and recovery. A cell with a NaN input is counted, not recomputed, and left non-finite; a cell forced to fail
     (max_steps 10 for a cold start at dt 500 s among the reference's settled cells) and, with the rounding allowance
     DRIFT set to 0, the cells whose element shares move by more than the clamping allowance are recomputed on the
@@ -33,16 +35,17 @@ advances its own state from the same inputs.
     python tests/kincuda_check.py <VULCAN-JAX thermo folder: NCHO_photo_network.txt, NASA9/>
     python tests/kincuda_check.py <thermo folder> --network SNCHO_photo_network_2025.txt
 (about 1 min each on an idle GPU). Exit 0 = every case PASS."""
+
 import argparse
 import sys
 import time
 
+import libref as LR  # noqa: E402
 import numpy as np
 import torch
 
 from maxichem import kincuda as KC  # noqa: E402
 from maxichem import kinvulcan as KV  # noqa: E402
-import libref as LR  # noqa: E402
 from maxichem import paths  # noqa: E402
 
 YARD = paths.YARD / "design"
@@ -51,7 +54,7 @@ paths.need(YARD, PANEL)
 REFS = {"NCHO_photo_network.txt": paths.LIBREF, "SNCHO_photo_network_2025.txt": paths.LIBREF_S}
 GASES = ["H2O", "CO", "CO2", "CH4", "NH3", "HCN", "C2H2", "H", "OH", "O", "H2", "N2"]
 FLOORS = [1e-10] * 7 + [1e-8] * 3 + [1e-6] * 2
-SGASES = ["H2S", "SO2", "COS", "S2"]                     # also scored on a sulfur network (floor 1e-10)
+SGASES = ["H2S", "SO2", "COS", "S2"]  # also scored on a sulfur network (floor 1e-10)
 TOL, MISMATCH = 1e-6, 1e-4
 dev = torch.device("cuda")
 results = []
@@ -75,8 +78,12 @@ def floored(a, b):
 
 def tensors(e):
     """A stored reference call as tensors: x on the scored gases, accepted steps, finished, finite."""
-    return dict(x=tt(e["x"]), steps=tt(e["steps"]), done=torch.tensor(e["done"], device=dev),
-                finite=torch.tensor(e["finite"], device=dev))
+    return dict(
+        x=tt(e["x"]),
+        steps=tt(e["steps"]),
+        done=torch.tensor(e["done"], device=dev),
+        finite=torch.tensor(e["finite"], device=dev),
+    )
 
 
 def verdict(name, ok, text):
@@ -106,17 +113,27 @@ class Tally:
         self.redo += kc.fallback["recomputed"]
 
     def verdict(self, name):
-        ok = (self.worst <= self.cap and self.over <= max(1.0, self.frac * self.calls) and self.mis <= MISMATCH * self.calls
-              and self.nf == [0, 0] and self.unf == [0, 0] and self.redo == 0)
-        verdict(name, ok, f"worst {self.worst:.2e} dex ({self.over} cell-calls above {TOL:g}); step-count mismatches "
-                          f"{self.mis} of {self.calls} cell-calls; "
-                          f"non-finite ref/kernel {self.nf[0]}/{self.nf[1]}; unfinished {self.unf[0]}/{self.unf[1]}; "
-                          f"recomputed by the guard {self.redo}")
+        ok = (
+            self.worst <= self.cap
+            and self.over <= max(1.0, self.frac * self.calls)
+            and self.mis <= MISMATCH * self.calls
+            and self.nf == [0, 0]
+            and self.unf == [0, 0]
+            and self.redo == 0
+        )
+        verdict(
+            name,
+            ok,
+            f"worst {self.worst:.2e} dex ({self.over} cell-calls above {TOL:g}); step-count mismatches "
+            f"{self.mis} of {self.calls} cell-calls; "
+            f"non-finite ref/kernel {self.nf[0]}/{self.nf[1]}; unfinished {self.unf[0]}/{self.unf[1]}; "
+            f"recomputed by the guard {self.redo}",
+        )
 
 
 SP53 = [str(s) for s in np.load(YARD / "units.npz")["species53"]]
-SP = []                                                  # the network's species (main)
-REF = []                                                 # the reference file of the network (main)
+SP = []  # the network's species (main)
+REF = []  # the reference file of the network (main)
 
 
 def mapped(x53):
@@ -167,8 +184,11 @@ def main():
     gi = [sp.index(g) for g in GASES]
     t0 = time.time()
     kc = KC.CudaSolver(net, dev)
-    print(f"kernel built and compiled in {time.time() - t0:.1f} s; {kc.wpb} warps per block, {kc.smem} B shared "
-          f"memory, {kc.max_blocks} resident blocks", flush=True)
+    print(
+        f"kernel built and compiled in {time.time() - t0:.1f} s; {kc.wpb} warps per block, {kc.smem} B shared "
+        f"memory, {kc.max_blocks} resident blocks",
+        flush=True,
+    )
 
     # (a) parity
     B = 4096
@@ -189,20 +209,26 @@ def main():
     assert [str(q) for q in s["species53"]] == SP53
     B, NC = 1024, 2000
     path, of = np.arange(B) % 256, (np.arange(B) // 256) * 1500
-    Tc, Pc, dc = (np.stack([np.asarray(q, np.float64)[path, of + k] for k in range(NC)])
-                  for q in (F["T"], F["Pbar"] * 1e6, F["dt"]))
+    Tc, Pc, dc = (
+        np.stack([np.asarray(q, np.float64)[path, of + k] for k in range(NC)])
+        for q in (F["T"], F["Pbar"] * 1e6, F["dt"])
+    )
     xb = tt(mapped(s["x53"][r["unit"][path]]))
     hb = full(B, 1e-10)
     R = tensors(LR.entry("chain", sig, xb, hb, Tc, Pc, dc, path=REF[0]))
     t, tb = Tally(frac=1e-5, cap=1e-5), 0.0
     for k in range(NC):
-        torch.cuda.synchronize(); c0 = time.perf_counter()
+        torch.cuda.synchronize()
+        c0 = time.perf_counter()
         rb = kc(xb, tt(Tc[k]), tt(Pc[k]), tt(dc[k]), hb)
-        torch.cuda.synchronize(); tb += time.perf_counter() - c0
+        torch.cuda.synchronize()
+        tb += time.perf_counter() - c0
         t.add(gi, {q: v[k] for q, v in R.items()}, rb, kc)
         xb, hb = rb[:2]
-    t.verdict(f"panel P chain, {NC} calls x {B} cells (the kernel on its own state; ms per call kernel "
-              f"{tb / NC * 1e3:.2f}, GPU may be shared)")
+    t.verdict(
+        f"panel P chain, {NC} calls x {B} cells (the kernel on its own state; ms per call kernel "
+        f"{tb / NC * 1e3:.2f}, GPU may be shared)"
+    )
 
     # photolysis
     kp = KC.CudaSolver(net, dev, photo=True)
@@ -220,23 +246,45 @@ def main():
     t = Tally()
     t.add(gi, tensors(LR.entry("call/cold500", sig, *args, path=REF[0])), kp(*args, J=torch.zeros_like(J)), kp)
     t.verdict("photolysis with J = 0 against the thermal reference, cold starts, dt 500 s")
-    i = torch.tensor([7], device=dev)                    # a lit cell forced to fail and recomputed on the device
+    i = torch.tensor([7], device=dev)  # a lit cell forced to fail and recomputed on the device
     y, _, d, n, flag = kp.launch(x0[i], T[i], P[i], full(1, 500.0), full(1, 1e-10), max_steps=10, J=J[i])
     fb = dict(kp.fallback)
-    R = tensors(LR.entry("photo/forced", sig, x0[i], T[i], P[i], full(1, 500.0), full(1, 1e-10), J[i],
-                         np.array(10 * KC.REC_STEPS), path=REF[0]))
+    R = tensors(
+        LR.entry(
+            "photo/forced",
+            sig,
+            x0[i],
+            T[i],
+            P[i],
+            full(1, 500.0),
+            full(1, 1e-10),
+            J[i],
+            np.array(10 * KC.REC_STEPS),
+            path=REF[0],
+        )
+    )
     e = float(floored(y[:, gi], R["x"]).max())
-    ok = (fb["unfinished"] == 1 and fb["recomputed"] == 1 and e <= TOL and bool(torch.equal(n, R["steps"]))
-          and bool(torch.equal(d, R["done"])))
-    verdict("photolysis: forced failure (max_steps 10) recomputed", ok,
-            f"counts {fb}; {e:.1e} dex from the reference call with {10 * KC.REC_STEPS} tries, finished {bool(d[0])}")
-    Bc, NC = 1024, 300                                   # a lit 300-call chain (panel P's paths and forcing)
+    ok = (
+        fb["unfinished"] == 1
+        and fb["recomputed"] == 1
+        and e <= TOL
+        and bool(torch.equal(n, R["steps"]))
+        and bool(torch.equal(d, R["done"]))
+    )
+    verdict(
+        "photolysis: forced failure (max_steps 10) recomputed",
+        ok,
+        f"counts {fb}; {e:.1e} dex from the reference call with {10 * KC.REC_STEPS} tries, finished {bool(d[0])}",
+    )
+    Bc, NC = 1024, 300  # a lit 300-call chain (panel P's paths and forcing)
     r, s, F = (np.load(PANEL / f"{f}.npz") for f in ("rows", "starts", "forcing"))
     path, of = np.arange(Bc) % 256, (np.arange(Bc) // 256) * 1500
-    Tc, Pc, dc = (np.stack([np.asarray(q, np.float64)[path, of + k] for k in range(NC)])
-                  for q in (F["T"], F["Pbar"] * 1e6, F["dt"]))
+    Tc, Pc, dc = (
+        np.stack([np.asarray(q, np.float64)[path, of + k] for k in range(NC)])
+        for q in (F["T"], F["Pbar"] * 1e6, F["dt"])
+    )
     xb, hb = tt(mapped(s["x53"][r["unit"][path]])), full(Bc, 1e-10)
-    Jc = J[:Bc]                                           # rows i % L of the layers, as the reference
+    Jc = J[:Bc]  # rows i % L of the layers, as the reference
     R = tensors(LR.entry("photo/chain", sig, xb, hb, Tc, Pc, dc, Jc, path=REF[0]))
     t = Tally()
     for k in range(NC):
@@ -244,76 +292,113 @@ def main():
         t.add(gi, {q: v[k] for q, v in R.items()}, rb, kp)
         xb, hb = rb[:2]
     t.verdict(f"photolysis: lit chain, {NC} calls x {Bc} cells")
-    xs = x0[:64].clone()                                  # bad photolysis rates: counted, not stepped (x normalized)
+    xs = x0[:64].clone()  # bad photolysis rates: counted, not stepped (x normalized)
     Jb = J[:64].clone()
     Jb[3, 0], Jb[5, 1], Jb[9, 2] = -1.0, float("nan"), float("inf")
     Tb = T[:64].clone()
     Tb[11] = 250.0
-    Jb[11, 0] = float("nan")                             # a cold cell with a bad J: counted cold
+    Jb[11, 0] = float("nan")  # a cold cell with a bad J: counted cold
     y, _, d, _ = kp(xs, Tb, P[:64], full(64, 1.0), full(64, 1e-10), J=Jb)
     fb = dict(kp.fallback)
     good = torch.ones(64, dtype=torch.bool, device=dev)
     good[[3, 5, 9, 11]] = False
-    yr, _, dr, _ = kp(xs[good], Tb[good], P[:64][good], full(int(good.sum()), 1.0), full(int(good.sum()), 1e-10),
-                      J=Jb[good])
-    ok = (fb["bad_input"] == 3 and fb["cold"] == 1 and not bool(d[[3, 5, 9, 11]].any())
-          and bool(torch.allclose(y[[3, 5, 9]], xs[[3, 5, 9]] / xs[[3, 5, 9]].sum(1, keepdim=True), rtol=1e-14, atol=0))
-          and bool(torch.equal(y[good], yr))
-          and bool(torch.equal(d[good], dr)))
-    verdict("photolysis: bad J counted, cold precedence", ok,
-            f"counts {fb}; rows 3, 5, 9 (J -1, NaN, inf) not finished and returned as the normalized input, row 11 (250 K, NaN J) cold; "
-            f"the other 60 cells bitwise those of a batch without them")
+    yr, _, dr, _ = kp(
+        xs[good], Tb[good], P[:64][good], full(int(good.sum()), 1.0), full(int(good.sum()), 1e-10), J=Jb[good]
+    )
+    ok = (
+        fb["bad_input"] == 3
+        and fb["cold"] == 1
+        and not bool(d[[3, 5, 9, 11]].any())
+        and bool(torch.allclose(y[[3, 5, 9]], xs[[3, 5, 9]] / xs[[3, 5, 9]].sum(1, keepdim=True), rtol=1e-14, atol=0))
+        and bool(torch.equal(y[good], yr))
+        and bool(torch.equal(d[good], dr))
+    )
+    verdict(
+        "photolysis: bad J counted, cold precedence",
+        ok,
+        f"counts {fb}; rows 3, 5, 9 (J -1, NaN, inf) not finished and returned as the normalized input, "
+        f"row 11 (250 K, NaN J) cold; "
+        f"the other 60 cells bitwise those of a batch without them",
+    )
     try:
         kp.check()
     except ValueError:
-        pass                                             # the cold cell above: check() raises, as intended
+        pass  # the cold cell above: check() raises, as intended
 
     # (b) guard
     B = 64
     x0, T, P = yardstick(B, 1, 0.0)
     G = LR.entry("guard", sig, x0, T, P, path=REF[0])
-    xs, hs = tt(G["xs"]), tt(G["hs"])                                     # the reference's settled states (100 s)
+    xs, hs = tt(G["xs"]), tt(G["hs"])  # the reference's settled states (100 s)
     keep = torch.arange(B, device=dev) != 3
     x = xs.clone()
     x[3, 5] = float("nan")
     y, _, d, _ = kc(x, T, P, full(B, 1.0), hs)
     fb = dict(kc.fallback)
-    ya = tensors(LR.arrays("guard/nan", path=REF[0]))["x"][keep]                     # the reference from xs, hs at dt 1 s
+    ya = tensors(LR.arrays("guard/nan", path=REF[0]))["x"][keep]  # the reference from xs, hs at dt 1 s
     e = float(floored(y[keep][:, gi], ya).max())
-    ok = (fb["bad_input"] == 1 and fb["recomputed"] == 0 and not bool(torch.isfinite(y[3]).all()) and not bool(d[3])
-          and e <= TOL and bool(d[keep].all()))
-    verdict("guard: NaN input", ok, f"counts {fb}; row 3 non-finite and unfinished, the other {B - 1} cells within "
-                                    f"{e:.1e} dex of the reference")
+    ok = (
+        fb["bad_input"] == 1
+        and fb["recomputed"] == 0
+        and not bool(torch.isfinite(y[3]).all())
+        and not bool(d[3])
+        and e <= TOL
+        and bool(d[keep].all())
+    )
+    verdict(
+        "guard: NaN input",
+        ok,
+        f"counts {fb}; row 3 non-finite and unfinished, the other {B - 1} cells within {e:.1e} dex of the reference",
+    )
 
     x, h, dt = xs.clone(), hs.clone(), full(B, 1.0)
-    x[7], h[7], dt[7] = x0[7], 1e-10, 500.0                             # cell 7: cold start at 500 s
+    x[7], h[7], dt[7] = x0[7], 1e-10, 500.0  # cell 7: cold start at 500 s
     y, _, d, n, flag = kc.launch(x, T, P, dt, h, max_steps=10)
     fb = dict(kc.fallback)
     i = torch.tensor([7], device=dev)
     R = tensors(LR.entry("guard/forced", sig, x[i], T[i], P[i], dt[i], h[i], np.array(10 * KC.REC_STEPS), path=REF[0]))
     yr, dr, nr = R["x"], R["done"], R["steps"]
     e = float(floored(y[i][:, gi], yr).max())
-    ok = (fb["unfinished"] == 1 and fb["recomputed"] == 1 and fb["recovered"] + fb["still_failed"] == 1 and e <= TOL
-          and bool(torch.equal(n[i], nr)) and bool(torch.equal(d[i], dr)) and int(flag[7]) == (1 if bool(dr) else 2)
-          and bool(d[torch.arange(B, device=dev) != 7].all()))
-    verdict("guard: forced failure (max_steps 10)", ok,
-            f"counts {fb}; cell 7 recomputed with {10 * KC.REC_STEPS} tries ({e:.1e} dex from the reference call "
-            f"with those tries, {int(nr)} accepted steps, finished {bool(dr)}, flag {int(flag[7])})")
+    ok = (
+        fb["unfinished"] == 1
+        and fb["recomputed"] == 1
+        and fb["recovered"] + fb["still_failed"] == 1
+        and e <= TOL
+        and bool(torch.equal(n[i], nr))
+        and bool(torch.equal(d[i], dr))
+        and int(flag[7]) == (1 if bool(dr) else 2)
+        and bool(d[torch.arange(B, device=dev) != 7].all())
+    )
+    verdict(
+        "guard: forced failure (max_steps 10)",
+        ok,
+        f"counts {fb}; cell 7 recomputed with {10 * KC.REC_STEPS} tries ({e:.1e} dex from the reference call "
+        f"with those tries, {int(nr)} accepted steps, finished {bool(dr)}, flag {int(flag[7])})",
+    )
 
-    kz = KC.CudaSolver(net, dev, drift=0.0)          # every rounding change of an element share is flagged (at atol
-    x0, T, P = yardstick(4096, 2, 1.0)               # 1e-18: the default's clamping allowance covers rounding drift)
+    kz = KC.CudaSolver(net, dev, drift=0.0)  # every rounding change of an element share is flagged (at atol
+    x0, T, P = yardstick(4096, 2, 1.0)  # 1e-18: the default's clamping allowance covers rounding drift)
     args = (x0, T, P, full(4096, 500.0), full(4096, 1e-10))
     y, _, _, _, flag = kz.launch(*args, atol=1e-18)
     fb = dict(kz.fallback)
-    yk, _, _, _, flag0 = kc.launch(*args, atol=1e-18)                   # the same call, nothing flagged
+    yk, _, _, _, flag0 = kc.launch(*args, atol=1e-18)  # the same call, nothing flagged
     i, o = (flag > 0).nonzero().squeeze(1), flag == 0
     yr = tensors(LR.entry("guard/drift", sig, *args, np.array(4000 * KC.REC_STEPS), path=REF[0]))["x"][i]
     e = float(floored(y[i][:, gi], yr).max())
-    ok = (fb["drift"] > 0 and fb["recomputed"] == fb["drift"] and fb["recovered"] + fb["still_failed"] == fb["drift"]
-          and e <= TOL and int(flag0.sum()) == 0 and bool(torch.equal(y[o], yk[o])))
-    verdict("guard: element drift (allowance 0)", ok,
-            f"counts {fb}; the flagged cells recomputed on the device ({e:.1e} dex from the reference call; still "
-            f"failing an allowance of 0 is expected), the others bitwise the kernel's result")
+    ok = (
+        fb["drift"] > 0
+        and fb["recomputed"] == fb["drift"]
+        and fb["recovered"] + fb["still_failed"] == fb["drift"]
+        and e <= TOL
+        and int(flag0.sum()) == 0
+        and bool(torch.equal(y[o], yk[o]))
+    )
+    verdict(
+        "guard: element drift (allowance 0)",
+        ok,
+        f"counts {fb}; the flagged cells recomputed on the device ({e:.1e} dex from the reference call; still "
+        f"failing an allowance of 0 is expected), the others bitwise the kernel's result",
+    )
 
     T2 = T.clone()
     T2[0] = 250.0
@@ -322,8 +407,11 @@ def main():
         kc.check()
         verdict("guard: T < 300 K raises in check()", False, "no error")
     except ValueError as e:
-        verdict("guard: T < 300 K raises in check()", kc.fallback["cold"] == 1 and not bool(d[0]),
-                f"cell 0 not stepped; ValueError: {e}")
+        verdict(
+            "guard: T < 300 K raises in check()",
+            kc.fallback["cold"] == 1 and not bool(d[0]),
+            f"cell 0 not stepped; ValueError: {e}",
+        )
 
     # (c) batch size and order
     x0, T, P = yardstick(8192, 7, 1.0)
@@ -336,9 +424,12 @@ def main():
     alone = all(torch.equal(p[sel], q) for p, q in zip(big, kc.launch(*(q[sel] for q in a))))
     one = all(torch.equal(p[sel[:1]], q) for p, q in zip(big, kc.launch(*(q[sel[:1]] for q in a))))
     order = all(torch.equal(p, q[inv]) for p, q in zip(big, shuf))
-    verdict("batch size and order", alone and one and order,
-            f"128 cells alone bitwise inside 8,192 {alone}; one cell alone bitwise {one}; 8,192 cells permuted "
-            f"bitwise {order}")
+    verdict(
+        "batch size and order",
+        alone and one and order,
+        f"128 cells alone bitwise inside 8,192 {alone}; one cell alone bitwise {one}; 8,192 cells permuted "
+        f"bitwise {order}",
+    )
 
     print(f"{sum(results)} of {len(results)} cases PASS", flush=True)
     sys.exit(0 if all(results) else 1)

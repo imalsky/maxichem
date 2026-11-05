@@ -9,6 +9,7 @@ call's output (about one solver step per call, as in a GCM), first dark, then wi
 0.03 bar. A first call of each kind is not timed. Prints one JSON line: the GPU, the batch, and per kind the median
 us per cell-call, the mean solver steps per call and the guard counts.
 """
+
 import argparse
 import json
 import statistics
@@ -31,7 +32,7 @@ dev = torch.device("cuda")
 f64 = dict(dtype=torch.float64, device=dev)
 B = a.cells
 T = torch.linspace(800.0, 2000.0, B, **f64)
-P = 1e6 * torch.logspace(-4.0, 1.0, B, **f64)          # dyn cm^-2
+P = 1e6 * torch.logspace(-4.0, 1.0, B, **f64)  # dyn cm^-2
 x = torch.zeros(B, len(sp), **f64)
 for s, v in {"H2": 0.84, "He": 0.16, "H2O": 9e-4, "CO": 5e-4, "CH4": 1e-5, "N2": 6e-5, "NH3": 1e-6}.items():
     if s in sp:
@@ -44,8 +45,14 @@ solver = CudaSolver(net, dev, photo=photo)
 J0 = torch.zeros(B, len(net.photo), **f64) if photo else None
 x, h, done, _ = solver(x, T, P, torch.full_like(T, 1e10), torch.full_like(T, 1e-10), J=J0)
 torch.cuda.synchronize()
-res = dict(gpu=torch.cuda.get_device_name(0), torch=torch.__version__, network=a.network, species=len(sp),
-           cells=B, relaxed_unfinished=int((~done.bool()).sum()))
+res = dict(
+    gpu=torch.cuda.get_device_name(0),
+    torch=torch.__version__,
+    network=a.network,
+    species=len(sp),
+    cells=B,
+    relaxed_unfinished=int((~done.bool()).sum()),
+)
 kinds = [("dark", J0)]
 if photo:
     J1 = J0.clone()
@@ -62,6 +69,10 @@ for kind, J in kinds:
         if c:
             times.append(time.perf_counter() - t0)
             steps.append(float(nok.mean()))
-    res[kind] = dict(us_per_cell_call=1e6 * statistics.median(times) / B, steps_per_call=statistics.mean(steps),
-                     unfinished=int((~d.bool()).sum()), counts=solver.fallback)
+    res[kind] = dict(
+        us_per_cell_call=1e6 * statistics.median(times) / B,
+        steps_per_call=statistics.mean(steps),
+        unfinished=int((~d.bool()).sum()),
+        counts=solver.fallback,
+    )
 print(json.dumps(res))

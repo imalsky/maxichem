@@ -18,8 +18,7 @@ void check(CUresult r, char const* what) {
   if (r != CUDA_SUCCESS) {
     char const* s = nullptr;
     cuGetErrorString(r, &s);
-    throw std::runtime_error(std::string("maxichem: CUDA driver, ") + what +
-                             ": " + (s ? s : "unknown error"));
+    throw std::runtime_error(std::string("maxichem: CUDA driver, ") + what + ": " + (s ? s : "unknown error"));
   }
 }
 
@@ -41,8 +40,7 @@ torch::Dtype dtype_of(std::string const& name) {
 
 }  // namespace
 
-Solver::Solver(std::string const& folder, torch::Device device)
-    : device_(device) {
+Solver::Solver(std::string const& folder, torch::Device device) : device_(device) {
   TORCH_CHECK(device.is_cuda(), "maxichem::Solver: a CUDA device");
   c10::cuda::CUDAGuard guard(device);
   device_ = torch::Device(torch::kCUDA, guard.current_device().index());  // "cuda": the current one
@@ -68,8 +66,7 @@ Solver::Solver(std::string const& folder, torch::Device device)
   }
   auto geti = [&](char const* k) {
     auto it = meta.find(k);
-    if (it == meta.end())
-      throw std::runtime_error(std::string("maxichem: meta.txt lacks ") + k);
+    if (it == meta.end()) throw std::runtime_error(std::string("maxichem: meta.txt lacks ") + k);
     return std::stoll(it->second);
   };
   ns = static_cast<int>(geti("ns"));
@@ -85,8 +82,8 @@ Solver::Solver(std::string const& folder, torch::Device device)
   rec_steps_ = static_cast<int>(geti("rec_steps"));
   default_atol = std::stod(meta.at("atol"));
   if (static_cast<int>(species.size()) != ns)
-    throw std::runtime_error("maxichem: meta.txt lists " + std::to_string(species.size()) +
-                             " species, ns is " + std::to_string(ns));
+    throw std::runtime_error("maxichem: meta.txt lists " + std::to_string(species.size()) + " species, ns is " +
+                             std::to_string(ns));
 
   CUdevice dev;
   check(cuDeviceGet(&dev, device_.index()), "device");
@@ -95,53 +92,50 @@ Solver::Solver(std::string const& folder, torch::Device device)
   check(cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev), "attribute");
   check(cuDeviceGetAttribute(&sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev), "attribute");
   if (std::to_string(major * 10 + minor) != meta.at("arch"))
-    throw std::runtime_error("maxichem: the export is for sm_" + meta.at("arch") +
-                             ", this device is sm_" + std::to_string(major * 10 + minor) +
-                             "; export on this machine");
+    throw std::runtime_error("maxichem: the export is for sm_" + meta.at("arch") + ", this device is sm_" +
+                             std::to_string(major * 10 + minor) + "; export on this machine");
 
   std::string cubin = read_file(folder + "/kernel.cubin");
   CUmodule mod;
   check(cuModuleLoadData(&mod, cubin.data()), "load");
   module_ = mod;
   try {  // unload the module if anything below fails
-  CUfunction f[3];
-  char const* names[3] = {"call", "guard", "recover"};
-  for (int i = 0; i < 3; ++i) check(cuModuleGetFunction(&f[i], mod, names[i]), "function");
-  call_ = f[0];
-  guard_ = f[1];
-  recover_ = f[2];
-  // as CudaSolver: the dynamic shared memory opt-in, then blocks from the occupancy
-  int nl = 32 * w_;
-  int occ[2];
-  CUfunction fn2[2] = {f[0], f[2]};
-  int threads[2] = {nl * cpb_, nl};
-  int smem[2] = {smem_, smem_rec_};
-  for (int i = 0; i < 2; ++i) {
-    check(cuFuncSetAttribute(fn2[i], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[i]),
-          "shared memory");
-    check(cuOccupancyMaxActiveBlocksPerMultiprocessor(&occ[i], fn2[i], threads[i], smem[i]),
-          "occupancy");
-    if (occ[i] < 1) throw std::runtime_error("maxichem: the kernel does not fit on this device");
-  }
-  max_blocks_ = sms * occ[0];
-  rec_blocks_ = sms * occ[1];
+    CUfunction f[3];
+    char const* names[3] = {"call", "guard", "recover"};
+    for (int i = 0; i < 3; ++i) check(cuModuleGetFunction(&f[i], mod, names[i]), "function");
+    call_ = f[0];
+    guard_ = f[1];
+    recover_ = f[2];
+    // as CudaSolver: the dynamic shared memory opt-in, then blocks from the occupancy
+    int nl = 32 * w_;
+    int occ[2];
+    CUfunction fn2[2] = {f[0], f[2]};
+    int threads[2] = {nl * cpb_, nl};
+    int smem[2] = {smem_, smem_rec_};
+    for (int i = 0; i < 2; ++i) {
+      check(cuFuncSetAttribute(fn2[i], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[i]), "shared memory");
+      check(cuOccupancyMaxActiveBlocksPerMultiprocessor(&occ[i], fn2[i], threads[i], smem[i]), "occupancy");
+      if (occ[i] < 1) throw std::runtime_error("maxichem: the kernel does not fit on this device");
+    }
+    max_blocks_ = sms * occ[0];
+    rec_blocks_ = sms * occ[1];
 
-  for (auto const& t : tables) {  // table name dtype dims...
-    std::vector<int64_t> shape;
-    for (size_t i = 3; i < t.size(); ++i) shape.push_back(std::stoll(t[i]));
-    auto dt = dtype_of(t[2]);
-    auto cpu = torch::empty(shape, torch::TensorOptions().dtype(dt));
-    std::string bytes = read_file(folder + "/tables/" + t[1] + ".bin");
-    if (bytes.size() != static_cast<size_t>(cpu.nbytes()))
-      throw std::runtime_error("maxichem: table " + t[1] + " has the wrong size");
-    std::memcpy(cpu.data_ptr(), bytes.data(), bytes.size());
-    tab_[t[1]] = cpu.to(device);
-  }
-  auto f64 = torch::TensorOptions().dtype(torch::kFloat64).device(device);
-  scratch_ = torch::empty({max_blocks_ * cpb_ * stride_}, f64);
-  scratch_rec_ = torch::empty({rec_blocks_ * stride_rec_}, f64);
-  count = torch::zeros({10}, torch::TensorOptions().dtype(torch::kInt32).device(device));
-  total = torch::zeros({10}, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    for (auto const& t : tables) {  // table name dtype dims...
+      std::vector<int64_t> shape;
+      for (size_t i = 3; i < t.size(); ++i) shape.push_back(std::stoll(t[i]));
+      auto dt = dtype_of(t[2]);
+      auto cpu = torch::empty(shape, torch::TensorOptions().dtype(dt));
+      std::string bytes = read_file(folder + "/tables/" + t[1] + ".bin");
+      if (bytes.size() != static_cast<size_t>(cpu.nbytes()))
+        throw std::runtime_error("maxichem: table " + t[1] + " has the wrong size");
+      std::memcpy(cpu.data_ptr(), bytes.data(), bytes.size());
+      tab_[t[1]] = cpu.to(device);
+    }
+    auto f64 = torch::TensorOptions().dtype(torch::kFloat64).device(device);
+    scratch_ = torch::empty({max_blocks_ * cpb_ * stride_}, f64);
+    scratch_rec_ = torch::empty({rec_blocks_ * stride_rec_}, f64);
+    count = torch::zeros({10}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    total = torch::zeros({10}, torch::TensorOptions().dtype(torch::kInt64).device(device));
   } catch (...) {
     cuModuleUnload(mod);
     module_ = nullptr;
@@ -155,10 +149,8 @@ Solver::~Solver() {
   cuModuleUnload(static_cast<CUmodule>(module_));
 }
 
-std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T,
-                                                torch::Tensor P, torch::Tensor dt,
-                                                torch::Tensor h, torch::Tensor J,
-                                                double rtol, double atol,
+std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T, torch::Tensor P, torch::Tensor dt,
+                                                torch::Tensor h, torch::Tensor J, double rtol, double atol,
                                                 int max_steps) {
   for (auto const* a : {&x, &T, &P, &dt, &h})
     TORCH_CHECK(a->device() == device_ && a->scalar_type() == torch::kFloat64,
@@ -177,8 +169,8 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   } else if (!J.defined()) {
     J = torch::zeros({B, nj}, x.options());
   } else {
-    TORCH_CHECK(J.device() == device_ && J.scalar_type() == torch::kFloat64 && J.dim() == 2 &&
-                    J.size(0) == B && J.size(1) == nj,
+    TORCH_CHECK(J.device() == device_ && J.scalar_type() == torch::kFloat64 && J.dim() == 2 && J.size(0) == B &&
+                    J.size(1) == nj,
                 "maxichem: J [B, ", nj, "] float64 on the solver's device");
     J = J.contiguous();
   }
@@ -200,8 +192,7 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   };
   int recsteps = rec_steps_ * max_steps;
   auto launch = [&](void* fn, unsigned grid, unsigned block, unsigned smem, char const* what) {
-    check(cuLaunchKernel(static_cast<CUfunction>(fn), grid, 1, 1, block, 1, 1, smem, stream,
-                         args.data(), nullptr),
+    check(cuLaunchKernel(static_cast<CUfunction>(fn), grid, 1, 1, block, 1, 1, smem, stream, args.data(), nullptr),
           what);
     args.clear();
     ptrs.clear();

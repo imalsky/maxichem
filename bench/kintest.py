@@ -1,6 +1,6 @@
-"""Fast test runner for the GPU chemistry solver (maxichem/kincuda.py) on VULCAN-JAX's NCHO_photo network: the VULCAN truth
-boxes (paths.BOXES), the VULCAN truth paths (paths.QUAL) and decision panel P in one process on one GPU, misses first.
-The solver runs with photolysis (photo=True): the boxes with their J, the paths with J = 0.
+"""Fast test runner for the GPU chemistry solver (maxichem/kincuda.py) on VULCAN-JAX's NCHO_photo network: the VULCAN
+truth boxes (paths.BOXES), the VULCAN truth paths (paths.QUAL) and decision panel P in one process on one GPU, misses
+first. The solver runs with photolysis (photo=True): the boxes with their J, the paths with J = 0.
 
 Every panel is a block of cells with its own forcing (T, P, dt per call), mixes (x <- (1 - f) x + f y before a call),
 kick-twin starts and VULCAN truth. One loop of ticks: a block's call j runs on tick j * stride; its paths that have not
@@ -31,6 +31,7 @@ Exit status 1 when a path or box has a miss, a call is unfinished or leaves a no
 still fails after the recovery.
     python bench/kintest.py quick|full [--save out.npz] [--ref ref.npz] [--force]
 """
+
 import argparse
 import hashlib
 import json
@@ -49,11 +50,19 @@ GASES = ["H2O", "CO", "CO2", "CH4", "NH3", "HCN", "C2H2", "H", "OH", "O", "H2", 
 FLOOR = np.log10([1e-10] * 7 + [1e-8] * 3 + [1e-6] * 2)
 MISS, LARGE = 0.1, 1.0
 HOLD, DAY = 1500.0, 86400.0
-READ = 1000                 # ticks between read-backs of the counters
-CHUNK = 65536               # most boxes per chunk
-CAP_H = 5.0                 # full: stop above this estimate (hours) unless --force
+READ = 1000  # ticks between read-backs of the counters
+CHUNK = 65536  # most boxes per chunk
+CAP_H = 5.0  # full: stop above this estimate (hours) unless --force
 META = ("id", "panel", "kind", "stratum", "start", "comp")
-KEYS_FB = ("bad_input", "nonfinite", "unfinished", "drift", "recomputed", "recovered", "still_failed")   # CudaSolver.fallback
+KEYS_FB = (
+    "bad_input",
+    "nonfinite",
+    "unfinished",
+    "drift",
+    "recomputed",
+    "recovered",
+    "still_failed",
+)  # CudaSolver.fallback
 NEVER = 1 << 62
 
 
@@ -72,9 +81,11 @@ def check_jobs():
     want = set(rel)
     have = {str(f.relative_to(paths.QUAL)) for f in paths.QUAL.rglob("*.npz")}
     if want != have or len(want) != len(rel):
-        raise SystemExit(f"{paths.QUAL}: {len(rel) - len(want)} duplicate jobs, {len(want - have)} of {len(want)} listed "
-                         f"truth paths missing {sorted(want - have)[:3]}, {len(have - want)} not listed "
-                         f"{sorted(have - want)[:3]}")
+        raise SystemExit(
+            f"{paths.QUAL}: {len(rel) - len(want)} duplicate jobs, {len(want - have)} of {len(want)} listed "
+            f"truth paths missing {sorted(want - have)[:3]}, {len(have - want)} not listed "
+            f"{sorted(have - want)[:3]}"
+        )
     short = []
     for j, r in zip(jobs, rel):
         z = np.load(paths.QUAL / r)
@@ -108,13 +119,29 @@ def load_path(f, sp, gi, hold):
         assert s0 + len(xs) == len(z["T"]), f
     else:
         rows, xs = z["saved_call"], z["x_saved"]
-    return dict(T=z["T"], P=z["Pbar"], dt=None if hold else z["dt"], s0=s0, x0=z["x_kicked"] if twin else z["x0"],
-                mix=[(int(a), float(fr), y / y.sum()) for a, fr, y in zip(z["mix_at"], z["mix_f"], z["mix_x"])
-                     if int(a) > s0 or not twin],
-                rows=rows.astype(np.int64), truth=floored(xs[:, gi]).astype(np.float32),
-                seg=(z["seg_start"], [str(q) for q in z["seg_names"]]) if "seg_start" in z.files else None,
-                meta=dict(id=int(z["id"]), panel=str(z["panel"]), kind=str(z["kind"]),
-                          stratum=str(z["stratum"]), start=str(z["start"]), comp=str(z["comp"])))
+    return dict(
+        T=z["T"],
+        P=z["Pbar"],
+        dt=None if hold else z["dt"],
+        s0=s0,
+        x0=z["x_kicked"] if twin else z["x0"],
+        mix=[
+            (int(a), float(fr), y / y.sum())
+            for a, fr, y in zip(z["mix_at"], z["mix_f"], z["mix_x"])
+            if int(a) > s0 or not twin
+        ],
+        rows=rows.astype(np.int64),
+        truth=floored(xs[:, gi]).astype(np.float32),
+        seg=(z["seg_start"], [str(q) for q in z["seg_names"]]) if "seg_start" in z.files else None,
+        meta=dict(
+            id=int(z["id"]),
+            panel=str(z["panel"]),
+            kind=str(z["kind"]),
+            stratum=str(z["stratum"]),
+            start=str(z["start"]),
+            comp=str(z["comp"]),
+        ),
+    )
 
 
 def load_p(sp):
@@ -124,14 +151,31 @@ def load_p(sp):
     s53 = [str(q) for q in s["species53"]]
     to = lambda a: np.stack([a[..., s53.index(q)] if q in s53 else np.zeros(a.shape[:-1]) for q in sp], -1)  # noqa
     T, Pb, mr, mk, mf, mx = (F[k] for k in ("T", "Pbar", "mix_row", "mix_k", "mix_f", "mix_x"))
-    x53, mx = to(s["x53"]), to(mx)                       # by species name onto the network (the others 0)
+    x53, mx = to(s["x53"]), to(mx)  # by species name onto the network (the others 0)
     out = []
     for p in range(len(r["N"])):
         q = np.flatnonzero(mr == p)
-        out.append(dict(T=T[p], P=Pb[p], dt=None, s0=0, x0=x53[r["unit"][p]],
-                        mix=[(int(mk[i]), float(mf[i]), mx[i] / mx[i].sum()) for i in q], rows=None, truth=None,
-                        seg=None, meta=dict(id=int(r["job"][p]), panel="P", kind="main", stratum="-",
-                                            start=f"age{int(r['age_idx'][p])}", comp="-")))
+        out.append(
+            dict(
+                T=T[p],
+                P=Pb[p],
+                dt=None,
+                s0=0,
+                x0=x53[r["unit"][p]],
+                mix=[(int(mk[i]), float(mf[i]), mx[i] / mx[i].sum()) for i in q],
+                rows=None,
+                truth=None,
+                seg=None,
+                meta=dict(
+                    id=int(r["job"][p]),
+                    panel="P",
+                    kind="main",
+                    stratum="-",
+                    start=f"age{int(r['age_idx'][p])}",
+                    comp="-",
+                ),
+            )
+        )
     return out
 
 
@@ -149,7 +193,7 @@ class Block:
         assert cyc is None or (L == cyc).all()
         self.s0 = np.array([rep * c["s0"] for c in cells])
         self.e = np.full(self.n, ncall) if cyc else np.minimum(rep * L, ncall)
-        self.nrow = L if cyc else np.minimum(L, -(-ncall // rep))      # forcing rows used per path
+        self.nrow = L if cyc else np.minimum(L, -(-ncall // rep))  # forcing rows used per path
         self.end = int(self.e.max())
         self.ev = np.unique(np.concatenate([self.s0, self.e]))
         self.next, self.nlive = -1, 0
@@ -207,7 +251,7 @@ def score(x, c, truth, j, best, cnt, gi, fl):
     lx = torch.log10(x[c][:, gi].clamp(min=1e-300)).maximum(fl)
     e = (lx - truth).abs()
     ep, g = e.max(1)
-    ep = torch.where(torch.isfinite(lx).all(1) & torch.isfinite(truth).all(1), ep, torch.inf)   # bad truth: a failure
+    ep = torch.where(torch.isfinite(lx).all(1) & torch.isfinite(truth).all(1), ep, torch.inf)  # bad truth: a failure
     w = best[0][c]
     up = ep > w
     best[0][c] = torch.where(up, ep, w)
@@ -236,15 +280,20 @@ def boxes(solver, net, sp, gh, gi, fl, cap, dev):
     cover = np.zeros(man["boxes"], int)
     np.add.at(cover, np.concatenate([ids, np.asarray(man.get("quarantine", []), int)]), 1)
     if man.get("pending", 1) or any(bad.values()) or len(ids) != man["accepted"] or (cover != 1).any():
-        raise SystemExit(f"{paths.BOXES}: not complete (manifest: {man.get('pending')} boxes not run, {bad}, "
-                         f"{man['accepted']} accepted; shards hold {len(ids)} boxes, design boxes not held exactly once "
-                         f"(accepted or quarantined) {int((cover != 1).sum())})")
+        raise SystemExit(
+            f"{paths.BOXES}: not complete (manifest: {man.get('pending')} boxes not run, {bad}, "
+            f"{man['accepted']} accepted; shards hold {len(ids)} boxes, design boxes not held exactly once "
+            f"(accepted or quarantined) {int((cover != 1).sum())})"
+        )
     print(f"boxes: {man['accepted']:,} of {man['boxes']:,} accepted, {len(man['quarantine'])} quarantined (left out)")
     z0 = np.load(shards[0])
     for f in shards:
         z = np.load(f)
-        if [str(q) for q in z["species"]] != sp or not np.array_equal(z["stops"], z0["stops"]) or \
-                not np.array_equal(z["lines"], z0["lines"]):
+        if (
+            [str(q) for q in z["species"]] != sp
+            or not np.array_equal(z["stops"], z0["stops"])
+            or not np.array_equal(z["lines"], z0["lines"])
+        ):
             raise SystemExit(f"{f}: species, stops or photolysis lines differ from the paths' and the other shards'")
     stops, lines = z0["stops"], [str(q) for q in z0["lines"]]
     col = [lines.index(f"{q['absorber']},{q['branch']}") for q in net.photo]
@@ -260,9 +309,20 @@ def boxes(solver, net, sp, gh, gi, fl, cap, dev):
         n += len(z["box"])
     Z = {k: np.concatenate(v)[:cap] for k, v in Z.items()}
     R, nc = len(Z["box"]), len(stops) - 1
-    B = dict(b_box=Z["box"], b_calls=np.full(R, nc), b_worst=np.zeros(R), b_kworst=np.full(R, -1),
-             b_gworst=np.full(R, -1), b_saved=np.zeros(R), b_nmiss=np.zeros(R), b_nlarge=np.zeros(R),
-             b_unfinished=np.zeros(R), b_nonfinite=np.zeros(R), b_steps=np.zeros(R), b_lx=np.zeros((R, 12), np.float32))
+    B = dict(
+        b_box=Z["box"],
+        b_calls=np.full(R, nc),
+        b_worst=np.zeros(R),
+        b_kworst=np.full(R, -1),
+        b_gworst=np.full(R, -1),
+        b_saved=np.zeros(R),
+        b_nmiss=np.zeros(R),
+        b_nlarge=np.zeros(R),
+        b_unfinished=np.zeros(R),
+        b_nonfinite=np.zeros(R),
+        b_steps=np.zeros(R),
+        b_lx=np.zeros((R, 12), np.float32),
+    )
     fb = {}
     t0 = time.time()
     tt = lambda a: torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float64, device=dev)  # noqa: E731
@@ -271,10 +331,13 @@ def boxes(solver, net, sp, gh, gi, fl, cap, dev):
         m = sl.stop - p0
         x, T, P, J = tt(Z["X"][sl, 0]), tt(Z["T"][sl]), tt(Z["P"][sl]), tt(Z["J"][sl][:, col])
         h = torch.full_like(T, 1e-10)
-        acc = torch.zeros(m, 3, dtype=torch.float64, device=dev)              # unfinished, non-finite, steps
-        cnt = torch.zeros(m, 3, dtype=torch.float64, device=dev)              # saved states, misses, large misses
-        best = (torch.zeros(m, dtype=torch.float64, device=dev), torch.full((m,), -1, device=dev),
-                torch.full((m,), -1, device=dev))
+        acc = torch.zeros(m, 3, dtype=torch.float64, device=dev)  # unfinished, non-finite, steps
+        cnt = torch.zeros(m, 3, dtype=torch.float64, device=dev)  # saved states, misses, large misses
+        best = (
+            torch.zeros(m, dtype=torch.float64, device=dev),
+            torch.full((m,), -1, device=dev),
+            torch.full((m,), -1, device=dev),
+        )
         c = torch.arange(m, device=dev)
         for k in range(1, nc + 1):
             x, h, done, nok = solver(x, T, P, torch.full_like(T, stops[k] - stops[k - 1]), h, J=J)
@@ -302,17 +365,22 @@ def boxes(solver, net, sp, gh, gi, fl, cap, dev):
 def box_report(B, Z, stops):
     """Misses-first lines of the box pass."""
     w = B["b_worst"]
-    print(f"boxes: {len(w):,} boxes x {len(stops) - 1} calls in {B['b_s']:.0f} s "
-          f"({1e6 * B['b_s'] / B['b_cellcalls']:.3f} us per cell-call), steps per call "
-          f"{B['b_steps'].sum() / B['b_calls'].sum():.3f}; guard {dict(zip(KEYS_FB, B['fallback_boxes'].tolist()))}")
+    print(
+        f"boxes: {len(w):,} boxes x {len(stops) - 1} calls in {B['b_s']:.0f} s "
+        f"({1e6 * B['b_s'] / B['b_cellcalls']:.3f} us per cell-call), steps per call "
+        f"{B['b_steps'].sum() / B['b_calls'].sum():.3f}; guard {dict(zip(KEYS_FB, B['fallback_boxes'].tolist()))}"
+    )
 
     def line(name, s):
         if s.any():
-            print(f"  {name:20s} {int(s.sum()):7,d} boxes: miss {100 * (w[s] > MISS).mean():6.3f} %  large "
-                  f"{100 * (w[s] > LARGE).mean():6.3f} %  worst {w[s].max():.3f} | stored states "
-                  f"{int(B['b_saved'][s].sum()):,}: miss {int(B['b_nmiss'][s].sum()):,} large "
-                  f"{int(B['b_nlarge'][s].sum()):,} | boxes with an unfinished call {int((B['b_unfinished'][s] > 0).sum())}"
-                  f", with a non-finite state {int((B['b_nonfinite'][s] > 0).sum())}")
+            print(
+                f"  {name:20s} {int(s.sum()):7,d} boxes: miss {100 * (w[s] > MISS).mean():6.3f} %  large "
+                f"{100 * (w[s] > LARGE).mean():6.3f} %  worst {w[s].max():.3f} | stored states "
+                f"{int(B['b_saved'][s].sum()):,}: miss {int(B['b_nmiss'][s].sum()):,} large "
+                f"{int(B['b_nlarge'][s].sum()):,} | boxes with an unfinished call "
+                f"{int((B['b_unfinished'][s] > 0).sum())}"
+                f", with a non-finite state {int((B['b_nonfinite'][s] > 0).sum())}"
+            )
 
     line("all boxes", np.ones(len(w), bool))
     line("dark", Z["lit"] == 0)
@@ -323,9 +391,11 @@ def box_report(B, Z, stops):
         line(f"T {lo}-{hi} K", (Z["T"] >= lo) & (Z["T"] < hi))
     print("  worst boxes:")
     for i in np.argsort(-w)[:5]:
-        print(f"    box {Z['box'][i]} T {Z['T'][i]:.0f} K P {Z['P'][i] / 1e6:.1e} bar {'lit' if Z['lit'][i] else 'dark'} "
-              f"start {int(Z['kind'][i])}: {w[i]:.3f} dex in {GASES[B['b_gworst'][i]]} at stop "
-              f"{stops[B['b_kworst'][i]]:.3g} s")
+        print(
+            f"    box {Z['box'][i]} T {Z['T'][i]:.0f} K P {Z['P'][i] / 1e6:.1e} bar {'lit' if Z['lit'][i] else 'dark'} "
+            f"start {int(Z['kind'][i])}: {w[i]:.3f} dex in {GASES[B['b_gworst'][i]]} at stop "
+            f"{stops[B['b_kworst'][i]]:.3g} s"
+        )
 
 
 def make_blocks(tier, sp, gi):
@@ -339,19 +409,25 @@ def make_blocks(tier, sp, gi):
     nqc, nh, nl, nlc, npp = (max(len(c["T"]) for c in v) for v in (qc, qh, ql, qlc, pp))
     print(f"truth and forcing loaded in {time.time() - t0:.0f} s", flush=True)
     if tier == "quick":
-        return [Block("QC family, per call", qc, 1, nqc),
-                Block("QH family, 1500-s holds", qh, 1, nh, dt=HOLD),
-                Block("QL, dt 500 s", ql, 1, 10000, rep=3, dt=500.0),
-                Block("QLc, dt 500 s", qlc, 1, 10000),
-                *[Block(f"P, dt {d:g} s", pp, 1, npp, dt=d, cyc=npp) for d in (25.0, 50.0, 500.0)]]
-    return [Block("QL, dt 25 s", ql, 1, 60 * nl, rep=60, dt=25.0),
-            Block("QL, dt 500 s", ql, 20, 3 * nl, rep=3, dt=500.0),
-            Block("QLc, dt 500 s", qlc, 20, nlc),
-            Block("QH family, dt 50 s", qh, 2, 30 * nh, rep=30, dt=50.0),
+        return [
             Block("QC family, per call", qc, 1, nqc),
             Block("QH family, 1500-s holds", qh, 1, nh, dt=HOLD),
-            *[Block(f"P, dt {d:g} s", pp, s, int(1000 * DAY / d), dt=d, cyc=npp)
-              for d, s in ((25.0, 1), (50.0, 2), (500.0, 20))]]
+            Block("QL, dt 500 s", ql, 1, 10000, rep=3, dt=500.0),
+            Block("QLc, dt 500 s", qlc, 1, 10000),
+            *[Block(f"P, dt {d:g} s", pp, 1, npp, dt=d, cyc=npp) for d in (25.0, 50.0, 500.0)],
+        ]
+    return [
+        Block("QL, dt 25 s", ql, 1, 60 * nl, rep=60, dt=25.0),
+        Block("QL, dt 500 s", ql, 20, 3 * nl, rep=3, dt=500.0),
+        Block("QLc, dt 500 s", qlc, 20, nlc),
+        Block("QH family, dt 50 s", qh, 2, 30 * nh, rep=30, dt=50.0),
+        Block("QC family, per call", qc, 1, nqc),
+        Block("QH family, 1500-s holds", qh, 1, nh, dt=HOLD),
+        *[
+            Block(f"P, dt {d:g} s", pp, s, int(1000 * DAY / d), dt=d, cyc=npp)
+            for d, s in ((25.0, 1), (50.0, 2), (500.0, 20))
+        ],
+    ]
 
 
 def assemble(blocks, net, dev):
@@ -379,13 +455,23 @@ def assemble(blocks, net, dev):
     el = X @ atoms
     N = len(X0)
     z = lambda *s, dt=torch.float64: torch.zeros(*s, dtype=dt, device=dev)  # noqa: E731
-    return dict(X=X, H=torch.full((N,), 1e-10, dtype=torch.float64, device=dev), T=tt(Tf), P=tt(Pf), dt=tt(DTf),
-                host=(np.concatenate(Tf), np.concatenate(Pf), np.concatenate(DTf)), atoms=atoms, iH=iH,
-                ratio0=el / el[:, iH:iH + 1], meta={q: np.array(v) for q, v in meta.items()},
-                acc=z(N, 5),                # calls, accepted steps, unfinished, non-finite, negative
-                cnt=z(N, 3),                # stored states, misses, large misses
-                best=(z(N), torch.full((N,), -1, device=dev), torch.full((N,), -1, device=dev)),
-                drift=z(N), N=N)
+    return dict(
+        X=X,
+        H=torch.full((N,), 1e-10, dtype=torch.float64, device=dev),
+        T=tt(Tf),
+        P=tt(Pf),
+        dt=tt(DTf),
+        host=(np.concatenate(Tf), np.concatenate(Pf), np.concatenate(DTf)),
+        atoms=atoms,
+        iH=iH,
+        ratio0=el / el[:, iH : iH + 1],
+        meta={q: np.array(v) for q, v in meta.items()},
+        acc=z(N, 5),  # calls, accepted steps, unfinished, non-finite, negative
+        cnt=z(N, 3),  # stored states, misses, large misses
+        best=(z(N), torch.full((N,), -1, device=dev), torch.full((N,), -1, device=dev)),
+        drift=z(N),
+        N=N,
+    )
 
 
 def run(blocks, S, solver, ticks, snap, full, force, t_all, gi, fl, dev):
@@ -417,10 +503,21 @@ def run(blocks, S, solver, ticks, snap, full, force, t_all, gi, fl, dev):
             X[idx], H[idx] = xo, ho
             cellcalls += idx.numel()
             fin = torch.isfinite(xo).all(1)
-            acc.index_add_(0, idx, torch.stack((torch.ones_like(nok), nok, (~done).double(), (~fin).double(),
-                                                (xo.min(1).values < 0).double()), 1))
+            acc.index_add_(
+                0,
+                idx,
+                torch.stack(
+                    (torch.ones_like(nok), nok, (~done).double(), (~fin).double(), (xo.min(1).values < 0).double()), 1
+                ),
+            )
             el = xo @ S["atoms"]
-            d = torch.log10(el / el[:, S["iH"]:S["iH"] + 1] / S["ratio0"][idx]).abs().nan_to_num(nan=0.0).max(1).values
+            d = (
+                torch.log10(el / el[:, S["iH"] : S["iH"] + 1] / S["ratio0"][idx])
+                .abs()
+                .nan_to_num(nan=0.0)
+                .max(1)
+                .values
+            )
             drift[idx] = torch.maximum(drift[idx], d)
             for b, j in sched:
                 if b.truth:
@@ -432,33 +529,50 @@ def run(blocks, S, solver, ticks, snap, full, force, t_all, gi, fl, dev):
             w = best[0]
             now = time.time()
             if not full or (t + 1) % (100 * READ) == 0 or t + 1 in (READ, ticks):
-                print(f"tick {t + 1:,} of {ticks:,}: {now - t0:.0f} s, {1e3 * (now - tl) / ((t % READ) + 1):.2f} ms per "
-                      f"tick (last {(t % READ) + 1:,}), {sum(b.nlive for b, _ in sched)} cells this tick, paths with a miss "
-                      f"{int((w > MISS).sum())}, worst {float(w.max()):.3f} dex, unfinished {tot[2]:.0f}, non-finite "
-                      f"{tot[3]:.0f}, negative {tot[4]:.0f}, recomputed by the guard {fb.get('recomputed', 0)}", flush=True)
+                print(
+                    f"tick {t + 1:,} of {ticks:,}: {now - t0:.0f} s, {1e3 * (now - tl) / ((t % READ) + 1):.2f} ms per "
+                    f"tick (last {(t % READ) + 1:,}), {sum(b.nlive for b, _ in sched)} cells this tick, "
+                    f"paths with a miss "
+                    f"{int((w > MISS).sum())}, worst {float(w.max()):.3f} dex, unfinished {tot[2]:.0f}, non-finite "
+                    f"{tot[3]:.0f}, negative {tot[4]:.0f}, recomputed by the guard {fb.get('recomputed', 0)}",
+                    flush=True,
+                )
             tl = now
             if (t + 1) % snap == 0:
                 snaps.append(lx()), snap_t.append(t + 1)
             act = [b for b in act if (b.end - 1) * b.stride > t]
             if full and t + 1 == READ:
                 est = (now - t_all) + (ticks - READ) * (now - t0) / READ
-                print(f"estimate: {est / 3600:.2f} h in all ({(now - t_all) / 60:.1f} min so far, then {ticks - READ:,} "
-                      f"ticks x {1e3 * (now - t0) / READ:.2f} ms per tick of ticks 1-{READ:,})", flush=True)
+                print(
+                    f"estimate: {est / 3600:.2f} h in all ({(now - t_all) / 60:.1f} min so far, then {ticks - READ:,} "
+                    f"ticks x {1e3 * (now - t0) / READ:.2f} ms per tick of ticks 1-{READ:,})",
+                    flush=True,
+                )
                 if est > CAP_H * 3600 and not force:
                     print(f"stopped: the estimate exceeds {CAP_H:g} h (--force runs it anyway)", flush=True)
                     sys.exit(2)
     torch.cuda.synchronize()
-    return dict(loop_s=time.time() - t0, ticks=ticks, cellcalls=cellcalls, snap_tick=np.array(snap_t),
-                snap_lx=np.stack(snaps) if snaps else np.zeros((0, S["N"], 12), np.float32), final_lx=lx(),
-                fallback_loop=np.array([fb.get(q, 0) for q in KEYS_FB]))
+    return dict(
+        loop_s=time.time() - t0,
+        ticks=ticks,
+        cellcalls=cellcalls,
+        snap_tick=np.array(snap_t),
+        snap_lx=np.stack(snaps) if snaps else np.zeros((0, S["N"], 12), np.float32),
+        final_lx=lx(),
+        fallback_loop=np.array([fb.get(q, 0) for q in KEYS_FB]),
+    )
 
 
 def results(blocks, S):
     """Per-cell counters and metadata as numpy arrays (the saved per-path summaries)."""
     acc, cnt = S["acc"].cpu().numpy(), S["cnt"].cpu().numpy()
-    R = dict(block_names=np.array([b.name for b in blocks]), truth_block=np.array([b.truth for b in blocks]),
-             block_of=np.concatenate([np.full(b.n, i) for i, b in enumerate(blocks)]),
-             mixed=np.concatenate([b.mixed for b in blocks]), **S["meta"])
+    R = dict(
+        block_names=np.array([b.name for b in blocks]),
+        truth_block=np.array([b.truth for b in blocks]),
+        block_of=np.concatenate([np.full(b.n, i) for i, b in enumerate(blocks)]),
+        mixed=np.concatenate([b.mixed for b in blocks]),
+        **S["meta"],
+    )
     R["worst"], R["kworst"], R["gworst"] = (q.cpu().numpy() for q in S["best"])
     R["stored"], R["nmiss"], R["nlarge"] = cnt.T
     R["calls"], R["steps"], R["unfinished"], R["nonfinite"], R["negative"] = acc.T
@@ -473,12 +587,16 @@ def line(name, s, R, truth):
     dr = f"{R['drift'][um].max():.1e} dex" if um.any() else "-"
     head = f"  {name:10s} {int(s.sum()):5d} paths"
     if truth:
-        head += (f": miss {100 * (w > MISS).mean():5.1f} %  large {100 * (w > LARGE).mean():5.1f} %  worst {w.max():.3f} | "
-                 f"stored states {int(R['stored'][s].sum()):,}: miss {int(R['nmiss'][s].sum())} large "
-                 f"{int(R['nlarge'][s].sum())}")
-    print(head + f" | calls {int(calls):,}: unfinished {int(R['unfinished'][s].sum())} non-finite "
-          f"{int(R['nonfinite'][s].sum())} negative {int(R['negative'][s].sum())} | drift (unmixed) {dr} | "
-          f"steps per call {R['steps'][s].sum() / max(calls, 1):.3f}")
+        head += (
+            f": miss {100 * (w > MISS).mean():5.1f} %  large {100 * (w > LARGE).mean():5.1f} %  worst {w.max():.3f} | "
+            f"stored states {int(R['stored'][s].sum()):,}: miss {int(R['nmiss'][s].sum())} large "
+            f"{int(R['nlarge'][s].sum())}"
+        )
+    print(
+        head + f" | calls {int(calls):,}: unfinished {int(R['unfinished'][s].sum())} non-finite "
+        f"{int(R['nonfinite'][s].sum())} negative {int(R['negative'][s].sum())} | drift (unmixed) {dr} | "
+        f"steps per call {R['steps'][s].sum() / max(calls, 1):.3f}"
+    )
 
 
 def report(blocks, R, L, S):
@@ -487,11 +605,14 @@ def report(blocks, R, L, S):
     tr = R["truth_block"][R["block_of"]]
     w = np.where(tr, R["worst"], -1.0)
     c = int(np.argmax(w))
-    print(f"\nMISSES FIRST. qual truth paths {int(tr.sum()):,}: with a miss {int((w > MISS).sum())}, with a large miss "
-          f"{int((w > LARGE).sum())}; stored states {int(R['stored'].sum()):,}: with a miss {int(R['nmiss'].sum())}, large "
-          f"{int(R['nlarge'].sum())}; worst {w[c]:.3f} dex ({R['block_names'][R['block_of'][c]]}, path {R['id'][c]}); "
-          f"all blocks: unfinished calls {int(R['unfinished'].sum())}, non-finite states {int(R['nonfinite'].sum())}, "
-          f"negative {int(R['negative'].sum())}")
+    print(
+        f"\nMISSES FIRST. qual truth paths {int(tr.sum()):,}: with a miss {int((w > MISS).sum())}, with a large miss "
+        f"{int((w > LARGE).sum())}; stored states {int(R['stored'].sum()):,}: with a miss "
+        f"{int(R['nmiss'].sum())}, large "
+        f"{int(R['nlarge'].sum())}; worst {w[c]:.3f} dex ({R['block_names'][R['block_of'][c]]}, path {R['id'][c]}); "
+        f"all blocks: unfinished calls {int(R['unfinished'].sum())}, non-finite states {int(R['nonfinite'].sum())}, "
+        f"negative {int(R['negative'].sum())}"
+    )
     Tf, Pf, DTf = S["host"]
     for bi, b in enumerate(blocks):
         s = R["block_of"] == bi
@@ -505,7 +626,9 @@ def report(blocks, R, L, S):
             parts = []
             for v in np.unique(R[key][s]):
                 q = s & (R[key] == v)
-                parts.append(f"{v} {int(q.sum())} (miss {int((R['worst'][q] > MISS).sum())}, worst {R['worst'][q].max():.3f})")
+                parts.append(
+                    f"{v} {int(q.sum())} (miss {int((R['worst'][q] > MISS).sum())}, worst {R['worst'][q].max():.3f})"
+                )
             print(f"    by {key}: " + "; ".join(parts))
         print("    worst paths:")
         for c in b.c0 + np.argsort(-R["worst"][s])[:5]:
@@ -515,12 +638,16 @@ def report(blocks, R, L, S):
             f = b.off[i] + (j // b.rep) % b.cyc
             seg = b.cells[i]["seg"]
             where = f" seg {seg[1][int(np.searchsorted(seg[0], j // b.rep, side='right')) - 1]}" if seg else ""
-            print(f"      {R['id'][c]} {R['panel'][c]} {R['kind'][c]} {R['stratum'][c]} {R['start'][c]} {R['comp'][c]}: "
-                  f"{R['worst'][c]:.3f} dex in {GASES[R['gworst'][c]]} at call {j}{where} (T {Tf[f]:.0f} K, P "
-                  f"{Pf[f] / 1e6:.2e} bar, dt {DTf[f]:.1f} s); stored states with a miss {int(R['nmiss'][c])}")
-    print(f"loop: {L['ticks']:,} ticks in {L['loop_s']:.0f} s = {1e3 * L['loop_s'] / L['ticks']:.3f} ms per tick; "
-          f"{L['cellcalls']:,} cell-calls = {1e6 * L['loop_s'] / L['cellcalls']:.3f} us per cell-call; guard "
-          f"{dict(zip(KEYS_FB, L['fallback_loop'].tolist()))}")
+            print(
+                f"      {R['id'][c]} {R['panel'][c]} {R['kind'][c]} {R['stratum'][c]} {R['start'][c]} {R['comp'][c]}: "
+                f"{R['worst'][c]:.3f} dex in {GASES[R['gworst'][c]]} at call {j}{where} (T {Tf[f]:.0f} K, P "
+                f"{Pf[f] / 1e6:.2e} bar, dt {DTf[f]:.1f} s); stored states with a miss {int(R['nmiss'][c])}"
+            )
+    print(
+        f"loop: {L['ticks']:,} ticks in {L['loop_s']:.0f} s = {1e3 * L['loop_s'] / L['ticks']:.3f} ms per tick; "
+        f"{L['cellcalls']:,} cell-calls = {1e6 * L['loop_s'] / L['cellcalls']:.3f} us per cell-call; guard "
+        f"{dict(zip(KEYS_FB, L['fallback_loop'].tolist()))}"
+    )
 
 
 def compare(new, ref):
@@ -530,32 +657,61 @@ def compare(new, ref):
     assert np.array_equal(new["snap_tick"], ref["snap_tick"])
     lat = lambda z: (1e3 * float(z["loop_s"]) / int(z["ticks"]), 1e6 * float(z["b_s"]) / int(z["b_cellcalls"]))  # noqa
     (m1, y1), (m0, y0) = lat(new), lat(ref)
-    print(f"\nPAIRED with the reference (tier {new['tier']}): latency loop {m1:.3f} vs {m0:.3f} ms per tick "
-          f"({m1 / m0:.2f}x), boxes {y1:.3f} vs {y0:.3f} us per cell-call ({y1 / y0:.2f}x)")
+    print(
+        f"\nPAIRED with the reference (tier {new['tier']}): latency loop {m1:.3f} vs {m0:.3f} ms per tick "
+        f"({m1 / m0:.2f}x), boxes {y1:.3f} vs {y0:.3f} us per cell-call ({y1 / y0:.2f}x)"
+    )
     dif = lambda a, b: np.nan_to_num(np.abs(np.asarray(a, np.float64) - np.asarray(b, np.float64)), nan=np.inf)  # noqa
-    ds = np.maximum(dif(new["final_lx"], ref["final_lx"]).max(1),
-                    dif(new["snap_lx"], ref["snap_lx"]).max((0, 2)) if len(new["snap_tick"]) else 0.0)
+    ds = np.maximum(
+        dif(new["final_lx"], ref["final_lx"]).max(1),
+        dif(new["snap_lx"], ref["snap_lx"]).max((0, 2)) if len(new["snap_tick"]) else 0.0,
+    )
 
     def row(name, s, truth, w1, w0, st, c1, c0, u1, u0, ids):
         txt = f"  {name:24s} {int(s.sum()):7,d} paths"
         if truth:
             dw = np.nan_to_num(w1[s] - w0[s], nan=np.inf, posinf=np.inf, neginf=-np.inf)
             i, k = int(np.argmax(dw)), int(np.argmin(dw))
-            txt += (f" | worst error new - ref: mean {dw[np.isfinite(dw)].mean() if np.isfinite(dw).any() else 0:+.5f}, "
-                    f"largest rise {dw[i]:+.4f} ({ids[s][i]}), largest fall {dw[k]:+.4f} ({ids[s][k]}); |change| "
-                    f"> 0.01: {int((np.abs(dw) > 0.01).sum())}, > 0.03: {int((np.abs(dw) > 0.03).sum())}")
-        print(txt + f" | state change > 0.01: {int((st[s] > 0.01).sum())}, > 0.03: {int((st[s] > 0.03).sum())} (largest "
-              f"{st[s].max():.2e}) | steps per call {c1:.3f} vs {c0:.3f} | unfinished {int(u1)} vs {int(u0)}")
+            txt += (
+                f" | worst error new - ref: mean {dw[np.isfinite(dw)].mean() if np.isfinite(dw).any() else 0:+.5f}, "
+                f"largest rise {dw[i]:+.4f} ({ids[s][i]}), largest fall {dw[k]:+.4f} ({ids[s][k]}); |change| "
+                f"> 0.01: {int((np.abs(dw) > 0.01).sum())}, > 0.03: {int((np.abs(dw) > 0.03).sum())}"
+            )
+        print(
+            txt + f" | state change > 0.01: {int((st[s] > 0.01).sum())}, > 0.03: {int((st[s] > 0.03).sum())} (largest "
+            f"{st[s].max():.2e}) | steps per call {c1:.3f} vs {c0:.3f} | unfinished {int(u1)} vs {int(u0)}"
+        )
 
     for bi, name in enumerate(new["block_names"]):
         s = new["block_of"] == bi
         spc = lambda z: z["steps"][s].sum() / max(z["calls"][s].sum(), 1)  # noqa: E731
-        row(str(name), s, bool(new["truth_block"][bi]), new["worst"], ref["worst"], ds, spc(new), spc(ref),
-            new["unfinished"][s].sum(), ref["unfinished"][s].sum(), new["id"])
+        row(
+            str(name),
+            s,
+            bool(new["truth_block"][bi]),
+            new["worst"],
+            ref["worst"],
+            ds,
+            spc(new),
+            spc(ref),
+            new["unfinished"][s].sum(),
+            ref["unfinished"][s].sum(),
+            new["id"],
+        )
     bs = np.ones(len(new["b_box"]), bool)
-    row("boxes", bs, True, new["b_worst"], ref["b_worst"], dif(new["b_lx"], ref["b_lx"]).max(1),
-        new["b_steps"].sum() / new["b_calls"].sum(), ref["b_steps"].sum() / ref["b_calls"].sum(),
-        new["b_unfinished"].sum(), ref["b_unfinished"].sum(), new["b_box"])
+    row(
+        "boxes",
+        bs,
+        True,
+        new["b_worst"],
+        ref["b_worst"],
+        dif(new["b_lx"], ref["b_lx"]).max(1),
+        new["b_steps"].sum() / new["b_calls"].sum(),
+        ref["b_steps"].sum() / ref["b_calls"].sum(),
+        new["b_unfinished"].sum(),
+        ref["b_unfinished"].sum(),
+        new["b_box"],
+    )
 
 
 def main():
@@ -578,11 +734,14 @@ def main():
     net = KV.VulcanNetwork(f"{paths.VULCAN_THERMO}/NCHO_photo_network.txt", f"{paths.VULCAN_THERMO}/NASA9", species=sp)
     solver = KC.CudaSolver(net, dev, photo=True)
     gi_t, fl = torch.tensor(gi, device=dev), torch.tensor(FLOOR, device=dev)
-    print(f"{a.tier}: {torch.cuda.get_device_name(dev)}, kernel ready ({solver.wpb} warps per block), "
-          f"{time.time() - t_all:.0f} s", flush=True)
+    print(
+        f"{a.tier}: {torch.cuda.get_device_name(dev)}, kernel ready ({solver.wpb} warps per block), "
+        f"{time.time() - t_all:.0f} s",
+        flush=True,
+    )
     Y = boxes(solver, net, sp, gi, gi_t, fl, 32768 if quick else None, dev)
     blocks = make_blocks(a.tier, sp, gi)
-    qh = hashlib.sha256()                                 # the paths' truth and forcing, for paired runs
+    qh = hashlib.sha256()  # the paths' truth and forcing, for paired runs
     for b in blocks:
         for c in b.cells:
             for v in (c["T"], c["P"], c["dt"], c["x0"], c["rows"], c["truth"]):
@@ -594,7 +753,7 @@ def main():
     ticks = max(b.stride * (b.end - 1) + 1 for b in blocks)
     print(f"{len(blocks)} blocks, {S['N']:,} cells, {ticks:,} ticks; set up in {time.time() - t_all:.0f} s", flush=True)
     L = run(blocks, S, solver, ticks, READ if quick else 10 * READ, not quick, a.force, t_all, gi_t, fl, dev)
-    solver.check()                                                      # raises if any cell was below 300 K
+    solver.check()  # raises if any cell was below 300 K
     R = results(blocks, S)
     report(blocks, R, L, S)
     R.update(L, **Y, tier=np.array(a.tier), q_set=np.array(qh.hexdigest()[:16]))
@@ -606,12 +765,22 @@ def main():
     if ref is not None:
         compare(R, ref)
     tr = R["truth_block"][R["block_of"]]
-    fail = int((np.where(tr, R["worst"], 0.0) > MISS).sum() + (Y["b_worst"] > MISS).sum() + R["unfinished"].sum()
-               + R["nonfinite"].sum() + R["negative"].sum() + Y["b_unfinished"].sum() + Y["b_nonfinite"].sum()
-               + Y["fallback_boxes"][KEYS_FB.index("still_failed")] + R["fallback_loop"][KEYS_FB.index("still_failed")])
+    fail = int(
+        (np.where(tr, R["worst"], 0.0) > MISS).sum()
+        + (Y["b_worst"] > MISS).sum()
+        + R["unfinished"].sum()
+        + R["nonfinite"].sum()
+        + R["negative"].sum()
+        + Y["b_unfinished"].sum()
+        + Y["b_nonfinite"].sum()
+        + Y["fallback_boxes"][KEYS_FB.index("still_failed")]
+        + R["fallback_loop"][KEYS_FB.index("still_failed")]
+    )
     if fail:
-        sys.exit(f"FAIL: {fail} paths or boxes with a miss, unfinished calls, non-finite or negative states, or cell-calls "
-                 "still failed after the recovery")
+        sys.exit(
+            f"FAIL: {fail} paths or boxes with a miss, unfinished calls, non-finite or negative states, or cell-calls "
+            "still failed after the recovery"
+        )
 
 
 if __name__ == "__main__":

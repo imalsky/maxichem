@@ -3,6 +3,7 @@
 The classes load on first use, so importing the package does not import torch:
     VulcanNetwork (kinvulcan), CudaSolver (kincuda), ADSolver (kincuda_ad).
 """
+
 import importlib
 
 _HOME = {"VulcanNetwork": "kinvulcan", "CudaSolver": "kincuda", "ADSolver": "kincuda_ad"}

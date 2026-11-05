@@ -2,6 +2,7 @@
 in torch (rate coefficients, exact Jacobian, LU without row exchanges, the call kernel's step control), written once
 on exactly the checks' inputs. Every entry carries the sha256 of the inputs it was computed from (the network's
 reaction list and NASA-9 files, the inputs, max_steps); a check computes the same digest and refuses a mismatch."""
+
 import hashlib
 from pathlib import Path
 
@@ -28,8 +29,9 @@ def digest(*items):
 
 def netsig(network_file, nasa_dir, species):
     """Digest of a network: its reaction list file, the species order and each species' NASA-9 file."""
-    return digest(Path(network_file).read_bytes(), "|".join(species),
-                  *(Path(f"{nasa_dir}/{q}.txt").read_bytes() for q in species))
+    return digest(
+        Path(network_file).read_bytes(), "|".join(species), *(Path(f"{nasa_dir}/{q}.txt").read_bytes() for q in species)
+    )
 
 
 def load(path=None):
@@ -44,7 +46,7 @@ def load(path=None):
 def arrays(key, path=None):
     """The arrays stored directly under key: {name: array}."""
     D = load(path)
-    return {k[len(key) + 1:]: D[k] for k in D.files if k.startswith(key + "/") and k.count("/") == key.count("/") + 1}
+    return {k[len(key) + 1 :]: D[k] for k in D.files if k.startswith(key + "/") and k.count("/") == key.count("/") + 1}
 
 
 def entry(key, *inputs, path=None):

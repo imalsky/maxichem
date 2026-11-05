@@ -993,6 +993,32 @@ Data and scripts: experiments/2026-11-04_net2025 (plan.md, reviewed before the w
   coupling comparison (the C++ driver has no J yet), and the 91-tracer C48 run; the non-default atol comparison is
   done (above).
 
+### 2026-11-04 22:40 to 23:45: code audit; style pass
+- Four independent read-only audits (two of maxichem, two of the snapy branch) for leftover code, needless complexity,
+  missed speed and errors. Agreed findings (verified by the auditors in the code; not yet acted on):
+  - Errors: T, P, dt and h are not checked for shape or device (Python and C++; a short h is read and written out of
+    bounds); a row of x summing to 0 or P <= 0 passes the input screen and burns the whole step and recovery budget
+    (counted non-finite, not bad input); a cell that finishes in the recovery but fails its final guard returns
+    done = True; in the derivatives h = NaN splits the dt / h sensitivity in half; a three-species subtraction lacks
+    the fma guard its two-species twin has (latent parity risk); ADSolver.total is int32; CUDA modules are not
+    unloaded when a Python solver is deleted.
+  - Leftovers and complexity: the rate, Jacobian, error-test and right-hand-side arithmetic is repeated in the call,
+    recovery and derivative kernels (about 300 lines whose bitwise parity rests on the copies staying equal); the
+    non-aliased shared layout is unused by every network; export's meta.json is never read; ADSolver's cap is never
+    passed; explicit reverse laws serve only VULCAN-0D's venot19.
+  - Speed: the chemistry is within tens of percent of the practical limit for this algorithm on the RTX card; no 2x
+    remains; small items: a bank-conflict-free dense tail (1-5 %), a compact recovery table that fits shared memory
+    for 91 species (recovery only). snapy's fused transport: WENO5 with literal sparse stencils (7-11 % of transport),
+    earlier release of the face arrays (about -1/3 of the memory per tracer), skipping ghost rows, theta scaling folded
+    into the divergence, a wider x1 launch, two fewer divisions; together perhaps 5-30 %, about 1.4x above an
+    estimated practical limit. snapy findings also: the fused path's fallbacks are silent; its fp32 code is unused.
+  - Records: the open items "the drift survey cannot run" and "a C launcher is needed" (above) are out of date.
+- Style (the author's policy, CLAUDE.md "Style"): Ruff format and Ruff check at 120 columns on maxichem/, tests/ and
+  bench/; clang-format (Google, 120) on cpp/; three stale comments corrected (warps, cells per block, NaN pivots).
+  Proof that nothing else changed (experiments/2026-11-04_style): equal syntax trees except the seven lambdas made
+  functions, the CUDA templates' whitespace and comments, and one import order; every compiled kernel (call and
+  derivative, NCHO and 2025) bitwise equal.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.

@@ -1,6 +1,7 @@
-"""VULCAN's reaction lists (VULCAN-JAX's NCHO_photo_network.txt and the other VULCAN-format networks) and NASA-9 files, read as data
-(the thermal gas-phase part): the reaction list (id, reaction, rate coefficients) and one NASA-9 file per species (two
-ranges of 10 coefficients, split at 1000 K). The rate laws, by section (evaluated by the kernels of kincuda.py):
+"""VULCAN's reaction lists (VULCAN-JAX's NCHO_photo_network.txt and the other VULCAN-format networks) and NASA-9 files,
+read as data (the thermal gas-phase part): the reaction list (id, reaction, rate coefficients) and one NASA-9 file per
+species (two ranges of 10 coefficients, split at 1000 K). The rate laws, by section (evaluated by the kernels of
+kincuda.py):
     two-body                k = A T^B exp(-C / T)
     3-body                  k = k0 / (1 + k0 n_tot / k_inf) * F (k0, k_inf Arrhenius), both directions times n_tot
     without high-pressure   k = k0, both directions times n_tot
@@ -21,25 +22,25 @@ between "# reverse stops" and the next of those headings is refused). The photol
 reactant, its rate J n_A with J (s^-1) an input of the call (kincuda.CudaSolver with photo=True); Sp [species, branches]
 holds their products minus reactants. A branch whose reactant is not its named absorber or whose atoms do not balance is
 refused, as are two lines with the same absorber and branch index; photo_missing lists the branches' species absent from
-the species list (photo=True then refuses the network). Element counts come from the species name up to its first "_" (CH2_1 -> CH2, N_2D -> N).
-Each reaction dict holds its law: kind (2 two-body, 3 falloff, 5 low-pressure only, 6 special), A, B, C (kind 2) or
-A0, B0, C0, optional A1, B1, C1 (a second k0 term) and Ai, Bi, Ci (kinds 3, 6); optional troe (a, T3, T1, T2) with
-width "vm11" for the special law's form, eff and
-rev (the explicit reverse law, same keys); eq (the equation), names, re and pr (reactant and product names and
-indices). A photo dict holds eq, names, absorber, branch (the file's branch index), re and pr. The network object holds
-species, lo / hi (NASA-9 coefficients a1..a7, b1, b2 of the two ranges), reac, S [species, reactions] (products minus
-reactants; a thermal reaction whose atoms do not balance is refused), photo, Sp [species, branches], elements, atoms
-[species, elements], skipped and duplicates: the pairs of
-thermal entries with the same species on both sides (either orientation; a three-body entry differs from a two-body one).
-Their rates add, as in VULCAN; the shipped NCHO and SNCHO networks have none.
+the species list (photo=True then refuses the network). Element counts come from the species name up to its first "_"
+(CH2_1 -> CH2, N_2D -> N). Each reaction dict holds its law: kind (2 two-body, 3 falloff, 5 low-pressure only, 6
+special), A, B, C (kind 2) or A0, B0, C0, optional A1, B1, C1 (a second k0 term) and Ai, Bi, Ci (kinds 3, 6); optional
+troe (a, T3, T1, T2) with width "vm11" for the special law's form, eff and rev (the explicit reverse law, same keys); eq
+(the equation), names, re and pr (reactant and product names and indices). A photo dict holds eq, names, absorber,
+branch (the file's branch index), re and pr. The network object holds species, lo / hi (NASA-9 coefficients a1..a7, b1,
+b2 of the two ranges), reac, S [species, reactions] (products minus reactants; a thermal reaction whose atoms do not
+balance is refused), photo, Sp [species, branches], elements, atoms [species, elements], skipped and duplicates: the
+pairs of thermal entries with the same species on both sides (either orientation; a three-body entry differs from a
+two-body one). Their rates add, as in VULCAN; the shipped NCHO and SNCHO networks have none.
 """
+
 import ast
 import re
 
 import numpy as np
 
-KB = 1.380649e-16          # erg K^-1
-P0 = 1.0e6                 # dyn cm^-2 (1 bar)
+KB = 1.380649e-16  # erg K^-1
+P0 = 1.0e6  # dyn cm^-2 (1 bar)
 
 
 def formula(name):
@@ -51,11 +52,26 @@ def formula(name):
 
 
 # laws not in the reaction list (VULCAN's code holds them), by equation without spaces
-SPECIAL = {"OH+CH3+M->CH3OH+M": dict(A0=1.932e3, B0=-9.88, C0=7544.0, A1=5.109e-11, B1=-6.25, C1=1433.0,
-                                     Ai=1.031e-10, Bi=-0.018, Ci=-16.74, troe=(0.8145, 155.8, 1675.0, 4531.0),
-                                     width="vm11")}
-REVERSE = {"H+CH3+M->M+CH4": dict(kind=3, A0=1.40e-06, B0=0.0, C0=45700.0, Ai=2.40e+16, Bi=0.0, Ci=52790.0,
-                                  troe=(0.69, 90.0, 2210.0, 1e18))}
+SPECIAL = {
+    "OH+CH3+M->CH3OH+M": dict(
+        A0=1.932e3,
+        B0=-9.88,
+        C0=7544.0,
+        A1=5.109e-11,
+        B1=-6.25,
+        C1=1433.0,
+        Ai=1.031e-10,
+        Bi=-0.018,
+        Ci=-16.74,
+        troe=(0.8145, 155.8, 1675.0, 4531.0),
+        width="vm11",
+    )
+}
+REVERSE = {
+    "H+CH3+M->M+CH4": dict(
+        kind=3, A0=1.40e-06, B0=0.0, C0=45700.0, Ai=2.40e16, Bi=0.0, Ci=52790.0, troe=(0.69, 90.0, 2210.0, 1e18)
+    )
+}
 STOP = ("# reverse stops", "# condensation", "# photo", "# re_end")
 
 
@@ -150,15 +166,15 @@ class VulcanNetwork:
         lo, hi = [], []
         for sp in self.species:
             a = np.loadtxt(f"{nasa_dir}/{sp}.txt").flatten()
-            lo.append(np.concatenate([a[0:7], a[8:10]]))   # a1..a7, b1, b2 (the 8th entry of each range is unused)
+            lo.append(np.concatenate([a[0:7], a[8:10]]))  # a1..a7, b1, b2 (the 8th entry of each range is unused)
             hi.append(np.concatenate([a[10:17], a[18:20]]))
         self.lo, self.hi = np.array(lo), np.array(hi)
         for r in reac:
             r["re"] = [self.species.index(q) for q in r["names"][0]]
             r["pr"] = [self.species.index(q) for q in r["names"][1]]
         self.reac = reac
-        seen, self.duplicates = {}, []             # same species on both sides (either orientation, M kept): VULCAN
-        for r in reac:                             # adds the rates of such entries, and so does this reader
+        seen, self.duplicates = {}, []  # same species on both sides (either orientation, M kept): VULCAN
+        for r in reac:  # adds the rates of such entries, and so does this reader
             m = ("M",) if r["kind"] != 2 else ()
             key = tuple(sorted((tuple(sorted(r["names"][0])) + m, tuple(sorted(r["names"][1])) + m)))
             if key in seen:
