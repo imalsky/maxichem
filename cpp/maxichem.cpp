@@ -5,8 +5,10 @@
 #include <cuda.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -156,7 +158,14 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
     TORCH_CHECK(a->device() == device_ && a->scalar_type() == torch::kFloat64,
                 "maxichem: x, T, P, dt, h: float64 on the solver's device");
   TORCH_CHECK(x.dim() == 2 && x.size(1) == ns, "maxichem: x [B, ", ns, "]");
+  TORCH_CHECK(x.size(0) <= std::numeric_limits<int>::max(), "maxichem: at most 2^31 - 1 cells per call");
+  for (auto const* a : {&T, &P, &dt, &h})
+    TORCH_CHECK(a->dim() == 1 && a->size(0) == x.size(0), "maxichem: T, P, dt, h [B] with B = ", x.size(0));
   if (atol < 0) atol = default_atol;
+  TORCH_CHECK(std::isfinite(rtol) && rtol > 0 && std::isfinite(atol) && atol > 0,
+              "maxichem: rtol and atol finite and positive");
+  TORCH_CHECK(max_steps >= 1 && max_steps <= std::numeric_limits<int>::max() / rec_steps_,
+              "maxichem: max_steps from 1 to ", std::numeric_limits<int>::max() / rec_steps_);
   c10::cuda::CUDAGuard guard(device_);
   int B = static_cast<int>(x.size(0));
   x = x.contiguous();

@@ -81,11 +81,11 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
 - The tangent at exactly J = 0 is not verified at the default atol.
 - A 1,000-day sign-off of the current code. The last 1,000-day runs were on the 53-species network (2026-11-01).
 - A GH200 timing was never run. A timing package with the 2026-10-31 kernel exists in experiments/2026-10-31_gpu-core.
-- The drift survey that sets a new network's element-drift allowance no longer runs (it imports a removed module; found
-  2026-10-31).
+- Superseded 2026-11-04: the drift survey that sets a new network's element-drift allowance runs again
+  (experiments/2026-11-04_net2025/drift_survey.py; it had imported a removed module).
 - From the 2026-10-31 survey, not rechecked since: no upper-T guard; third-body efficiencies fixed to H2 (high
   metallicity would need composition weights); the reverse-rate exponent is unclipped.
-- A C or Fortran caller needs a C launcher (the kernels are built through NVRTC from Python tables).
+- Superseded 2026-11-04: a C++ caller loads an export of the solver (cpp/; bitwise the Python call).
 - Old SNCHO network, not rerun on the current one: a scrambled-start stress (2026-11-02, atol 1e-16) had local errors up
   to 1.31 dex (5 cell-calls > 0.1 dex, the clamp mechanism of "Photolysis"). A few cold, thin night-side cells (~330 K,
   3e-4 bar; 2026-11-01) changed by up to 4.8 dex for a 1e-10 relative change of the start; chemistry or numerics is open
@@ -1018,6 +1018,37 @@ Data and scripts: experiments/2026-11-04_net2025 (plan.md, reviewed before the w
   Proof that nothing else changed (experiments/2026-11-04_style): equal syntax trees except the seven lambdas made
   functions, the CUDA templates' whitespace and comments, and one import order; every compiled kernel (call and
   derivative, NCHO and 2025) bitwise equal.
+
+### 2026-11-05 00:00 to 01:15: snapy transport speed and memory; the audit's error fixes
+Approved by the author ("I agree to everything you recommend"). Plan and logs: experiments/2026-11-05_fixes. Codex was
+out of credits, so the plan was reviewed by an independent Claude reviewer instead (the Codex review is missing).
+- snapy, branch isaac/maxichem-coupling (commit 7f6ce04):
+  - WENO5 of the fused path written out as fma chains over the uniform-grid table's nonzero entries, in index order:
+    bitwise the previous fused results (state hashes of hydro_u and scalar_s equal, default and fused path, 69
+    tracers, small deck 20 steps and C64x100 5 steps; the unscaled formula and fp32 are not covered by those decks,
+    and there a zero face may change its sign). The fused kernels refuse any other table (checked once per table
+    state, in its dtype). GPU time of the WENO5 kernels at C64x100, 69 tracers: 404 -> 343 ms per step.
+  - The ratio and each face pair freed once used: peak memory 30.1-30.4 -> 26.7 GB (69 tracers), 38.2-38.4 -> 33.7 GB
+    (91). The peak stays at the lateral flux, where both face pairs coexist for the cube-sphere exchange, so the gain
+    is about 1.8 tracer arrays per tracer (0.37 -> 0.32 GB), not the 5 first estimated.
+  - Interleaved timing, idle GPU, fused path, per step: 69 tracers 1132 / 1151 -> 1051 / 1088 ms (-6 %), 91 tracers
+    1395 / 1371 -> 1310 / 1312 ms (-5 %).
+  - Every part that runs the default path while the switch is on warns once with the reason.
+  - Tests: the six fused-path CTests pass; the suite from test 928 on passes except test_straka (ncrcat missing) and
+    three restart / output tests that fail only when run four at a time (they pass alone).
+- maxichem (this commit):
+  - Inputs checked before any launch (Python and C++): shapes, dtype, device, finite positive tolerances, a step
+    budget whose recovery tries fit an int32. Python solvers take an explicit device index.
+  - Bad input also: no mole fraction above 0, n_tot <= 0, dt < 0 (counted bad_input, not stepped, done 0; it burnt
+    the whole step budget before). The test is order-free (a positive maximum, not the sum).
+  - A recomputed cell is done only if it also passes the final guard. A non-finite starting step acts as dt (also
+    -inf), in the derivatives with no sensitivity to h. The three-species rate difference rounded separately, as the
+    two-species one. ADSolver.total int64. Modules unloaded when a solver is deleted; NVRTC programs always destroyed.
+    gpu_speed sums the guard counts over every call.
+  - Checks: parity NCHO 31 of 31 (3 new cases), 2025 30 of 31 (the known chain case, same numbers); kintest quick
+    equal to the saved run; derivatives 102 of 102 on NCHO_photo, SNCHO_photo_network_2025 and CHO_photo; C++ export
+    bitwise on both networks (photo, thermal, recovery); and the six saved pre-fix cases reproduced bit for bit by
+    the new solver (x, h, steps, done, counts), so nothing changed for valid inputs.
 
 ## References (by topic)
 

@@ -16,24 +16,24 @@ Y_i = N + sum_j A_ij K_j: Y_2 = N (stage 2 reuses f(N)), Y_3 = N + 2 K_1, Y_4 = 
 explicit fma, f + (4 / h) K_1, f + (K_1 - K_2) / h and f + (K_1 - K_2 - 8/3 K_3) / h (fma(-8/3, K_3, K_1 - K_2)), so
 that every kernel that repeats the call's arithmetic (the recover kernel, kincuda_ad) gets the same bits whatever the
 compiler contracts. Step control: the first try is max(min(h, dt), 1e-12) with h the cell's step size carried from its
-last call, each try min(h, dt - t); with q_i = K_4,i / (atol + rtol max(|N_i|, |N'_i|)), err is the RMS (mean_i
-q_i^2)^(1/2), except while the call has no accepted step (t = 0), when it is max(RMS, max_i |q_i|), the worst species:
-the first try uses the step size carried from the last call, often the whole call, and the gas may have changed abruptly
-since, so one fast species' error must not hide in the mean over all species; a step is accepted when err <= 1, err is
-finite and no species is below -atol (rtol 1e-3, atol ATOL = 1e-25 by default: trace species well below 1e-20 can grow
-by many orders of magnitude, as sulfur species do in lit gas below 800 K, so the error control must follow them; atol
-also sets the guard's clamping allowance); accepted states are clamped at 0. The next step is f times the last try's, f
-= 0.9 err^(-1/3) with the same err (so a first try rejected by its worst species shrinks by that species' error; 0.1 for
-a non-finite err), within [0.2, 20] after an accepted step or a rejected try, at most 0.5 after a rejection; a rejection
-that follows a rejection (both at the same state, both err > 1, the second try shorter) instead fits err ~ h^p to the
-two tries, p = ln(err_1 / err_2) / ln(h_1 / h_2), and aims at err 0.5: f = max((0.5 / err)^(1 / min(p, 3)), 1e-4), or
-1e-4 when p <= 0.05 (after an abrupt change of the gas the error of a long try falls far more slowly than h^3, so the
-plain shrink takes many tries). A try after a rejection starts from the same state, so it reuses that try's f(N), Jn and
-w (a copy per cell in global memory) and redoes only the factorization and the stages. The call ends at t >= dt (1 -
-1e-14) or after max_steps tries, and returns the mole fractions N / sum N, the next step size, done and the accepted
-steps. The exact Jacobian J = Jn + w 1^T (Jn = d(S v)/dn, w the constant-P term) enters through an LU factor without row
-exchanges of M0 = I / (gamma h) - Jn on its sparse pattern, in a minimum-degree order, and the Sherman-Morrison formula
-for the rank-one term.
+last call (a non-finite h counts as dt), each try min(h, dt - t); with q_i = K_4,i / (atol + rtol max(|N_i|, |N'_i|)),
+err is the RMS (mean_i q_i^2)^(1/2), except while the call has no accepted step (t = 0), when it is max(RMS, max_i
+|q_i|), the worst species: the first try uses the step size carried from the last call, often the whole call, and the
+gas may have changed abruptly since, so one fast species' error must not hide in the mean over all species; a step is
+accepted when err <= 1, err is finite and no species is below -atol (rtol 1e-3, atol ATOL = 1e-25 by default: trace
+species well below 1e-20 can grow by many orders of magnitude, as sulfur species do in lit gas below 800 K, so the error
+control must follow them; atol also sets the guard's clamping allowance); accepted states are clamped at 0. The next
+step is f times the last try's, f = 0.9 err^(-1/3) with the same err (so a first try rejected by its worst species
+shrinks by that species' error; 0.1 for a non-finite err), within [0.2, 20] after an accepted step or a rejected try, at
+most 0.5 after a rejection; a rejection that follows a rejection (both at the same state, both err > 1, the second try
+shorter) instead fits err ~ h^p to the two tries, p = ln(err_1 / err_2) / ln(h_1 / h_2), and aims at err 0.5: f =
+max((0.5 / err)^(1 / min(p, 3)), 1e-4), or 1e-4 when p <= 0.05 (after an abrupt change of the gas the error of a long
+try falls far more slowly than h^3, so the plain shrink takes many tries). A try after a rejection starts from the same
+state, so it reuses that try's f(N), Jn and w (a copy per cell in global memory) and redoes only the factorization and
+the stages. The call ends at t >= dt (1 - 1e-14) or after max_steps tries, and returns the mole fractions N / sum N, the
+next step size, done and the accepted steps. The exact Jacobian J = Jn + w 1^T (Jn = d(S v)/dn, w the constant-P term)
+enters through an LU factor without row exchanges of M0 = I / (gamma h) - Jn on its sparse pattern, in a minimum-degree
+order, and the Sherman-Morrison formula for the rank-one term.
 
 Layout. W warps per cell (warps(): 2, or 4 when the shared memory holds at most 3 cells per block). The last NT =
 min(NTAIL, NS) rows and columns of the order (the trailing block, dense or nearly so after the fill; structural zeros
@@ -62,13 +62,13 @@ with W = I / (gamma h) - J formed densely (no Sherman-Morrison term; in shared m
 memory) and factored by the cell's first warp with threshold partial pivoting (a row exchange only where the diagonal
 entry is below PIVTAU = 0.1 of the column's largest; plain partial pivoting loses the trace species' accuracy at the
 scale of atol), and REC_STEPS times the tries. It applies the guard's test to its result, writes it over the call's and
-counts the cell as recovered or still failed. It returns at once when no cell is listed. Nothing is read back to the
-host during a call: the counts stay on the device (CudaSolver.fallback and check() read them). Each cell's arithmetic
-depends only on its inputs, so results are bitwise reproducible on one GPU whatever the batch order. The element test
-checks the linear solves: E^T W = E^T / (gamma h) for the element matrix E (E^T S = 0), so every stage moves the element
-budget by gamma h E^T (residual of its solve); a factor without row exchanges that has lost accuracy shows up there.
-Cells with non-finite inputs are counted, not recomputed (they come back non-finite); cells below 300 K are not stepped
-and are counted, and check() raises for them.
+counts the cell as recovered or still failed (a still-failed cell returns done = 0). It returns at once when no cell is
+listed. Nothing is read back to the host during a call: the counts stay on the device (CudaSolver.fallback and check()
+read them). Each cell's arithmetic depends only on its inputs, so results are bitwise reproducible on one GPU whatever
+the batch order. The element test checks the linear solves: E^T W = E^T / (gamma h) for the element matrix E (E^T S =
+0), so every stage moves the element budget by gamma h E^T (residual of its solve); a factor without row exchanges that
+has lost accuracy shows up there. Cells with non-finite inputs are counted, not recomputed (they come back non-finite);
+cells below 300 K are not stepped and are counted, and check() raises for them.
 
 The element-drift allowance is per network: the rounding drift of the element shares depends on the network's
 chemistry, not only on the factorization (a network can drift the same on the recover kernel's pivoted path). A
@@ -78,6 +78,8 @@ with the guard's drift test off. DRIFT is NCHO's (r 2e-9).
 """
 
 import ctypes
+import math
+import operator
 import os
 import string
 
@@ -509,7 +511,7 @@ __device__ __noinline__ double rhs(const double* Y, double* F, double* u0, doubl
       if (na == 3 || nb == 3) {
         const double a = kf[r] * n[q[0]] * n[q[1]] * n[q[2]];
         const double b = kr[r] * n[q[3]] * n[q[4]] * n[q[5]];
-        v[r] = a - b;
+        v[r] = __dsub_rn(a, b);
       } else {
         double a = kf[r] * n[q[0]], b = kr[r] * n[q[3]];
         if (na == 2) a = a * n[q[1]];
@@ -653,9 +655,11 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
     const double Tc = Ta[cell], dt = dta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
     for (int i = cl; i < NS; i += NL) N[i] = x0[(size_t)cell * NS + perm[i]];
     CSYNC(grp);
-    double p = 0.0;
-    for (int i = lane; i < NS; i += 32) p += N[i];
-$jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
+    double p = 0.0, pm = 0.0;
+    for (int i = lane; i < NS; i += 32) { p += N[i]; pm = fmax(pm, N[i]); }
+$jchk    const double ps = wsum(p);   // bad input (not stepped): a non-finite value, no x > 0, P <= 0 or dt < 0
+    const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
+                     dt >= 0.0, cold = Tc < TMIN;
     if (fin && !cold) {   // rate coefficients; three-body ones times nd
       const double lT = log(Tc), iT = 1.0 / Tc, lKT = log(KBOLTZ * Tc / P0BAR);
       double* g = v;                          // G / RT of each species
@@ -683,7 +687,8 @@ $jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && i
       }
     }
     CSYNC(grp);
-    double h = fmax(fmin(hio[cell], dt), 1e-12), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
+    const double h0 = isfinite(hio[cell]) ? hio[cell] : dt;   // a non-finite h acts as dt
+    double h = fmax(fmin(h0, dt), 1e-12), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;                          // the last try was rejected (its err pen, its size pha)
     int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;   // no step for non-finite inputs or cold gas
     while (it < max_steps && t < dt * (1.0 - 1e-14)) {
@@ -881,7 +886,7 @@ $jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && i
     for (int i = lane; i < NS; i += 32) p += N[i];
     const double s = wsum(p);
     for (int i = cl; i < NS; i += NL) xout[(size_t)cell * NS + perm[i]] = N[i] / s;
-    if (cl == 0) { hio[cell] = h; doneo[cell] = (t >= dt * (1.0 - 1e-14)) ? 1 : 0; noko[cell] = nok; }
+    if (cl == 0) { hio[cell] = h; doneo[cell] = (fin && t >= dt * (1.0 - 1e-14)) ? 1 : 0; noko[cell] = nok; }
     if (cl == 0) *nextc = gridDim.x * CPB + atomicAdd(count, 1);
     CSYNC(grp);
     cell = *nextc;
@@ -894,20 +899,23 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
                           const double* __restrict__ dta, const double* xout, int done, double nok,
                           const double* __restrict__ atoms, double atol, int cell$jarg)
 {
-  double e0[NEL], e1[NEL], p = 0.0;   // atoms of each element in the input and the new state
+  double e0[NEL], e1[NEL], p = 0.0, mx = 0.0;   // atoms of each element in the input and the new state
   #pragma unroll
   for (int e = 0; e < NEL; e++) { e0[e] = 0.0; e1[e] = 0.0; }
   bool xfin = true;
   for (int i = 0; i < NS; i++) {
     const double a = x0[(size_t)cell * NS + i], b = xout[(size_t)cell * NS + i];
     p += a;
+    mx = fmax(mx, a);
     xfin = xfin && isfinite(b);
     #pragma unroll
     for (int e = 0; e < NEL; e++) { e0[e] += atoms[i * NEL + e] * a; e1[e] += atoms[i * NEL + e] * b; }
   }
 ${jchk1}  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
   if (Tc < TMIN) return 1;
-  if (!(isfinite(p) && isfinite(Tc) && isfinite(nd) && isfinite(dta[cell]))) return 2;
+  if (!(isfinite(p) && mx > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dta[cell]) &&
+        dta[cell] >= 0.0))   // the call kernel's bad-input test (order-free: some x > 0, not the sum)
+    return 2;
   double s0 = 0.0, s1 = 0.0;
   #pragma unroll
   for (int e = 0; e < NEL; e++) { s0 += e0[e]; s1 += e1[e]; }
@@ -1048,9 +1056,11 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
     const double Tc = Ta[cell], dt = dta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
     for (int i = cl; i < NS; i += NL) N[i] = x0[(size_t)cell * NS + perm[i]];
     CSYNC(0);
-    double p = 0.0;
-    for (int i = lane; i < NS; i += 32) p += N[i];
-$jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
+    double p = 0.0, pm = 0.0;
+    for (int i = lane; i < NS; i += 32) { p += N[i]; pm = fmax(pm, N[i]); }
+$jchk    const double ps = wsum(p);   // bad input (not stepped): a non-finite value, no x > 0, P <= 0 or dt < 0
+    const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
+                     dt >= 0.0, cold = Tc < TMIN;
     if (fin && !cold) {   // rate coefficients, as the call kernel
       const double lT = log(Tc), iT = 1.0 / Tc, lKT = log(KBOLTZ * Tc / P0BAR);
       double* g = v;
@@ -1078,7 +1088,8 @@ $jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && i
       }
     }
     CSYNC(0);
-    double h = fmax(fmin(hin[cell], dt), 1e-12), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
+    const double h0 = isfinite(hin[cell]) ? hin[cell] : dt;   // a non-finite h acts as dt
+    double h = fmax(fmin(h0, dt), 1e-12), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;
     int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;
     while (it < max_steps && t < dt * (1.0 - 1e-14)) {
@@ -1194,11 +1205,11 @@ $jchk    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && i
     for (int i = lane; i < NS; i += 32) p += N[i];
     const double s = wsum(p);
     for (int i = cl; i < NS; i += NL) xout[(size_t)cell * NS + perm[i]] = N[i] / s;
-    const int dn = (t >= dt * (1.0 - 1e-14)) ? 1 : 0;
+    const int dn = (fin && t >= dt * (1.0 - 1e-14)) ? 1 : 0;
     CSYNC(0);
     if (cl == 0) {
-      hio[cell] = h; doneo[cell] = dn; noko[cell] = nok;
       const int c = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell$jpass);
+      hio[cell] = h; doneo[cell] = c ? 0 : dn; noko[cell] = nok;   // done: finished and passing the guard
       redo[cell] = c ? 2 : 1;
       atomicAdd(count + (c ? 8 : 7), 1);
       *nextq = gridDim.x + atomicAdd(count + 9, 1);
@@ -1416,17 +1427,19 @@ def compile_cubin(src, arch):
 
     prog = ctypes.c_void_p()
     chk(nv.nvrtcCreateProgram(ctypes.byref(prog), src.encode(), b"kincuda.cu", 0, None, None))
-    opts = [f"-arch=sm_{arch}".encode(), b"-std=c++17"]
-    r = nv.nvrtcCompileProgram(prog, len(opts), (ctypes.c_char_p * len(opts))(*opts))
-    n = ctypes.c_size_t()
-    chk(nv.nvrtcGetProgramLogSize(prog, ctypes.byref(n)))
-    log = ctypes.create_string_buffer(n.value)
-    chk(nv.nvrtcGetProgramLog(prog, log))
-    chk(r, log.value.decode())
-    chk(nv.nvrtcGetCUBINSize(prog, ctypes.byref(n)))
-    cubin = ctypes.create_string_buffer(n.value)
-    chk(nv.nvrtcGetCUBIN(prog, cubin))
-    chk(nv.nvrtcDestroyProgram(ctypes.byref(prog)))
+    try:
+        opts = [f"-arch=sm_{arch}".encode(), b"-std=c++17"]
+        r = nv.nvrtcCompileProgram(prog, len(opts), (ctypes.c_char_p * len(opts))(*opts))
+        n = ctypes.c_size_t()
+        chk(nv.nvrtcGetProgramLogSize(prog, ctypes.byref(n)))
+        log = ctypes.create_string_buffer(n.value)
+        chk(nv.nvrtcGetProgramLog(prog, log))
+        chk(r, log.value.decode())
+        chk(nv.nvrtcGetCUBINSize(prog, ctypes.byref(n)))
+        cubin = ctypes.create_string_buffer(n.value)
+        chk(nv.nvrtcGetCUBIN(prog, cubin))
+    finally:
+        nv.nvrtcDestroyProgram(ctypes.byref(prog))
     return cubin.raw
 
 
@@ -1445,6 +1458,48 @@ def _load(src, arch):
     for fn, name in zip(fns, (b"call", b"guard", b"recover")):
         _check(cu.cuModuleGetFunction(ctypes.byref(fn), mod, name), "function")
     return (mod, *fns)
+
+
+def _unload(dev, mods):
+    """Unload CUDA modules (handles) of a solver on its device, at deletion, after the device's work is done; errors
+    are ignored there (the process may be ending)."""
+    try:
+        with torch.cuda.device(dev):
+            torch.cuda.synchronize(dev)
+            for m in mods:
+                if m:
+                    _cuda().cuModuleUnload(m)
+    except Exception:  # a destructor must not raise
+        pass
+
+
+def device_of(device):
+    """The CUDA device with its index (a bare "cuda" means the current device)."""
+    d = torch.device(device)
+    return d if d.index is not None else torch.device(d.type, torch.cuda.current_device())
+
+
+def check_inputs(dev, ns, x, T, P, dt, h, rtol, atol, max_steps):
+    """The call's inputs, before any launch: x [B, ns] and T, P, dt, h [B], float64 on the solver's device; rtol
+    and atol finite and positive; max_steps a positive integer whose recovery tries (REC_STEPS times it) fit an
+    int32. Returns B."""
+    if x.dim() != 2 or x.shape[1] != ns:
+        raise ValueError(f"x [B, {ns}] expected, got {tuple(x.shape)}")
+    B = x.shape[0]
+    for name, a in (("x", x), ("T", T), ("P", P), ("dt", dt), ("h", h)):
+        if a.device != dev or a.dtype != torch.float64:
+            raise ValueError(f"{name}: float64 on {dev} expected, got {a.dtype} on {a.device}")
+        if name != "x" and tuple(a.shape) != (B,):
+            raise ValueError(f"{name} [{B}] expected, got {tuple(a.shape)}")
+    if not (math.isfinite(rtol) and rtol > 0.0 and math.isfinite(atol) and atol > 0.0):
+        raise ValueError(f"rtol and atol finite and positive expected, got {rtol}, {atol}")
+    try:
+        ms = operator.index(max_steps)
+    except TypeError:
+        raise ValueError(f"max_steps: an integer expected, got {max_steps!r}") from None
+    if ms < 1 or REC_STEPS * ms > 2**31 - 1:
+        raise ValueError(f"max_steps from 1 to {(2**31 - 1) // REC_STEPS} expected, got {ms}")
+    return B
 
 
 def _attr(fn, a):
@@ -1479,7 +1534,7 @@ class CudaSolver:
                 "photo=True needs a network with photolysis branches whose species are all in its species "
                 f"list (branches {len(net.photo)}, missing species {net.photo_missing})"
             )
-        self.dev = torch.device(device)
+        self.dev = device_of(device)
         self.drift = float(DRIFT if drift is None else drift)
         torch.zeros(1, device=self.dev)  # torch's context is current from here on
         prop = torch.cuda.get_device_properties(self.dev)
@@ -1590,9 +1645,7 @@ class CudaSolver:
         """The kernel, its checks and the recovery, no host sync: (x, h, done, accepted steps, flag) per cell, flag 0
         (the call's result passed the guard), 1 (recomputed, passes) or 2 (recomputed, still fails); the counts in
         self.count. J: the photolysis rates (photo=True only)."""
-        if not all(a.is_cuda and a.dtype == torch.float64 for a in (x, T, P, dt, h)) or x.shape[1] != self.ns:
-            raise ValueError(f"x [B, {self.ns}], T, P, dt, h [B]: float64 CUDA tensors")
-        B = x.shape[0]
+        B = check_inputs(self.dev, self.ns, x, T, P, dt, h, rtol, atol, max_steps)
         x, T, P, dt, h = (a.contiguous() for a in (x, T, P, dt, h))
         if not self.nj:
             if J is not None:
@@ -1691,6 +1744,9 @@ class CudaSolver:
             ],
         )
         return xo, ho, done.bool(), nok, redo
+
+    def __del__(self):
+        _unload(self.dev, [getattr(self, "_mod", None)])
 
     def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=ATOL, max_steps=4000, J=None):
         """The call: (x, h, done, accepted steps), no host sync; the counts added to self.total on the stream."""

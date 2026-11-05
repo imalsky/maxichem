@@ -287,7 +287,7 @@ __device__ __noinline__ double rhs1(const double* Y, double* F, double* u0, doub
         if (na == 3 || nb == 3) {
           const double a = kf[r] * n[q[0]] * n[q[1]] * n[q[2]];
           const double b = kr[r] * n[q[3]] * n[q[4]] * n[q[5]];
-          v[r] = a - b;
+          v[r] = __dsub_rn(a, b);
         } else {
           double a = kf[r] * n[q[0]], b = kr[r] * n[q[3]];
           if (na == 2) a = a * n[q[1]];
@@ -1069,18 +1069,21 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
   while (q < nc) {
     const int cell = DN ? list[q] : q;
     const double Tc = Ta[cell], dt = dta[cell], Pc = Pa[cell], nd = Pc / (KBOLTZ * Tc);
-    double p = 0.0;
-    for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; }
+    double p = 0.0, pm = 0.0;
+    for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; pm = fmax(pm, N[i]); }
     for (int d = 0; d < D; d++)
       for (int i = lane; i < NS; i += 32) Ng[d * NS + i] = dx0[((size_t)d * B + cell) * NS + perm[i]];
     for (int b = lane; b < NJ; b += 32) {
       const double qj = Jin[(size_t)cell * NJ + b];
       p += qj >= 0.0 ? 0.0 * qj : DNAN;
     }
-    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
+    const double ps = wsum(p);   // bad input as the call kernel's: non-finite, no x > 0, P <= 0 or dt < 0
+    const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
+                     dt >= 0.0, cold = Tc < TMIN;
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
     if (fin && !cold) rates(S, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, T, lane);
-    const double hi = hin[cell], m = fmin(hi, dt);
+    const bool hfin = isfinite(hin[cell]);                   // a non-finite h acts as dt (no sensitivity to it)
+    const double hi = hfin ? hin[cell] : dt, m = fmin(hi, dt);
     for (int d = 0; d < D; d++) {
       const size_t qd = (size_t)d * B + cell;
       const double dTc = dTa[qd], ddt = adapt ? ddta[qd] : 0.0, dhi = adapt ? dhin[qd] : 0.0;
@@ -1089,7 +1092,7 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
         rates_tan(S, dk + 2 * NR * d, Tc, nd, dTc, dlnd[d], lmc, dlm ? dlm + qd * NR : nullptr,
                   dJin ? dJin + qd * NJ : nullptr, rc, drc ? drc + (size_t)d * NR * 9 : nullptr, rf, nasa, kf, kr, cw,
                   T, lane);
-      const double md = hi < dt ? dhi : (hi > dt ? ddt : 0.5 * (dhi + ddt));
+      const double md = !hfin ? ddt : (hi < dt ? dhi : (hi > dt ? ddt : 0.5 * (dhi + ddt)));
       hd[d] = m > 1e-12 ? md : (m < 1e-12 ? 0.0 : 0.5 * md);
       tdot[d] = 0.0;
       pend[d] = 0.0;
@@ -1150,13 +1153,14 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
       for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + perm[i]] = (ng[i] - N[i] / s * sd) / s;
       if (lane == 0) dhout[(size_t)d * B + cell] = hd[d];
     }
-    const int dn = (t >= dt * (1.0 - 1e-14)) ? 1 : 0;
+    const int dn = (fin && t >= dt * (1.0 - 1e-14)) ? 1 : 0;
     if (lane == 0) { hout[cell] = h; doneo[cell] = dn; noko[cell] = nok; }
     if (DN) {                                                 // the recover kernel's test of the result
       __syncwarp();
       int bad = 0;
       if (lane == 0) {
         bad = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell$jpass);
+        if (bad) doneo[cell] = 0;                             // done: finished and passing the guard
         redo[cell] = bad ? 2 : 1;
         atomicAdd(count + (bad ? 8 : 7), 1);
       }
@@ -1582,16 +1586,19 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
     const int cell = DN ? list[q] : q;
     const double Tc = Ta[cell], dt = dta[cell], Pc = Pa[cell], nd = Pc / (KBOLTZ * Tc);
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
-    double p = 0.0;
-    for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; }
+    double p = 0.0, pm = 0.0;
+    for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; pm = fmax(pm, N[i]); }
     for (int b = lane; b < NJ; b += 32) {
       const double qj = Jin[(size_t)cell * NJ + b];
       p += qj >= 0.0 ? 0.0 * qj : DNAN;
     }
-    const bool fin = isfinite(wsum(p)) && isfinite(Tc) && isfinite(nd) && isfinite(dt), cold = Tc < TMIN;
+    const double ps = wsum(p);   // bad input as the call kernel's: non-finite, no x > 0, P <= 0 or dt < 0
+    const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
+                     dt >= 0.0, cold = Tc < TMIN;
     if (fin && !cold) rates(S, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, T, lane);
     __syncwarp();
-    const double hi = hin[cell], m0 = fmin(hi, dt), h0 = fmax(m0, 1e-12);
+    const bool hfin = isfinite(hin[cell]);                   // a non-finite h acts as dt (no sensitivity to it)
+    const double hi = hfin ? hin[cell] : dt, m0 = fmin(hi, dt), h0 = fmax(m0, 1e-12);
     double h = h0, t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;
     int na = 0;
@@ -1614,7 +1621,7 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
       gs += gx[(size_t)cell * NS + perm[i]] * N[i];
     }
     gs = wsum(gs);
-    const int dn = (t >= dt * (1.0 - 1e-14)) ? 1 : 0;
+    const int dn = (fin && t >= dt * (1.0 - 1e-14)) ? 1 : 0;
     if (lane == 0) { hout[cell] = h; doneo[cell] = dn; noko[cell] = nok; }
     bool bad = false;
     if (DN) {                                                 // the recover kernel's test of the result
@@ -1622,6 +1629,7 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
       int b = 0;
       if (lane == 0) {
         b = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell$jpass);
+        if (b) doneo[cell] = 0;                               // done: finished and passing the guard
         redo[cell] = b ? 2 : 1;
         atomicAdd(count + (b ? 8 : 7), 1);
       }
@@ -1733,7 +1741,8 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
     __syncwarp();
     // h0 = max(min(hin, dt), 1e-12)
     {
-      const double wm = m0 > 1e-12 ? 1.0 : (m0 < 1e-12 ? 0.0 : 0.5), wh = hi < dt ? 1.0 : (hi > dt ? 0.0 : 0.5);
+      const double wm = m0 > 1e-12 ? 1.0 : (m0 < 1e-12 ? 0.0 : 0.5);
+      const double wh = !hfin ? 0.0 : (hi < dt ? 1.0 : (hi > dt ? 0.0 : 0.5));
       const double mb = run ? wm * hb : 0.0;
       if (lane == 0) { ghin[cell] = wh * mb; gdt[cell] = dtb + (1.0 - wh) * mb; }
     }
@@ -1900,7 +1909,7 @@ class ADSolver:
                 "photo=True needs a network with photolysis branches whose species are all in its species "
                 f"list (branches {len(net.photo)}, missing species {net.photo_missing})"
             )
-        self.dev = torch.device(device)
+        self.dev = KC.device_of(device)
         torch.zeros(1, device=self.dev)
         prop = torch.cuda.get_device_properties(self.dev)
         fit = lambda t: (prop.shared_memory_per_block_optin - len(KC._blob(t)[0])) // (8 * KC._perc(t))  # noqa: E731
@@ -1969,15 +1978,16 @@ class ADSolver:
         ]
         self._atoms, self._didx = g(tab["atoms"]), g(tab["didx"], np.int16)
         self.count = torch.zeros(10, dtype=torch.int32, device=self.dev)
-        self.total = torch.zeros(10, dtype=torch.int32, device=self.dev)
+        self.total = torch.zeros(10, dtype=torch.int64, device=self.dev)
         self.flag = None
 
-    def _prep(self, x, T, P, dt, h, lm, rc, J, max_steps):
-        if not all(a.is_cuda and a.dtype == torch.float64 for a in (x, T, P, dt, h)) or x.shape[1] != self.ns:
-            raise ValueError(f"x [B, {self.ns}], T, P, dt, h [B]: float64 CUDA tensors")
+    def __del__(self):
+        KC._unload(self.dev, list(getattr(self, "_mod", {}).values()))
+
+    def _prep(self, x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol):
+        B = KC.check_inputs(self.dev, self.ns, x, T, P, dt, h, rtol, atol, max_steps)
         if max_steps > self.cap * self.cap or KC.REC_STEPS * max_steps > self.capr**2:
             raise ValueError(f"max_steps above {self.cap**2} (CAP^2) or the recovery's tries above {self.capr**2}")
-        B = x.shape[0]
         lm = None if lm is None else lm.contiguous()
         rc = self.rc0 if rc is None else rc.contiguous()
         if (
@@ -2057,7 +2067,7 @@ class ADSolver:
         dh [B], dlm [B, R], drc [R, 9] and dJ [B, branches] (dlm, drc, dJ optional); with a leading axis of D <= DMAX
         directions on every tangent (dx [D, B, S], dT [D, B], ..., dlm [D, B, R], drc [D, R, 9], dJ [D, B, branches])
         the D tangents share one call and come back as dx [D, B, S], dh [D, B]."""
-        B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps)
+        B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         one = dx.dim() == 2
         D = 1 if one else dx.shape[0]
         lead = () if one else (D,)
@@ -2146,7 +2156,7 @@ class ADSolver:
         """The call and the cotangents of its inputs for the cotangents gx [B, S] of x_out and gh [B] of h_out
         (optional): (x, h, done, accepted steps, dict x, T, P, dt, h, lm [B, R] (of each reaction's log multiplier),
         rc [R, 9] (of the Arrhenius columns), J [B, branches] (photo=True))."""
-        B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps)
+        B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         if (
             tuple(gx.shape) != (B, self.ns)
             or (gh is not None and tuple(gh.shape) != (B,))

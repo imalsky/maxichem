@@ -98,7 +98,8 @@ counts = solver.check()                             # guard counts; raises if a 
     It is only a first guess: the call clips it to [1e-12 s, dt], and a non-finite h acts as dt;
   - `J` [cells, branches]: photolysis rates in s^-1, one column per branch in the order of `net.photo` (each entry
     names its absorber and branch index as in the network file). Use zeros at night.
-- Outputs: the new `x`, the step size to keep, a per-cell `done` flag and the number of accepted steps.
+- Outputs: the new `x`, the step size to keep, a per-cell `done` flag (the call finished and its result passed the
+  guard) and the number of accepted steps.
 - Tolerances are arguments of every call, in Python (`rtol=1e-3, atol=1e-25`) and in the C++ caller (`rtol`, `atol`;
   a negative `atol` takes the export's default). The default atol, `kincuda.ATOL` = 1e-25 in mole fraction, follows
   trace species down to that level. A smaller atol (for example 1e-30) follows seeds of trace species further, at the
@@ -108,8 +109,9 @@ counts = solver.check()                             # guard counts; raises if a 
   the cells, so domain decomposition does not change them.
 - GCMs advect mass mixing ratios. Convert to mole fractions before the call and back after it. The chemistry conserves
   elements and mass. Keep `h` per cell between calls and in restart files.
-- A cell below 300 K, or with a non-finite x, T, P or dt, or a negative or non-finite J, is not stepped. It is counted,
-  and `check()` raises for cold cells.
+- A cell below 300 K, or with a non-finite x, T, P or dt, no mole fraction above 0, P <= 0, dt < 0, or a negative or
+  non-finite J, is not stepped (its x comes back normalized, NaN for an all-zero row, and done is 0). It is counted, and `check()` raises for cold cells. Inputs of the wrong
+  shape, dtype or device raise before any launch.
 - Not done here: radiation, transport, condensation.
 - From C++ (no Python in the time loop): `solver.export(folder)` writes the kernels (source and cubin for this GPU),
   their tables and the launch sizes; `cpp/maxichem.hpp` (`maxichem::Solver`, libtorch and the CUDA driver API) loads

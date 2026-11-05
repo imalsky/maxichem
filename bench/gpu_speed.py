@@ -6,8 +6,9 @@
 The batch: cells spread over 800-2000 K and 1e-4 to 10 bar (log-spaced), a solar-like gas (H2S = 1.41e-5 x H2 for a
 sulfur network) relaxed by one 1e10 s call. Then --calls calls of 70 s each, every call starting from the previous
 call's output (about one solver step per call, as in a GCM), first dark, then with J = 1e-4 s^-1 on every branch above
-0.03 bar. A first call of each kind is not timed. Prints one JSON line: the GPU, the batch, and per kind the median
-us per cell-call, the mean solver steps per call and the guard counts.
+0.03 bar. A first call of each kind is not timed. Prints one JSON line: the GPU, the batch, the relaxation's
+unfinished cells and guard counts, and per kind the median us per cell-call, the mean solver steps per call, and the
+unfinished cells and guard counts summed over every call of that kind.
 """
 
 import argparse
@@ -51,7 +52,8 @@ res = dict(
     network=a.network,
     species=len(sp),
     cells=B,
-    relaxed_unfinished=int((~done.bool()).sum()),
+    relaxed_unfinished=int(torch.logical_not(done.bool()).sum()),
+    relax_counts=solver.fallback,
 )
 kinds = [("dark", J0)]
 if photo:
@@ -60,7 +62,7 @@ if photo:
     kinds.append(("lit", J1))
 for kind, J in kinds:
     xc, hc, dt = x.clone(), h.clone(), torch.full_like(T, 70.0)
-    times, steps = [], []
+    times, steps, unfinished, counts = [], [], 0, {}
     for c in range(a.calls + 1):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -69,10 +71,13 @@ for kind, J in kinds:
         if c:
             times.append(time.perf_counter() - t0)
             steps.append(float(nok.mean()))
+        unfinished += int(torch.logical_not(d.bool()).sum())  # every call, the untimed first one too
+        for q, v in solver.fallback.items():
+            counts[q] = counts.get(q, 0) + v
     res[kind] = dict(
         us_per_cell_call=1e6 * statistics.median(times) / B,
         steps_per_call=statistics.mean(steps),
-        unfinished=int((~d.bool()).sum()),
-        counts=solver.fallback,
+        unfinished=unfinished,
+        counts=counts,
     )
 print(json.dumps(res))

@@ -461,5 +461,26 @@ det = all(torch.equal(a1[k], a2[k]) for k in a1)
 pm = all(torch.equal(a1[k][perm], a3[k]) for k in a1 if k != "rc")
 verdict("determinism", det and pm, f"same call twice bitwise: {det}; cells permuted, per-cell cotangents bitwise: {pm}")
 
+# a non-finite starting step acts as dt with no sensitivity to it: h = NaN gives bitwise the h = 2 dt call (min(h, dt)
+# = dt there too, its tangent taken from dt alone)
+tanh = (*tan[:4], d * rn(D, B))
+j2 = ad.jvp(x, T, P, d, 2.0 * d, *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
+v2 = ad.vjp(x, T, P, d, 2.0 * d, c, lm=lm, J=J)
+nonfin = {}
+for q in (float("nan"), float("-inf")):
+    jn = ad.jvp(x, T, P, d, torch.full_like(T, q), *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
+    vn = ad.vjp(x, T, P, d, torch.full_like(T, q), c, lm=lm, J=J)
+    nonfin[str(q)] = (
+        all(torch.equal(a, b) for a, b in zip(jn, j2))
+        and all(torch.equal(a, b) for a, b in zip(vn[:4], v2[:4]))
+        and all(torch.equal(vn[4][k], v2[4][k]) for k in vn[4])
+        and bool((vn[4]["h"] == 0).all())
+    )
+verdict(
+    "non-finite starting step",
+    all(nonfin.values()),
+    f"h = NaN / -inf bitwise the h = 2 dt call (tangents, cotangents; h cotangent zero): {nonfin}",
+)
+
 print(f"\n{NAME}: {sum(results)} of {len(results)} passed", flush=True)
 sys.exit(0 if all(results) else 1)

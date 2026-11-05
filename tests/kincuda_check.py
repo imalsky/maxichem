@@ -29,7 +29,10 @@ advances its own state from the same inputs.
     DRIFT set to 0, the cells whose element shares move by more than the clamping allowance are recomputed on the
     device: within 1e-6 dex of the reference call with the recovery's tries (REC_STEPS x max_steps; the reference is
     not bitwise the kernel: its sums run in another order), counted as recovered or still failed, the other cells
-    bitwise those of a solver that flags none; a cell below 300 K is counted and check() raises.
+    bitwise those of a solver that flags none (a still-failed cell returns done = 0); a cell below 300 K is counted and
+    check() raises. An all-zero x row, P = 0 and dt < 0 are counted as bad input and not done, the other cells bitwise
+    unchanged; a starting step
+    h = NaN, -inf or +inf gives bitwise the h = dt call; inputs of the wrong shape, device, dtype or range raise.
 (c) Batch size and order: 128 cells and one cell alone bitwise the same cells inside 8,192, and 8,192 cells in a
     permuted order bitwise the same per cell (x, h, done, steps, flag).
     python tests/kincuda_check.py <VULCAN-JAX thermo folder: NCHO_photo_network.txt, NASA9/>
@@ -379,7 +382,7 @@ def main():
     kz = KC.CudaSolver(net, dev, drift=0.0)  # every rounding change of an element share is flagged (at atol
     x0, T, P = yardstick(4096, 2, 1.0)  # 1e-18: the default's clamping allowance covers rounding drift)
     args = (x0, T, P, full(4096, 500.0), full(4096, 1e-10))
-    y, _, _, _, flag = kz.launch(*args, atol=1e-18)
+    y, _, dz, _, flag = kz.launch(*args, atol=1e-18)
     fb = dict(kz.fallback)
     yk, _, _, _, flag0 = kc.launch(*args, atol=1e-18)  # the same call, nothing flagged
     i, o = (flag > 0).nonzero().squeeze(1), flag == 0
@@ -392,12 +395,13 @@ def main():
         and e <= TOL
         and int(flag0.sum()) == 0
         and bool(torch.equal(y[o], yk[o]))
+        and not bool(dz[flag == 2].any())
     )
     verdict(
         "guard: element drift (allowance 0)",
         ok,
         f"counts {fb}; the flagged cells recomputed on the device ({e:.1e} dex from the reference call; still "
-        f"failing an allowance of 0 is expected), the others bitwise the kernel's result",
+        f"failing an allowance of 0 is expected, and those return done = 0), the others bitwise the kernel's result",
     )
 
     T2 = T.clone()
@@ -412,6 +416,58 @@ def main():
             kc.fallback["cold"] == 1 and not bool(d[0]),
             f"cell 0 not stepped; ValueError: {e}",
         )
+
+    B = 64  # bad inputs beyond non-finite values: counted, not stepped, never done, the other cells unchanged
+    x0, T, P = yardstick(B, 1, 0.0)
+    xb, Pb, dtb, hb = x0.clone(), P.clone(), full(B, 50.0), full(B, 1e-10)
+    xb[3] = 0.0
+    Pb[5] = 0.0
+    dtb[9] = -1.0
+    y, _, d, _ = kc(xb, T, Pb, dtb, hb)
+    fb = dict(kc.fallback)
+    good = torch.ones(B, dtype=torch.bool, device=dev)
+    good[[3, 5, 9]] = False
+    yr, _, dr, _ = kc(xb[good], T[good], Pb[good], dtb[good], hb[good])
+    ok = (
+        fb["bad_input"] == 3
+        and fb["nonfinite"] == 0
+        and fb["recomputed"] == 0
+        and not bool(d[[3, 5, 9]].any())
+        and bool(torch.equal(y[good], yr))
+        and bool(torch.equal(d[good], dr))
+    )
+    verdict(
+        "guard: all-zero x row, P = 0, dt < 0",
+        ok,
+        f"counts {fb}; rows 3, 5, 9 counted as bad input and not done; the other {B - 3} cells bitwise those of a "
+        f"batch without them",
+    )
+
+    x0, T, P = yardstick(B, 2, 1.0)  # a non-finite starting step acts as dt
+    dt = full(B, 50.0)
+    ref = kc(x0, T, P, dt, dt.clone())
+    same = [
+        all(torch.equal(a, b) for a, b in zip(kc(x0, T, P, dt, full(B, q)), ref)) for q in (np.nan, -np.inf, np.inf)
+    ]
+    verdict("non-finite starting step", all(same), f"h = NaN, -inf, +inf bitwise the h = dt call: {same}")
+
+    wrong = {  # inputs of the wrong shape, device, dtype or range raise before any launch
+        "h one short": lambda: kc(x0, T, P, dt, dt[:-1]),
+        "T on the CPU": lambda: kc(x0, T.cpu(), P, dt, dt),
+        "P float32": lambda: kc(x0, T, P.float(), dt, dt),
+        "x one species short": lambda: kc(x0[:, :-1], T, P, dt, dt),
+        "rtol 0": lambda: kc(x0, T, P, dt, dt, rtol=0.0),
+        "atol NaN": lambda: kc(x0, T, P, dt, dt, atol=float("nan")),
+        "max_steps 0": lambda: kc(x0, T, P, dt, dt, max_steps=0),
+    }
+    missed = []
+    for label, call in wrong.items():
+        try:
+            call()
+            missed.append(label)
+        except ValueError:
+            pass
+    verdict("input checks", not missed, f"{len(wrong) - len(missed)} of {len(wrong)} raise; no error: {missed}")
 
     # (c) batch size and order
     x0, T, P = yardstick(8192, 7, 1.0)
