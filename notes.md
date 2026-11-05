@@ -1020,8 +1020,8 @@ Data and scripts: experiments/2026-11-04_net2025 (plan.md, reviewed before the w
   derivative, NCHO and 2025) bitwise equal.
 
 ### 2026-11-05 00:00 to 01:15: snapy transport speed and memory; the audit's error fixes
-Approved by the author ("I agree to everything you recommend"). Plan and logs: experiments/2026-11-05_fixes. Codex was
-out of credits, so the plan was reviewed by an independent Claude reviewer instead (the Codex review is missing).
+Approved by the author ("I agree to everything you recommend"). Plan and logs: experiments/2026-11-05_fixes. The plan
+had one independent review.
 - snapy, branch isaac/maxichem-coupling (commit 7f6ce04):
   - WENO5 of the fused path written out as fma chains over the uniform-grid table's nonzero entries, in index order:
     bitwise the previous fused results (state hashes of hydro_u and scalar_s equal, default and fused path, 69
@@ -1049,6 +1049,99 @@ out of credits, so the plan was reviewed by an independent Claude reviewer inste
     equal to the saved run; derivatives 102 of 102 on NCHO_photo, SNCHO_photo_network_2025 and CHO_photo; C++ export
     bitwise on both networks (photo, thermal, recovery); and the six saved pre-fix cases reproduced bit for bit by
     the new solver (x, h, steps, done, counts), so nothing changed for valid inputs.
+
+### 2026-11-05 01:15 to 04:25: second audit; end-to-end tests with known answers
+Data and scripts: experiments/2026-11-05_e2e (plan.md; findings.md lists every bug; results.jsonl in R/, T/, C/, M/;
+audit_round2.md). Every test's answer was known independently of the code under test (analytic, a conservation law,
+VULCAN-0D, an independent equilibrium code, an exact symmetry), with the threshold set before the run.
+- Second audit (errors, memory, speed; read and measured, not acted on except the driver fixes below; details in
+  audit_round2.md). maxichem: a negative mole fraction is not screened (a species below -atol that nothing destroys
+  can burn the whole step budget); the Python solvers do not make their device current; a failed constructor prints
+  an error at deletion; dt = 0 resets h. Solver memory is inputs and outputs only (scratch 10-30 MB). snapy memory:
+  the C64 / 91-tracer peak (33.7 GB) sits at the dim-2 lateral flux with 12.9 tracer arrays per tracer; four changes
+  could bring it to about 8 (estimate). snapy speed: tracer work is 712 of 1,039 ms per step at C64 / 69 tracers;
+  seven changes are estimated to save about 200 ms; no error found in the fused path.
+- Five physics bugs, all in the experiment drivers (gcm_chem.py, gcm_box.py, box.cpp and its Python twin), fixed:
+  1. The heating was added after each RK3 stage at the full dt: 11/6 of the intended heating per step. Now
+     heat dt wght2(stage). An energy-closure test (snapy's E plus its corrected potential energy, heated minus
+     unheated) gives 1.8333334 before and 0.99999999 after, on the sphere and the box.
+  2. Chemistry and radiation read T and P from hydro_w, one RK stage old. Now rebuilt from hydro_u after each step;
+     equal bit for bit to snapy's own stage-start primitives.
+  3. The grey longwave band was 10-1e4 cm^-1, which holds 98.7 % of sigma T^4 at 1500 K and 83.9 % at 2500 K (a
+     radiative-equilibrium column came out 6.2 % hotter at depth than Guillot 2010). Now 1-1e5 cm^-1 (1.6-1.9 %, the
+     two-stream closure difference).
+  4. The Python Mesh.exchange_ghost_zones(vars) applies the conserved type to every array, so at cubed-sphere seams
+     tracer rows 2 and 3 (H2O and H in both networks' order) were rotated as momentum: seam ghosts off by up to 295 %,
+     a constant mixture drifting up to 1.2e-4, a blob crossing a seam split by 1.3e-3 of its peak after 50 steps.
+     Mass stayed conserved and the box was not affected. Now one typed call per kind (hydro_u conserved, scalar_s
+     scalar), then scalar_r = scalar_s / rho: a constant mixture stays to 1.9e-14 after 300 steps (C48, default and
+     fused paths).
+  5. After the driver writes the interior (heating, chemistry), the top and bottom wall ghosts stayed as Mesh.forward
+     left them: energy leak 5e-9 of the heating, 2.8e-5 per O(1) composition change in the top cells. Now the walls
+     are re-mirrored as snapy's reflecting rule does; right after Mesh.forward the whole refresh changes nothing, bit
+     for bit. Also the dump's meridional wind was v_theta (southward) labelled northward (output only).
+  Rules for the C++ coupling: add a frozen source as dt wght2(stage) per stage; exchange scalars with the scalar
+  type; re-apply the walls after writing between steps.
+- Passed: grid volumes and areas (4e-16); mean of max(0, cos z) = 1/4 at second order; the drivers' lon/lat equal
+  snapy's cell positions (all 12 seams); Coriolis axis and sense; shortwave beam F mu exp(-tau/mu) to 1.7e-13 and
+  the global absorbed power F pi r^2 (1 + 8e-5 at C48); longwave OLR = pi B of an isothermal thick column (2e-16);
+  q dt in the energy row raises T by q dt / (rho cv) (1.5e-13); a resting atmosphere stays at 5.5e-7 m/s after one
+  rotation (C24); gas and tracer mass drift -5.55e-17 per step (the RK3 weights' rounding); identical tracer rows
+  stay identical bit for bit; fused = default bit for bit on every run; the Python and C++ box drivers bitwise
+  equal after every fix; flow bitwise unchanged with or without chemistry.
+- Chemistry against independent answers: the coupled box at rest (every cell a 0-D box, unrelaxed start, 1 model
+  day) vs VULCAN-0D per layer: NCHO_photo dark worst 1.6e-4 dex, SNCHO_photo_network_2025 lit (J of the WASP-39b
+  table) 6.8e-4 dex, 0 misses, while the gas moved up to 5 dex; the sphere at rest gives every column of all six
+  panels the same chemistry to 3.7e-9. Equilibrium after long calls vs an independent Gibbs minimisation on the same
+  NASA-9 data: 6e-4 dex on both networks (cells at 1000-1400 K need 1e13 s or more to settle). Single reactions vs
+  Radau 2.2e-3 dex; photolysis alone vs the exact solution 0.009 / 0.019 dex (the solver tolerance); elements over
+  2,000 lit calls 1.7e-13; --jref photolysis mapping exact; to_x / to_q keep mass and elements to 7e-16.
+- Data: NASA9/HNO3.txt holds three sets (below 200 K, 200-1000, 1000-6000 K) and every reader takes the first two
+  (HNO3 equilibrium constant off by 7.6 dex at 999 K). Fixed in VULCAN-JAX (commit 01ce3b8, the below-200 K set
+  dropped); only NCHO_full_photo and SNCHO_DMS carry HNO3, so neither default network changes. TiH (TiSNCHO only)
+  has a low-T set with negative Cp.
+- Observations, not bugs: FastChem's data differ from NASA-9 by 0.1 dex for CH4 and HCN; the drivers' start (one
+  1e10 s call) is not equilibrium below about 1400 K; --jref gives cells below the table's 0.945 bar layer that
+  layer's J; the longwave cannot damp a 2-dz temperature checkerboard (level T are means of layers).
+- C48 hot Jupiter, one coupled day with fixes 1-4 vs the old run (same steps, 69 tracers, fused): T at 0.18 bar,
+  day mean 1645 -> 1611 K, night 1306 -> 1355 K, maximum 1854 -> 1760 K; equatorial zonal wind at 0.1 bar 1018 ->
+  780 m/s; CH4 at 0.1 bar, night median 2.6e-7 -> 6.1e-7. Per step: dynamics and tracers 0.93 s, chemistry 0.67 s
+  (solver 0.42 us per cell-call, 1.26 steps per call); peak 17.5 GB allocated (24.9 before the frees). No failed
+  cell, guard counts 0, budgets at round-off. Earlier runs on these drivers (the C48 structure day, the C64 day,
+  the 3-day sphere run, the box runs) carry bugs 1-3 (and 4 on the sphere); timing and memory are unaffected.
+
+### 2026-11-05 04:20 to 14:50: 10 model days with and without chemistry; three solver fixes
+Data and figures: experiments/2026-11-05_gcm10d (figures/, runs/compare_10d.json), experiments/2026-11-05_threefixes.
+- C48x100 hot Jupiter, every driver fix above, one spin-up (500 CFL steps), 12,343 steps of 70 s, dark: A with 69
+  NCHO_photo tracers and chemistry every step; B the same tracers carried by the flow only. No failed cell, guard counts
+  0, 46,873 negative entries clamped (worst -1.3e-20), budgets 5e-16 (transport) and 1.2e-15 (chemistry) per step, total
+  -7e-13 (the RK3 weights' rounding). 5 h 28 min and 3 h 9 min; per step 0.95 s flow and tracers, 0.63 s chemistry (0.39 us
+  per cell-call, 1.16 steps per call, at most 110); peak 17.4 GB. Smallest CFL step 131 s.
+- Known answers: the flow is bitwise the same in A and B at all six dumps (chemistry has no feedback here); the CFL step
+  is equal at all 12,343 steps; C/O, N/O, C/H and He/H stay uniform to 6e-4 dex against a preset 0.01. The C++ and Python
+  box drivers stay bitwise equal after the last ghost change.
+- Day 10, 0.1 bar, day / night medians with chemistry against without: CH4 4.8e-9 / 2.0e-8 against 4.8e-7 / 7.9e-7, H
+  2.3e-4 / 1.3e-6 against 9.4e-5 / 7.8e-5, NH3 8.7e-8 / 1.7e-7 against 1.9e-7 / 2.6e-7; H2O, CO and N2 at most 0.01 dex
+  apart at all five levels; at 50 bar nothing beyond 0.04 dex. Against an independent Gibbs minimisation: within 0.04
+  dex at 10 bar and below; aloft NH3 and HCN sit above equilibrium (median 0.4-0.8 and 0.6-1.3 dex), night-side CH4 up
+  to 5.6 dex below, CO up to 0.61 dex above in the coldest cell (712 K, 0.01 bar). The atmosphere is young: within about
+  15 K of the 1,500 K start at 10 bar. Equatorial wind at 0.1 bar 780 m/s on day 1, 1,725 on day 6, 1,447 on day 10.
+- A group review of the heating confirmed the stage weights and the longwave band, and measured that heating after the
+  vertical implicit solve departs from heating inside it as the acoustic Courant number grows. One column under the
+  deck's frozen substellar heating for 6 h (research hook, not in the branch): the two differ by 0.2 % in the energy
+  response and 0.14 K rms at Courant 3.4 (this deck's 70 s step), 0.7 % and 0.49 K at 14, 1.4 % and 0.92 K at 27, 3.5 % and
+  2.0 K at 53; at 106 the outside form stops with a redo request and the inside form runs.
+- The "zigzag" (second difference of T up to 110 K at day 10, 0.01 bar) is not a layer-to-layer pattern: an alternating
+  fit over 6 levels holds at most 1e-4 of the windows, at most 6 K. The large values are sharp fronts; 83-99 % of the
+  cells above 10 K in the top 0.1 bar have Ri < 1/4, with winds up to Mach 1.9 (Fromang et al. 2016 report shear
+  instabilities steepening into weak shocks at a few mbar).
+- maxichem (this commit): a negative mole fraction is bad input in the call, recover, guard and derivative kernels;
+  the Python solvers make their device current around module loads and launches (not exercised: it needs two visible
+  GPUs); a constructor that fails no longer prints an error at deletion, and a partial setup unloads its modules.
+  Checks: parity NCHO 32 of 32, 2025 31 of 32 (the known chain case, same numbers); kintest quick unchanged; derivatives
+  104 of 104 on NCHO_photo, SNCHO_photo_network_2025 and CHO_photo; C++ export bitwise on both networks; the pre-fix cases
+  reproduced bit for bit. An independent review found no logic error.
+- VULCAN-JAX: the HNO3 NASA-9 fix is pushed (normal tier 324 passed, 0 failed; CI green).
 
 ## References (by topic)
 

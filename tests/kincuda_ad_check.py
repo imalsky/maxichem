@@ -29,11 +29,14 @@ lm = 0.
 (d) recovered cells (max_steps 3): primal and flags; dot products as (c) with every class; the rc cotangent of a batch
     of the recovered cells alone; finite derivatives on flags 0 / 1, NaN on flag 2 (state and h).
 (e) the rc batch dot product (relative 1e-7: a sum over cells, reactions and columns), its photolysis rows zero;
-    several directions in one call bitwise; determinism.
+    several directions in one call bitwise; determinism. A negative x is bad input in both kernels; a constructor
+    that fails early leaves no error at deletion.
 Exit status 1 when any case fails.
     python tests/kincuda_ad_check.py [network stem or file in VULCAN_THERMO, default NCHO_photo]"""
 
+import gc
 import sys
+import types
 
 import numpy as np
 import torch
@@ -481,6 +484,36 @@ verdict(
     all(nonfin.values()),
     f"h = NaN / -inf bitwise the h = 2 dt call (tangents, cotangents; h cotangent zero): {nonfin}",
 )
+
+# a negative mole fraction is bad input: counted, not stepped, not done; the other cells bitwise unchanged
+xneg = x.clone()
+xneg[0, 0] = -1e-3
+jb = ad.jvp(xneg, T, P, d, 2.0 * d, *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
+cj = ad.status
+vb = ad.vjp(xneg, T, P, d, 2.0 * d, c, lm=lm, J=J)
+cv = ad.status
+negok = (
+    cj["bad_input"] == 1
+    and cv["bad_input"] == 1
+    and not bool(jb[2][0])
+    and not bool(vb[2][0])
+    and all(torch.equal(a[1:], b[1:]) for a, b in zip(jb[:4], j2[:4]))
+    and all(torch.equal(a[1:], b[1:]) for a, b in zip(vb[:4], v2[:4]))
+    and torch.equal(jb[4][:, 1:], j2[4][:, 1:])  # tangents [D, B, S], [D, B]
+    and torch.equal(jb[5][:, 1:], j2[5][:, 1:])
+    and all(torch.equal(vb[4][k][1:], v2[4][k][1:]) for k in vb[4] if k != "rc")  # rc sums over the cells
+)
+verdict("negative x", negok, f"jvp {cj}; vjp {cv}; cell 0 not done, the others bitwise the valid batch's")
+
+seen = []  # a constructor that fails before it loads anything: nothing to unload, no error at deletion
+hook, sys.unraisablehook = sys.unraisablehook, seen.append
+try:
+    KA.ADSolver(types.SimpleNamespace(photo=[], photo_missing=[]), dev, photo=True)
+except ValueError:
+    pass
+gc.collect()
+sys.unraisablehook = hook
+verdict("failed constructor", not seen, f"errors at deletion: {len(seen)}")
 
 print(f"\n{NAME}: {sum(results)} of {len(results)} passed", flush=True)
 sys.exit(0 if all(results) else 1)

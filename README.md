@@ -109,8 +109,9 @@ counts = solver.check()                             # guard counts; raises if a 
   the cells, so domain decomposition does not change them.
 - GCMs advect mass mixing ratios. Convert to mole fractions before the call and back after it. The chemistry conserves
   elements and mass. Keep `h` per cell between calls and in restart files.
-- A cell below 300 K, or with a non-finite x, T, P or dt, no mole fraction above 0, P <= 0, dt < 0, or a negative or
-  non-finite J, is not stepped (its x comes back normalized, NaN for an all-zero row, and done is 0). It is counted, and `check()` raises for cold cells. Inputs of the wrong
+- A cell below 300 K, or with a non-finite x, T, P or dt, a negative mole fraction (clamp at 0 before the call), no
+  mole fraction above 0, P <= 0, dt < 0, or a negative or non-finite J, is not stepped (its x comes back divided by
+  its sum, non-finite if the sum is 0, and done is 0). It is counted, and `check()` raises for cold cells. Inputs of the wrong
   shape, dtype or device raise before any launch.
 - Not done here: radiation, transport, condensation.
 - From C++ (no Python in the time loop): `solver.export(folder)` writes the kernels (source and cubin for this GPU),

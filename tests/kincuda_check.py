@@ -30,9 +30,10 @@ advances its own state from the same inputs.
     device: within 1e-6 dex of the reference call with the recovery's tries (REC_STEPS x max_steps; the reference is
     not bitwise the kernel: its sums run in another order), counted as recovered or still failed, the other cells
     bitwise those of a solver that flags none (a still-failed cell returns done = 0); a cell below 300 K is counted and
-    check() raises. An all-zero x row, P = 0 and dt < 0 are counted as bad input and not done, the other cells bitwise
-    unchanged; a starting step
-    h = NaN, -inf or +inf gives bitwise the h = dt call; inputs of the wrong shape, device, dtype or range raise.
+    check() raises. An all-zero x row, a negative x, P = 0 and dt < 0 are counted as bad input and not done, the other
+    cells bitwise unchanged; a starting step
+    h = NaN, -inf or +inf gives bitwise the h = dt call; inputs of the wrong shape, device, dtype or range raise; a
+    constructor that fails early leaves no error at deletion.
 (c) Batch size and order: 128 cells and one cell alone bitwise the same cells inside 8,192, and 8,192 cells in a
     permuted order bitwise the same per cell (x, h, done, steps, flag).
     python tests/kincuda_check.py <VULCAN-JAX thermo folder: NCHO_photo_network.txt, NASA9/>
@@ -40,8 +41,10 @@ advances its own state from the same inputs.
 (about 1 min each on an idle GPU). Exit 0 = every case PASS."""
 
 import argparse
+import gc
 import sys
 import time
+import types
 
 import libref as LR  # noqa: E402
 import numpy as np
@@ -421,25 +424,26 @@ def main():
     x0, T, P = yardstick(B, 1, 0.0)
     xb, Pb, dtb, hb = x0.clone(), P.clone(), full(B, 50.0), full(B, 1e-10)
     xb[3] = 0.0
+    xb[7, 0] = -1e-3
     Pb[5] = 0.0
     dtb[9] = -1.0
     y, _, d, _ = kc(xb, T, Pb, dtb, hb)
     fb = dict(kc.fallback)
     good = torch.ones(B, dtype=torch.bool, device=dev)
-    good[[3, 5, 9]] = False
+    good[[3, 5, 7, 9]] = False
     yr, _, dr, _ = kc(xb[good], T[good], Pb[good], dtb[good], hb[good])
     ok = (
-        fb["bad_input"] == 3
+        fb["bad_input"] == 4
         and fb["nonfinite"] == 0
         and fb["recomputed"] == 0
-        and not bool(d[[3, 5, 9]].any())
+        and not bool(d[[3, 5, 7, 9]].any())
         and bool(torch.equal(y[good], yr))
         and bool(torch.equal(d[good], dr))
     )
     verdict(
-        "guard: all-zero x row, P = 0, dt < 0",
+        "guard: all-zero x row, negative x, P = 0, dt < 0",
         ok,
-        f"counts {fb}; rows 3, 5, 9 counted as bad input and not done; the other {B - 3} cells bitwise those of a "
+        f"counts {fb}; rows 3, 5, 7, 9 counted as bad input and not done; the other {B - 4} cells bitwise those of a "
         f"batch without them",
     )
 
@@ -468,6 +472,16 @@ def main():
         except ValueError:
             pass
     verdict("input checks", not missed, f"{len(wrong) - len(missed)} of {len(wrong)} raise; no error: {missed}")
+
+    seen = []  # a constructor that fails before it loads anything: nothing to unload, no error at deletion
+    hook, sys.unraisablehook = sys.unraisablehook, seen.append
+    try:
+        KC.CudaSolver(types.SimpleNamespace(photo=[], photo_missing=[]), dev, photo=True)
+    except ValueError:
+        pass
+    gc.collect()
+    sys.unraisablehook = hook
+    verdict("failed constructor", not seen, f"errors at deletion: {len(seen)}")
 
     # (c) batch size and order
     x0, T, P = yardstick(8192, 7, 1.0)

@@ -249,7 +249,6 @@ _SRC_AD = r"""
 #define PERWA $perwa
 #define CAP $cap
 #define CAPR (2 * CAP)                         // attempts stored per recovered cell (REC_STEPS x max_steps <= CAPR^2)
-#define DNAN __longlong_as_double(0x7ff8000000000000ll)   // derivatives of a cell still failed after the recovery
 #define DMAX $dmax
 #define REC (NS + 6)                           // a stored attempt: N, h, t, accepted, then the previous attempt's
                                                // error, size and rejection (the step control's history)
@@ -1070,14 +1069,18 @@ template <bool DN> __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo
     const int cell = DN ? list[q] : q;
     const double Tc = Ta[cell], dt = dta[cell], Pc = Pa[cell], nd = Pc / (KBOLTZ * Tc);
     double p = 0.0, pm = 0.0;
-    for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; pm = fmax(pm, N[i]); }
+    for (int i = lane; i < NS; i += 32) {
+      N[i] = x0[(size_t)cell * NS + perm[i]];
+      p += N[i] >= 0.0 ? N[i] : DNAN;
+      pm = fmax(pm, N[i]);
+    }
     for (int d = 0; d < D; d++)
       for (int i = lane; i < NS; i += 32) Ng[d * NS + i] = dx0[((size_t)d * B + cell) * NS + perm[i]];
     for (int b = lane; b < NJ; b += 32) {
       const double qj = Jin[(size_t)cell * NJ + b];
       p += qj >= 0.0 ? 0.0 * qj : DNAN;
     }
-    const double ps = wsum(p);   // bad input as the call kernel's: non-finite, no x > 0, P <= 0 or dt < 0
+    const double ps = wsum(p);   // bad input as the call kernel's: non-finite, x < 0, no x > 0, P <= 0 or dt < 0
     const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
                      dt >= 0.0, cold = Tc < TMIN;
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
@@ -1587,12 +1590,16 @@ template <bool DN> __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo
     const double Tc = Ta[cell], dt = dta[cell], Pc = Pa[cell], nd = Pc / (KBOLTZ * Tc);
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
     double p = 0.0, pm = 0.0;
-    for (int i = lane; i < NS; i += 32) { N[i] = x0[(size_t)cell * NS + perm[i]]; p += N[i]; pm = fmax(pm, N[i]); }
+    for (int i = lane; i < NS; i += 32) {
+      N[i] = x0[(size_t)cell * NS + perm[i]];
+      p += N[i] >= 0.0 ? N[i] : DNAN;
+      pm = fmax(pm, N[i]);
+    }
     for (int b = lane; b < NJ; b += 32) {
       const double qj = Jin[(size_t)cell * NJ + b];
       p += qj >= 0.0 ? 0.0 * qj : DNAN;
     }
-    const double ps = wsum(p);   // bad input as the call kernel's: non-finite, no x > 0, P <= 0 or dt < 0
+    const double ps = wsum(p);   // bad input as the call kernel's: non-finite, x < 0, no x > 0, P <= 0 or dt < 0
     const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
                      dt >= 0.0, cold = Tc < TMIN;
     if (fin && !cold) rates(S, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, T, lane);
@@ -1910,6 +1917,11 @@ class ADSolver:
                 f"list (branches {len(net.photo)}, missing species {net.photo_missing})"
             )
         self.dev = KC.device_of(device)
+        self._setup(net, cap, drift, photo)
+
+    @KC.on_device
+    def _setup(self, net, cap, drift, photo):
+        """The kernels and their tables on the solver's device."""
         torch.zeros(1, device=self.dev)
         prop = torch.cuda.get_device_properties(self.dev)
         fit = lambda t: (prop.shared_memory_per_block_optin - len(KC._blob(t)[0])) // (8 * KC._perc(t))  # noqa: E731
@@ -1982,7 +1994,8 @@ class ADSolver:
         self.flag = None
 
     def __del__(self):
-        KC._unload(self.dev, list(getattr(self, "_mod", {}).values()))
+        if hasattr(self, "_mod"):  # a constructor that failed early loaded nothing
+            KC._unload(self.dev, list(self._mod.values()))
 
     def _prep(self, x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol):
         B = KC.check_inputs(self.dev, self.ns, x, T, P, dt, h, rtol, atol, max_steps)
@@ -2040,6 +2053,7 @@ class ADSolver:
             raise ValueError(f"{n['cold']} cells below {KC.T_MIN:g} K: outside the chemistry solver's domain")
         return n
 
+    @KC.on_device
     def jvp(
         self,
         x,
@@ -2150,6 +2164,7 @@ class ADSolver:
         self._finish(redo)
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
+    @KC.on_device
     def vjp(
         self, x, T, P, dt, h, gx, gh=None, lm=None, rc=None, adapt=True, rtol=1e-3, atol=KC.ATOL, max_steps=4000, J=None
     ):

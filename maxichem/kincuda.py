@@ -78,6 +78,7 @@ with the guard's drift test off. DRIFT is NCHO's (r 2e-9).
 """
 
 import ctypes
+import functools
 import math
 import operator
 import os
@@ -441,6 +442,7 @@ _SRC = r"""
 // widest forward and reverse side of round q of NL reactions
 $masks
 #define FULL 0xffffffffu
+#define DNAN __longlong_as_double(0x7ff8000000000000ll)   // poisons the bad-input sum; a failed cell's derivatives
 #define CSYNC(g) asm volatile("bar.sync %0, %1;" :: "r"((g) + 1), "r"(NL) : "memory")   // the cell's threads
 typedef unsigned short u16;
 typedef unsigned char u8;
@@ -656,8 +658,8 @@ extern "C" __global__ void __launch_bounds__(NL * CPB, 1) call(
     for (int i = cl; i < NS; i += NL) N[i] = x0[(size_t)cell * NS + perm[i]];
     CSYNC(grp);
     double p = 0.0, pm = 0.0;
-    for (int i = lane; i < NS; i += 32) { p += N[i]; pm = fmax(pm, N[i]); }
-$jchk    const double ps = wsum(p);   // bad input (not stepped): a non-finite value, no x > 0, P <= 0 or dt < 0
+    for (int i = lane; i < NS; i += 32) { p += N[i] >= 0.0 ? N[i] : DNAN; pm = fmax(pm, N[i]); }
+$jchk    const double ps = wsum(p);   // bad input (not stepped): non-finite, x < 0, no x > 0, P <= 0 or dt < 0
     const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
                      dt >= 0.0, cold = Tc < TMIN;
     if (fin && !cold) {   // rate coefficients; three-body ones times nd
@@ -893,7 +895,7 @@ $jchk    const double ps = wsum(p);   // bad input (not stepped): a non-finite v
   }
 }
 
-// The guard's test of one cell (network species order): 1 T < TMIN, 2 non-finite input, else the bits 4 non-finite
+// The guard's test of one cell (network species order): 1 T < TMIN, 2 bad input, else the bits 4 non-finite
 // state, 8 unfinished call, 16 element drift (0: passed).
 __device__ int check_cell(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
                           const double* __restrict__ dta, const double* xout, int done, double nok,
@@ -905,7 +907,7 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
   bool xfin = true;
   for (int i = 0; i < NS; i++) {
     const double a = x0[(size_t)cell * NS + i], b = xout[(size_t)cell * NS + i];
-    p += a;
+    p += a >= 0.0 ? a : DNAN;
     mx = fmax(mx, a);
     xfin = xfin && isfinite(b);
     #pragma unroll
@@ -926,7 +928,7 @@ ${jchk1}  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
   return (xfin ? 0 : 4) | (done ? 0 : 8) | (drift ? 16 : 0);
 }
 
-// Checks of each cell after the call (one thread per cell); counts in count[1] to count[6]: non-finite input, T < TMIN,
+// Checks of each cell after the call (one thread per cell); counts in count[1] to count[6]: bad input, T < TMIN,
 // else: non-finite state, unfinished, element drift, recompute. A cell to recompute gets redo = 1 and is appended to
 // list (the first count[6] entries; their order is not deterministic, the cells' results do not depend on it).
 extern "C" __global__ void guard(const double* __restrict__ x0, const double* __restrict__ Ta,
@@ -1057,8 +1059,8 @@ extern "C" __global__ void __launch_bounds__(NL, 1) recover(
     for (int i = cl; i < NS; i += NL) N[i] = x0[(size_t)cell * NS + perm[i]];
     CSYNC(0);
     double p = 0.0, pm = 0.0;
-    for (int i = lane; i < NS; i += 32) { p += N[i]; pm = fmax(pm, N[i]); }
-$jchk    const double ps = wsum(p);   // bad input (not stepped): a non-finite value, no x > 0, P <= 0 or dt < 0
+    for (int i = lane; i < NS; i += 32) { p += N[i] >= 0.0 ? N[i] : DNAN; pm = fmax(pm, N[i]); }
+$jchk    const double ps = wsum(p);   // bad input (not stepped): non-finite, x < 0, no x > 0, P <= 0 or dt < 0
     const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
                      dt >= 0.0, cold = Tc < TMIN;
     if (fin && !cold) {   // rate coefficients, as the call kernel
@@ -1479,6 +1481,18 @@ def device_of(device):
     return d if d.index is not None else torch.device(d.type, torch.cuda.current_device())
 
 
+def on_device(method):
+    """Run a solver's method with its device current: the driver API (module loads, kernel launches) acts on the
+    current device, which torch restores after each of its own calls."""
+
+    @functools.wraps(method)
+    def run(self, *args, **kwargs):
+        with torch.cuda.device(self.dev):
+            return method(self, *args, **kwargs)
+
+    return run
+
+
 def check_inputs(dev, ns, x, T, P, dt, h, rtol, atol, max_steps):
     """The call's inputs, before any launch: x [B, ns] and T, P, dt, h [B], float64 on the solver's device; rtol
     and atol finite and positive; max_steps a positive integer whose recovery tries (REC_STEPS times it) fit an
@@ -1524,7 +1538,8 @@ class CudaSolver:
     docstring; default DRIFT). photo: the network's photolysis branches (net.photo) enter the call, each an irreversible
     first-order reaction absorber -> products with the rate J n_absorber; the call then takes J [B, len(net.photo)]
     (s^-1, float64 on the device of x, columns in net.photo's order; None = 0), held constant within the call like T and
-    P; a row with a negative or non-finite J is a bad input (the cell is not stepped and is counted; a cell below T_MIN
+    P; a row with a negative or non-finite J or a negative mole fraction is a bad input (clamp x first; the cell is
+    not stepped and is counted; a cell below T_MIN
     is counted as cold whatever its J). With photo=False (default) the kernels are those of the thermal network alone.
     Calls run one at a time on torch's current stream (the queues, the counts and the scratch are shared)."""
 
@@ -1536,7 +1551,23 @@ class CudaSolver:
             )
         self.dev = device_of(device)
         self.drift = float(DRIFT if drift is None else drift)
-        torch.zeros(1, device=self.dev)  # torch's context is current from here on
+        self._setup(net, photo)
+
+    @on_device
+    def _setup(self, net, photo):
+        """The kernels and their tables on the solver's device."""
+        torch.zeros(1, device=self.dev)  # torch's context exists from here on
+        self._mods = []  # every module loaded; __del__ unloads them, also when this setup fails part of the way
+
+        def load(src):
+            m = _load(src, arch)
+            self._mods.append(m[0])
+            return m
+
+        def drop(m):
+            self._mods.remove(m[0])
+            _check(_cuda().cuModuleUnload(m[0]), "unload")
+
         prop = torch.cuda.get_device_properties(self.dev)
         optin = prop.shared_memory_per_block_optin
 
@@ -1558,19 +1589,19 @@ class CudaSolver:
         # barriers (15) allow them and the compiler fits them in the registers without more local memory
         arch = f"{prop.major}{prop.minor}"
         top = min(1024 // nl, 15, fit(tab))
-        one = _load(source(tab, 1, wsh, self.drift), arch)  # one cell per block: its registers size the packing
+        one = load(source(tab, 1, wsh, self.drift))  # one cell per block: its registers size the packing
         regs, local = -(-_attr(one[1], 4) // 8) * 8, _attr(one[1], 3)  # registers (allocation unit 8), local bytes
         self.cpb = max(1, min(top, prop.regs_per_multiprocessor // (nl * regs)))
-        mod = _load(source(tab, self.cpb, wsh, self.drift), arch) if self.cpb > 1 else one
+        mod = load(source(tab, self.cpb, wsh, self.drift)) if self.cpb > 1 else one
         while self.cpb < top:
-            nxt = _load(source(tab, self.cpb + 1, wsh, self.drift), arch)
+            nxt = load(source(tab, self.cpb + 1, wsh, self.drift))
             if _attr(nxt[1], 3) > local:
-                _check(_cuda().cuModuleUnload(nxt[0]), "unload")
+                drop(nxt)
                 break
             if mod is not one:
-                _check(_cuda().cuModuleUnload(mod[0]), "unload")
+                drop(mod)
             mod, self.cpb = nxt, self.cpb + 1
-        self._mod, self._fn, self._guard, self._rec = mod
+        _, self._fn, self._guard, self._rec = mod
         self._build = (tab, wsh, arch)  # what export() recompiles
         self._names = (list(net.species), list(net.elements))  # export() writes them
         self.wpb = self.w * self.cpb  # warps per block
@@ -1587,7 +1618,7 @@ class CudaSolver:
             occ.append(o.value)
         self.max_blocks, self.rec_blocks = (prop.multi_processor_count * o for o in occ)
         if mod is not one:
-            _check(cu.cuModuleUnload(one[0]), "unload")
+            drop(one)
         # global scratch (doubles): per cell slot of the call kernel the rates and the copy for a retry (RSN), per
         # block of the recover kernel the same and W when it is not in shared memory
         rsn = 2 * self.ns + tab["nnz"]
@@ -1641,6 +1672,7 @@ class CudaSolver:
         self.count = torch.zeros(10, dtype=torch.int32, device=self.dev)
         self.total = torch.zeros(10, dtype=torch.int64, device=self.dev)
 
+    @on_device
     def launch(self, x, T, P, dt, h, rtol=1e-3, atol=ATOL, max_steps=4000, J=None):
         """The kernel, its checks and the recovery, no host sync: (x, h, done, accepted steps, flag) per cell, flag 0
         (the call's result passed the guard), 1 (recomputed, passes) or 2 (recomputed, still fails); the counts in
@@ -1746,7 +1778,8 @@ class CudaSolver:
         return xo, ho, done.bool(), nok, redo
 
     def __del__(self):
-        _unload(self.dev, [getattr(self, "_mod", None)])
+        if hasattr(self, "_mods"):  # a constructor that failed early loaded nothing
+            _unload(self.dev, self._mods)
 
     def __call__(self, x, T, P, dt, h, rtol=1e-3, atol=ATOL, max_steps=4000, J=None):
         """The call: (x, h, done, accepted steps), no host sync; the counts added to self.total on the stream."""
