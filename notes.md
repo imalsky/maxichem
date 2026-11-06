@@ -1217,6 +1217,16 @@ Data: experiments/2026-11-05_gcm10d/research (column_night.py, top_budget.py, re
 - The share walk fixed in the previous entry: largest change 2.56e-6 over the chain, -2.53e-6 at call 2,000 (sulfur, one
   cell). The 2.6e-6 above and the 2.5e-6 in the code's description are these two numbers.
 
+### 2026-11-05 22:38: code cleanup baseline at commit 3f92275 (experiments/2026-11-05_cleanup_baseline)
+- Saved for the cleanup's proofs: compiled kernels (kernels.json: 28 compiles of the solver and derivative kernels on
+  NCHO_photo, SNCHO_photo_network_2025 and CHO_photo, dark and lit; each compiled twice, all deterministic), float64
+  outputs of the call, recovery, jvp and vjp at 4,096 cells (outputs_*.npz), table hashes and solver info
+  (outputs_meta.json). NVRTC 12.8.93, torch 2.10.0+cu128, NumPy 2.4.6.
+- Checks: parity 34 of 34 on NCHO_photo and on the 2025 sulfur network; derivatives 104 of 104 on all three networks;
+  C++ export bitwise equal in all six cases; kintest quick 0 misses, 0 large misses, worst 0.014 dex on boxes.
+- Speed (bench/gpu_speed.py, 1,382,400 cells, GPU not otherwise in use, the check runs done before it started): dark
+  0.359 us per cell-call at 1.00 steps per call, lit 0.659 us at 2.58 steps per call.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.

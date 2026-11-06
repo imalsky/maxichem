@@ -56,7 +56,7 @@ kept, and the rates add, as in VULCAN; the reader lists the duplicates in `net.d
 - Linux with an NVIDIA GPU. The kernels run in double precision, so their speed follows the GPU's fp64 throughput.
   Only the RTX 6000 Ada (sm_89) has been tested.
 - No CUDA toolkit. The kernels are compiled at run time with NVRTC from the `nvidia-cuda-nvrtc-cu12` wheel.
-- Python 3.10 or newer, NumPy and PyTorch with CUDA. Tested with Python 3.11, torch 2.10.0+cu128 and NumPy 2.4.6 (the
+- Python 3.11 or newer, NumPy and PyTorch with CUDA. Tested with Python 3.11, torch 2.10.0+cu128 and NumPy 2.4.6 (the
   environment of the snapy GCM), and with Python 3.12, torch 2.8.0+cu126 and NumPy 2.5.3.
 - The network and NASA-9 files of VULCAN-JAX (its `src/vulcan3/thermo` folder). They are not bundled.
 

@@ -10,11 +10,11 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Isaac Malsky" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # the oldest Python the code is tested on
 dependencies = [
-    "numpy",
-    "torch",
-    "nvidia-cuda-nvrtc-cu12",   # the kernels are compiled at run time with this wheel's libnvrtc.so.12
+    "numpy>=2.4,<3",  # lower bound: the oldest tested; 3 may change the array API the tables rely on
+    "torch>=2.8,<3",  # lower bound: the oldest tested; 3 may change the stream and device calls the driver makes
+    "nvidia-cuda-nvrtc-cu12==12.8.93",  # compiles the kernels at run time; another compiler can change their bits
 ]
 
 [project.urls]
@@ -23,8 +23,120 @@ Repository = "https://github.com/imalsky/maxichem"
 [tool.setuptools]
 packages = ["maxichem"]
 
+[dependency-groups]
+test = [
+  "pytest >=8",
+  "pytest-cov >=5",
+]
+dev = [
+  { include-group = "test" },
+]
+
 [tool.ruff]
 line-length = 120
+show-fixes = true
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I"]   # pycodestyle (PEP 8), pyflakes, import order
+select = [
+  "E",      # pycodestyle errors
+  "W",      # pycodestyle warnings
+  "F",      # pyflakes
+  "I",      # isort
+  "D",      # pydocstyle
+  "N",      # pep8-naming
+  "C90",    # mccabe complexity
+  "ARG",    # flake8-unused-arguments
+  "B",      # flake8-bugbear
+  "C4",     # flake8-comprehensions
+  "EXE",    # flake8-executable
+  "FURB",   # refurb
+  "G",      # flake8-logging-format
+  "ICN",    # flake8-import-conventions
+  "ISC",    # flake8-implicit-str-concat
+  "LOG",    # flake8-logging
+  "NPY",    # NumPy specific rules
+  "PERF",   # perflint
+  "PGH",    # pygrep-hooks
+  "PL",     # pylint
+  "PT",     # flake8-pytest-style
+  "PTH",    # flake8-use-pathlib
+  "PYI",    # flake8-pyi
+  "Q",      # flake8-quotes
+  "RET",    # flake8-return
+  "RSE",    # flake8-raise
+  "RUF",    # Ruff-specific
+  "SIM",    # flake8-simplify
+  "SLOT",   # flake8-slots
+  "T10",    # flake8-debugger
+  "T20",    # flake8-print
+  "TC",     # flake8-type-checking
+  "TRY",    # tryceratops
+  "UP",     # pyupgrade
+  # "PD",   # pandas-vet: add only where pandas is used
+]
+ignore = [
+  "PLR09",    # too many <...>: tools/check_size_limits.py covers size
+  "PLR2004",  # magic value in comparison: noisy in numerical code
+  "TRY003",   # long message at the raise: the rules want messages that say what to fix
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pep8-naming]
+# Math symbols allowed by N. List only names that match a published equation and are in the project's glossary.
+extend-ignore-names = ["T", "P", "K", "J", "S", "M", "N"]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts and command-line tools may print. Edit: add the project's script folders.
+"tests/**" = ["T20"]
+"tools/**" = ["T20"]
+"bench/**" = ["T20"]
+"examples/**" = ["T20"]
+# experiments/ needs only format, lint and a header (D100) saying what the script does.
+"experiments/**" = ["T20", "D101", "D102", "D103", "D104", "D105", "D106", "D107"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config"]
+xfail_strict = true
+filterwarnings = ["error"]  # list any allowed warning here, with its reason
+log_level = "INFO"
+testpaths = ["tests"]
+markers = [
+  "slow: takes more than a few seconds; outside the default CI run",
+  "gpu: needs a GPU; runs locally, never in CI",
+]
+
+[tool.coverage.run]
+source = ["maxichem"]
+omit = []  # list here the modules that only run on a GPU; the local GPU tests cover them
+
+[tool.coverage.report]
+fail_under = 80
+exclude_also = [
+  '\.\.\.',
+  'if typing.TYPE_CHECKING:',
+  'if TYPE_CHECKING:',
+]
+
+[tool.mypy]
+files = ["maxichem", "tests"]
+strict = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+warn_unreachable = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = "maxichem.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "nvidia.*"]  # torch's stubs do not cover the CUDA driver calls; both stay Any
+ignore_missing_imports = true
+follow_imports = "skip"

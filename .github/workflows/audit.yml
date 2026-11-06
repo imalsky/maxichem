@@ -1,0 +1,24 @@
+# Weekly check for dependency versions with known vulnerabilities. For public repositories.
+name: Vulnerable versions
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions: {}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.0
+      - name: Resolve the declared dependencies and audit them
+        run: |
+          uv pip compile pyproject.toml -o audit-requirements.txt
+          uvx pip-audit -r audit-requirements.txt --no-deps --disable-pip

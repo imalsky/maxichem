@@ -1,0 +1,8 @@
+-xcuda
+--cuda-device-only
+-nocudainc
+-nocudalib
+--cuda-gpu-arch=sm_89
+-std=c++17
+-include
+tools/cuda_tidy_shim.h

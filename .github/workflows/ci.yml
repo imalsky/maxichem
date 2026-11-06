@@ -1,0 +1,89 @@
+# Lint, size limits and CPU tests. GPU tests stay local. Based on scientific-python/cookie.
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: 3
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+      - uses: astral-sh/setup-uv@v10.3.0
+      - name: Format, lint, types, spelling
+        run: uvx pre-commit run --all-files --show-diff-on-failure
+        env:
+          SKIP: check-size-limits
+
+  size-limits:
+    name: Size limits
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check size limits
+        run: python3 tools/check_size_limits.py
+
+  kernels:
+    name: Compile kernels with NVRTC (no GPU)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.0
+      - name: Compile every tracked .cu file
+        run: |
+          mapfile -t kernels < <(git ls-files '*.cu')
+          if [ "${#kernels[@]}" -gt 0 ]; then
+            uv run --no-project --with nvidia-cuda-nvrtc-cu12 python tools/nvrtc_compile.py "${kernels[@]}"
+          fi
+
+  tests:
+    name: CPU tests on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Edit: the oldest and newest versions in requires-python.
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v10.3.0
+      - name: Install package
+        run: uv sync
+      - name: Test package, with the coverage floor from pyproject.toml
+        run: uv run pytest -m "not slow and not gpu" --cov --cov-report=term --durations=20

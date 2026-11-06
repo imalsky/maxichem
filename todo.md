@@ -23,6 +23,14 @@ Tasks Isaac put off and wants to return to, with the date deferred.
     isaac/maxichem-coupling (the same fix plus the fused tracer transport).
   - Once #334 is in chengcli/snapy main: rebase isaac/maxichem-coupling onto the new main (the fix commit drops out),
     delete isaac/recon-many-variables on the fork, and keep working on the one branch.
+- 2026-11-05. Sphere heating bug (notes.md, 2026-11-05 18:53).
+  - Bug: heat = -(A_top F_top - A_bot F_bot) / V with the column's plane-parallel fluxes gives a false 2 F / r per volume on
+    the sphere. It cools the night side and heats the day side, most near the lid, and crashed 140 layers.
+  - Correct form: heat = -(F_top - F_bot) / dz.
+  - State: patched in the experiment drivers gcm10d.py and gcm_chem.py, which are gitignored and have not run since. Only
+    the flow-only driver has run the corrected form, and it never reached day 1.
+  - Still needed: run the patched drivers; add a test that fails on the old form; use the correct form in the C++ sphere
+    coupling when it is written.
 - 2026-11-05. Rerun the sphere work with the corrected heating formula (notes.md, 2026-11-05 18:53), after the code cleanup.
   - The 2-day runs at 100, 120 and 140 layers from both starts, then the lid comparison on 0.1-1 bar and a lid choice.
   - The 10-day runs with and without chemistry and their figures, then the radiation-step and sponge tests as needed.
