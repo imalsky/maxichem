@@ -256,6 +256,21 @@ def _jacobian_terms(
     return terms
 
 
+def _cut_slots(terms: list[list[Any]], share: int) -> tuple[list[Any], list[int]]:
+    """Cut each slot's terms into pieces of at most share: the pieces (destination, terms), each extra piece's slot.
+
+    A destination at or above the number of slots means Y[destination - slots].
+    """
+    pieces: list[Any] = []
+    extra: list[int] = []
+    for s, slot_terms in enumerate(terms):
+        for c in range(0, len(slot_terms), share):
+            pieces.append((s if c == 0 else len(terms) + len(extra), slot_terms[c : c + share]))
+            if c:
+                extra.append(s)
+    return pieces, extra
+
+
 def _jacobian_stream(
     terms: list[list[Any]], nr: int, ns: int, lanes: int, widths: dict[str, int]
 ) -> tuple[np.ndarray, int, int, int]:
@@ -263,22 +278,20 @@ def _jacobian_stream(
 
     A word holds the rate, sign, x2, species a, b and end of slot; padding words take the zero rate at index 2 nr. A
     slot longer than an even share is cut into pieces: the first writes the slot, the others Y[e] (free during the
-    Jacobian), added to the slot afterwards in order. Each lane's finished slots follow the words, then each extra
-    piece's slot.
+    Jacobian), added to the slot afterwards in order. Y holds ns doubles, so the share grows until the extra pieces fit:
+    a network with few terms per lane gets longer rounds, not a refusal. Each lane's finished slots follow the words,
+    then each extra piece's slot.
     """
     nnz = len(terms)
     share = -(-sum(len(t) for t in terms) // lanes)
-    pieces: list[Any] = []
-    extra: list[int] = []  # pieces: (destination, terms); destination >= nnz: Y[dest - nnz]
-    for s in range(nnz):
-        for c in range(0, len(terms[s]), share):
-            pieces.append((s if c == 0 else nnz + len(extra), terms[s][c : c + share]))
-            if c:
-                extra.append(s)
-    if len(extra) > ns or nnz + len(extra) > NO_SLOT:
+    pieces, extra = _cut_slots(terms, share)
+    while len(extra) > ns:
+        share += 1
+        pieces, extra = _cut_slots(terms, share)
+    if nnz + len(extra) > NO_SLOT:
         raise ValueError(
-            f"too many Jacobian pieces: {len(extra)} for {ns} species; "
-            "a network this small or this uneven does not fit the kernels' layout"
+            f"too many Jacobian slots: {nnz} and {len(extra)} extra pieces, at most {NO_SLOT}; the kernels' slots are "
+            "uint16, so this network is too large"
         )
     filled = [q for q in range(len(pieces)) if pieces[q][1]]
     assigned, rounds = balance_lanes(filled, lambda q: len(pieces[q][1]), lanes)

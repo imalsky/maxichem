@@ -33,6 +33,10 @@ def test_call_kernels_compile_with_plain_falloff(read_network):
     assert _compile(tab)
 
 
+def test_call_kernels_compile_for_a_small_network(read_network):
+    assert _compile(_tables.tables(read_network("synthetic_small"), 2, True))
+
+
 def test_call_kernels_compile_with_a_reverse_law(read_network):
     tab = _tables.tables(_with_reverse_law(read_network()), 2)
     assert "rev" in tab["law"]

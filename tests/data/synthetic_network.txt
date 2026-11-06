@@ -1,5 +1,5 @@
 # Invented test network with every rate law the reader takes. Not chemistry to run for science.
-# The N_i reactions have zero rates: they give the network the size the kernels' layout needs.
+# The N_i reactions have zero rates: they take the network past the 32 rows of the trailing block.
 # id  [ reaction ]  A_0  B_0  C_0  A_inf  B_inf  C_inf
 
 # Two-body Reactions

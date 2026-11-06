@@ -24,7 +24,8 @@ when `VULCAN_THERMO` is unset or its reference data are missing (README.md lists
 | `test_vulcan_truth.py` | `bench/kintest.py quick` against VULCAN-0D | GPU, data, slow |
 
 `tests/data` holds invented networks with constant-Cp NASA-9 data, so a test can state its answer in closed form. Their `N_i`
-reactions have zero rates: they give the network the size the kernels' layout needs.
+reactions have zero rates: they take a network past the 32 rows of the trailing block, so the sparse leading part runs too;
+`synthetic_small` has none.
 
 ## The derivative cases
 

@@ -34,6 +34,15 @@ def test_streams_hold_the_stoichiometry(read_network, photo):
     assert np.array_equal(_stoichiometry_from_stream(tab), stoichiometry[tab["perm"]])
 
 
+@pytest.mark.parametrize("photo", [False, True])
+def test_small_network_has_tables(read_network, photo):
+    net = read_network("synthetic_small")
+    tab = _tables.tables(net, 2, photo)
+    stoichiometry = np.hstack([net.S, net.Sp]) if photo else net.S
+    assert tab["nfix"] <= tab["ns"]  # the extra Jacobian pieces fit in Y
+    assert np.array_equal(_stoichiometry_from_stream(tab), stoichiometry[tab["perm"]])
+
+
 def test_rate_law_table_takes_the_network_forms(read_network):
     assert _tables.tables(read_network("synthetic_falloff"), 2)["law"] == []
     tab = _tables.tables(read_network(), 2)

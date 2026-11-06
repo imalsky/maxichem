@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from maxichem import kincuda
+from maxichem import kincuda, kincuda_ad
 from maxichem.kinvulcan import KB, P0
 
 pytestmark = pytest.mark.gpu
@@ -15,6 +15,7 @@ J_TEST = 2.0  # s^-1
 DECAY_TOLERANCE = 2e-5  # relative, at rtol 1e-6: the integrator's error; measured 7.9e-6
 EQUILIBRIUM_TOLERANCE = 1e-12  # relative, on a mass-action ratio against the NASA-9 closed form; measured 1.3e-15
 SHARE_TOLERANCE = 1e-14  # relative: the guard's correction restores each element's share; measured 1.3e-16
+SMALL_TANGENT_TOLERANCE = 1e-4  # relative: central differences at dT = 1e-3 K carry about this much
 
 
 def _state(net, cells, device, **fractions):
@@ -59,9 +60,10 @@ def _gibbs(net, name, T):
     return cp + h / T - (cp * np.log(T) + b2)
 
 
+@pytest.mark.parametrize("stem", ["synthetic_falloff", "synthetic_small"])
 @pytest.mark.parametrize("T", [800.0, 1500.0, 2500.0])
-def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T):
-    net = read_network("synthetic_falloff")
+def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T, stem):
+    net = read_network(stem)
     with kincuda.CudaSolver(net, gpu) as solver:
         cells = 4
         x0 = _state(net, cells, gpu, H=0.1, H2=0.6, OH=0.05, H2O=0.1, O=0.05, He=0.1)
@@ -93,3 +95,34 @@ def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T):
         )
         < SHARE_TOLERANCE
     )
+
+
+def test_small_network_runs_in_every_kernel(read_network, gpu):
+    net = read_network("synthetic_small")
+    cells = 4
+    x0 = _state(net, cells, gpu, H=0.1, H2=0.6, OH=0.05, H2O=0.1, O=0.05, He=0.1)
+    T, P = _full(cells, 1500.0, gpu), _full(cells, P_TEST, gpu)
+    dt, h = _full(cells, 1e-3, gpu), _full(cells, 5e-4, gpu)
+    J = torch.full((cells, len(net.photo)), 1e-4, dtype=torch.float64, device=gpu)
+    zero = torch.zeros_like(T)
+    with kincuda.CudaSolver(net, gpu, photo=True) as solver:
+        forced = solver.launch(x0, T, P, dt, h, J=J, max_steps=10)  # unfinished: the recovery kernel runs
+        counts = dict(solver.fallback)
+        called = solver.launch(x0, T, P, dt, h, J=J)
+    assert counts["recomputed"] == cells
+    assert bool(forced[2].all())
+    assert torch.allclose(forced[0], called[0], rtol=1e-6)  # dense against sparse factors of the same step
+    with kincuda_ad.ADSolver(net, gpu, photo=True) as ad:
+        step = 1e-3
+        tangent = ad.jvp(x0, T, P, dt, h, torch.zeros_like(x0), torch.ones_like(T), zero, zero, zero, J=J)
+        up = ad.jvp(x0, T + step, P, dt, h, torch.zeros_like(x0), zero, zero, zero, zero, J=J)[0]
+        down = ad.jvp(x0, T - step, P, dt, h, torch.zeros_like(x0), zero, zero, zero, zero, J=J)[0]
+        adjoint = ad.vjp(x0, T, P, dt, h, torch.ones_like(x0), J=J)
+    for a, b in zip(called[:4], tangent[:4], strict=True):
+        assert torch.equal(a, b)
+    for a, b in zip(called[:4], adjoint[:4], strict=True):
+        assert torch.equal(a, b)
+    difference = (up - down) / (2.0 * step)
+    assert torch.allclose(tangent[4], difference, rtol=SMALL_TANGENT_TOLERANCE, atol=1e-9)
+    dot = (tangent[4]).sum()  # the adjoint of the sum of x against the tangent of T
+    assert float(adjoint[4]["T"].sum()) == pytest.approx(float(dot), rel=SMALL_TANGENT_TOLERANCE, abs=1e-9)
