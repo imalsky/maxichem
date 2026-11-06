@@ -1227,6 +1227,29 @@ Data: experiments/2026-11-05_gcm10d/research (column_night.py, top_budget.py, re
 - Speed (bench/gpu_speed.py, 1,382,400 cells, GPU not otherwise in use, the check runs done before it started): dark
   0.359 us per cell-call at 1.00 steps per call, lit 0.659 us at 2.58 steps per call.
 
+### 2026-11-06 01:37: code cleanup, steps 1 to 13 (experiments/2026-11-05_cleanup_baseline)
+- Done: tool config, Ruff clean, kernels in real files (`maxichem/kernels/`) with a generated data header, the solver modules split,
+  a format version on the export, names and a glossary, named constants, one table of kernel arguments shared with C++, `docs/`,
+  `close()` and context managers, typed package (mypy clean), lazy `paths`, pytest layout, known-answer and order tests.
+- No result changed. Against the baseline, at the end of each series (commits 37fbdc0, b17631d, e1f43c4, 6f44358): float64 outputs
+  of call, recovery, jvp and vjp bitwise equal on 6 of 6 cases; parity 34 of 34 on both networks; derivatives 104 of 104 on all three;
+  C++ export bitwise equal in all six cases; kintest quick 0 misses, its log unchanged. All printed metrics equal, except the one below.
+- Compiled kernels stayed byte-equal through every kernel step but one: `constexpr` constants (fdf226d) change the cubins, so that
+  step was proved by bitwise outputs. Speed against the commit before it (gpu_speed, two rounds each, GPU otherwise idle): dark 0.3616
+  to 0.3628 us per cell-call (+0.3 %), lit 0.6613 to 0.6620 us (+0.1 %). The same kernels varied by 1 % between runs (0.3590 to 0.3626
+  dark), so the change is within the noise. Decision: `constexpr` stays.
+- New known answers, on invented networks with constant-Cp NASA-9 data: A -> 2 B at constant pressure, relative error 7.9e-6 at
+  rtol 1e-6; long calls at 800, 1500 and 2500 K against the closed-form equilibrium constant, mass-action ratios within 1.3e-15; element
+  shares within 1.3e-16. Rodas3's order measured on the decay at 4 to 32 steps: slope 2.96.
+- Decisions: the `REVERSE` table had no source and no user (no `# irreversible` heading in any of the 11 networks), so it is removed;
+  every proof stayed equal. The kernels' explicit reverse path stays, and only a hand-built reaction dict reaches it now.
+- A correction in a check's report: "FD J at exactly 0" counted only cells with a plateau as judged, so it always printed 100 %. It
+  now prints the judged cells: 3,404, 3,358 and 3,463, of which 21 %, 28 % and 24 % have a plateau. Its pass rule is unchanged: it has no
+  coverage bar. The tangent tests gained a limit on the worst cell (1.0; measured worst 0.77).
+- Found, not changed: the table builder refuses a network with few reaction terms ("too many Jacobian pieces"), so an invented network
+  needs about 40 species and 30 padding reactions to fit. The smallest real network has 35 species and 149 reactions.
+- clang-tidy reports 128 findings on the kernels, all style: implicit widening 77, narrowing 27, unset variables 22, widening casts 2.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.

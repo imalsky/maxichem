@@ -6,3 +6,5 @@
 -std=c++17
 -include
 tools/cuda_tidy_shim.h
+-Ibuild/kernels
+-Imaxichem/kernels

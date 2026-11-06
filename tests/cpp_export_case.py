@@ -12,64 +12,71 @@ flags them and the recovery kernel recomputes them, and the counts are compared 
 x, h, accepted steps and done, as raw little-endian files. Then: cpp/build/test_export <folder>/export <folder>/case
 """
 
-import os
 import sys
+from pathlib import Path
+from typing import Any
 
 import torch
+from helpers import H2S_PER_H2_SOLAR, SOLAR_START
 
 from maxichem import CudaSolver, VulcanNetwork, paths
 
-out = sys.argv[1]
-B = int(sys.argv[2]) if len(sys.argv) > 2 else 4096
-photo = bool(int(sys.argv[3])) if len(sys.argv) > 3 else True
-max_steps = int(sys.argv[4]) if len(sys.argv) > 4 else 4000
-network = sys.argv[5] if len(sys.argv) > 5 else "NCHO_photo_network.txt"
-th = paths.VULCAN_THERMO
-net = VulcanNetwork(f"{th}/{network}", f"{th}/NASA9")
-sp = list(net.species)
-dev = torch.device("cuda")
-f64 = dict(dtype=torch.float64, device=dev)
-T = torch.linspace(800.0, 2000.0, B, **f64)
-P = 1e6 * torch.logspace(-4.0, 1.0, B, **f64)
-x = torch.zeros(B, len(sp), **f64)
-for s, v in {"H2": 0.84, "He": 0.16, "H2O": 9e-4, "CO": 5e-4, "CH4": 1e-5, "N2": 6e-5, "NH3": 1e-6}.items():
-    x[:, sp.index(s)] = v
-if "H2S" in sp:
-    x[:, sp.index("H2S")] = 1.41e-5 * x[:, sp.index("H2")]
-x /= x.sum(1, keepdim=True)
-solver = CudaSolver(net, dev, photo=photo)
-J = torch.zeros(B, len(net.photo), **f64) if photo else None
-x, h, done, steps = solver(x, T, P, torch.full_like(T, 1e10), torch.full_like(T, 1e-10), J=J)
-if photo:
-    J[P < 3e4] = 1e-4
-dt = torch.full_like(T, 50.0)
-xo, ho, do, so = solver(x, T, P, dt, h, J=J, max_steps=max_steps)
-counts = solver.count.clone()
-torch.cuda.synchronize()
-solver.export(os.path.join(out, "export"))
-case = os.path.join(out, "case")
-os.makedirs(case, exist_ok=True)
-for name, t in (
-    ("x", x),
-    ("T", T),
-    ("P", P),
-    ("dt", dt),
-    ("h", h),
-    ("J", J),
-    ("x_out", xo),
-    ("h_out", ho),
-    ("steps_out", so),
-):
-    if t is None:
-        continue
-    t.cpu().contiguous().numpy().tofile(os.path.join(case, name + ".bin"))
-do.cpu().to(torch.int8).numpy().tofile(os.path.join(case, "done_out.bin"))
-counts.cpu().numpy().tofile(os.path.join(case, "counts_out.bin"))
-with open(os.path.join(case, "max_steps.txt"), "w") as f:
-    f.write(str(max_steps))
-with open(os.path.join(case, "B.txt"), "w") as f:
-    f.write(str(B))
-print(
-    f"export and case written to {out}: {network}, {B} cells, photo {photo}, max_steps {max_steps}, steps per call "
-    f"{float(so.mean()):.2f}, counts {solver.fallback}"
-)
+
+def main() -> None:
+    """Write the export and the case."""
+    out = Path(sys.argv[1])
+    B = int(sys.argv[2]) if len(sys.argv) > 2 else 4096
+    photo = bool(int(sys.argv[3])) if len(sys.argv) > 3 else True
+    max_steps = int(sys.argv[4]) if len(sys.argv) > 4 else 4000
+    network = sys.argv[5] if len(sys.argv) > 5 else "NCHO_photo_network.txt"
+    th = paths.VULCAN_THERMO
+    net = VulcanNetwork(f"{th}/{network}", f"{th}/NASA9")
+    sp = list(net.species)
+    dev = torch.device("cuda")
+    f64 = {"dtype": torch.float64, "device": dev}
+    T = torch.linspace(800.0, 2000.0, B, **f64)
+    P = 1e6 * torch.logspace(-4.0, 1.0, B, **f64)
+    x = torch.zeros(B, len(sp), **f64)
+    for s, v in SOLAR_START.items():
+        x[:, sp.index(s)] = v
+    if "H2S" in sp:
+        x[:, sp.index("H2S")] = H2S_PER_H2_SOLAR * x[:, sp.index("H2")]
+    x /= x.sum(1, keepdim=True)
+    solver = CudaSolver(net, dev, photo=photo)
+    J: Any = torch.zeros(B, len(net.photo), **f64) if photo else None
+    x, h, _, _ = solver(x, T, P, torch.full_like(T, 1e10), torch.full_like(T, 1e-10), J=J)
+    if photo:
+        J[P < 3e4] = 1e-4
+    dt = torch.full_like(T, 50.0)
+    xo, ho, do, so = solver(x, T, P, dt, h, J=J, max_steps=max_steps)
+    counts = solver.count.clone()
+    torch.cuda.synchronize()
+    solver.export(out / "export")
+    case = out / "case"
+    case.mkdir(parents=True, exist_ok=True)
+    for name, t in (
+        ("x", x),
+        ("T", T),
+        ("P", P),
+        ("dt", dt),
+        ("h", h),
+        ("J", J),
+        ("x_out", xo),
+        ("h_out", ho),
+        ("steps_out", so),
+    ):
+        if t is None:
+            continue
+        t.cpu().contiguous().numpy().tofile(case / f"{name}.bin")
+    do.cpu().to(torch.int8).numpy().tofile(case / "done_out.bin")
+    counts.cpu().numpy().tofile(case / "counts_out.bin")
+    (case / "max_steps.txt").write_text(str(max_steps))
+    (case / "B.txt").write_text(str(B))
+    print(
+        f"export and case written to {out}: {network}, {B} cells, photo {photo}, max_steps {max_steps}, steps per call "
+        f"{float(so.mean()):.2f}, counts {solver.fallback}"
+    )
+
+
+if __name__ == "__main__":
+    main()

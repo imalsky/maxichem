@@ -20,64 +20,74 @@ import torch
 
 from maxichem import CudaSolver, VulcanNetwork, paths
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--cells", type=int, default=1382400)
-ap.add_argument("--network", default="NCHO_photo_network.txt")
-ap.add_argument("--calls", type=int, default=10)
-a = ap.parse_args()
+SOLAR_START = {"H2": 0.84, "He": 0.16, "H2O": 9e-4, "CO": 5e-4, "CH4": 1e-5, "N2": 6e-5, "NH3": 1e-6}
+H2S_PER_H2_SOLAR = 1.41e-5
 
-th = paths.VULCAN_THERMO
-net = VulcanNetwork(f"{th}/{a.network}", f"{th}/NASA9")
-sp = list(net.species)
-dev = torch.device("cuda")
-f64 = dict(dtype=torch.float64, device=dev)
-B = a.cells
-T = torch.linspace(800.0, 2000.0, B, **f64)
-P = 1e6 * torch.logspace(-4.0, 1.0, B, **f64)  # dyn cm^-2
-x = torch.zeros(B, len(sp), **f64)
-for s, v in {"H2": 0.84, "He": 0.16, "H2O": 9e-4, "CO": 5e-4, "CH4": 1e-5, "N2": 6e-5, "NH3": 1e-6}.items():
-    if s in sp:
-        x[:, sp.index(s)] = v
-if "H2S" in sp:
-    x[:, sp.index("H2S")] = 1.41e-5 * x[:, sp.index("H2")]
-x /= x.sum(1, keepdim=True)
-photo = len(net.photo) > 0
-solver = CudaSolver(net, dev, photo=photo)
-J0 = torch.zeros(B, len(net.photo), **f64) if photo else None
-x, h, done, _ = solver(x, T, P, torch.full_like(T, 1e10), torch.full_like(T, 1e-10), J=J0)
-torch.cuda.synchronize()
-res = dict(
-    gpu=torch.cuda.get_device_name(0),
-    torch=torch.__version__,
-    network=a.network,
-    species=len(sp),
-    cells=B,
-    relaxed_unfinished=int(torch.logical_not(done.bool()).sum()),
-    relax_counts=solver.fallback,
-)
-kinds = [("dark", J0)]
-if photo:
-    J1 = J0.clone()
-    J1[P < 3e4] = 1e-4
-    kinds.append(("lit", J1))
-for kind, J in kinds:
-    xc, hc, dt = x.clone(), h.clone(), torch.full_like(T, 70.0)
-    times, steps, unfinished, counts = [], [], 0, {}
-    for c in range(a.calls + 1):
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        xc, hc, d, nok = solver(xc, T, P, dt, hc, J=J)
-        torch.cuda.synchronize()
-        if c:
-            times.append(time.perf_counter() - t0)
-            steps.append(float(nok.mean()))
-        unfinished += int(torch.logical_not(d.bool()).sum())  # every call, the untimed first one too
-        for q, v in solver.fallback.items():
-            counts[q] = counts.get(q, 0) + v
-    res[kind] = dict(
-        us_per_cell_call=1e6 * statistics.median(times) / B,
-        steps_per_call=statistics.mean(steps),
-        unfinished=unfinished,
-        counts=counts,
-    )
-print(json.dumps(res))
+
+def main() -> None:
+    """Measure and print one JSON line."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--cells", type=int, default=1382400)
+    ap.add_argument("--network", default="NCHO_photo_network.txt")
+    ap.add_argument("--calls", type=int, default=10)
+    a = ap.parse_args()
+
+    th = paths.VULCAN_THERMO
+    net = VulcanNetwork(f"{th}/{a.network}", f"{th}/NASA9")
+    sp = list(net.species)
+    dev = torch.device("cuda")
+    f64 = {"dtype": torch.float64, "device": dev}
+    B = a.cells
+    T = torch.linspace(800.0, 2000.0, B, **f64)
+    P = 1e6 * torch.logspace(-4.0, 1.0, B, **f64)  # dyn cm^-2
+    x = torch.zeros(B, len(sp), **f64)
+    for s, v in SOLAR_START.items():
+        if s in sp:
+            x[:, sp.index(s)] = v
+    if "H2S" in sp:
+        x[:, sp.index("H2S")] = H2S_PER_H2_SOLAR * x[:, sp.index("H2")]
+    x /= x.sum(1, keepdim=True)
+    photo = len(net.photo) > 0
+    solver = CudaSolver(net, dev, photo=photo)
+    j_dark = torch.zeros(B, len(net.photo), **f64) if photo else None
+    x, h, done, _ = solver(x, T, P, torch.full_like(T, 1e10), torch.full_like(T, 1e-10), J=j_dark)
+    torch.cuda.synchronize()
+    res = {
+        "gpu": torch.cuda.get_device_name(0),
+        "torch": torch.__version__,
+        "network": a.network,
+        "species": len(sp),
+        "cells": B,
+        "relaxed_unfinished": int(torch.logical_not(done.bool()).sum()),
+        "relax_counts": solver.fallback,
+    }
+    kinds = [("dark", j_dark)]
+    if photo:
+        j_lit = j_dark.clone()
+        j_lit[P < 3e4] = 1e-4
+        kinds.append(("lit", j_lit))
+    for kind, J in kinds:
+        xc, hc, dt = x.clone(), h.clone(), torch.full_like(T, 70.0)
+        times, steps, unfinished, counts = [], [], 0, {}
+        for c in range(a.calls + 1):
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            xc, hc, d, nok = solver(xc, T, P, dt, hc, J=J)
+            torch.cuda.synchronize()
+            if c:
+                times.append(time.perf_counter() - t0)
+                steps.append(float(nok.mean()))
+            unfinished += int(torch.logical_not(d.bool()).sum())  # every call, the untimed first one too
+            for q, v in solver.fallback.items():
+                counts[q] = counts.get(q, 0) + v
+        res[kind] = {
+            "us_per_cell_call": 1e6 * statistics.median(times) / B,
+            "steps_per_call": statistics.mean(steps),
+            "unfinished": unfinished,
+            "counts": counts,
+        }
+    print(json.dumps(res))
+
+
+if __name__ == "__main__":
+    main()

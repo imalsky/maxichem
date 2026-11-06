@@ -1,0 +1,231 @@
+"""The guard and the recovery, input checks, and the independence of results from the batch."""
+
+import gc
+import sys
+import types
+
+import helpers
+import libref
+import numpy as np
+import pytest
+import torch
+
+from maxichem import kincuda
+
+pytestmark = pytest.mark.gpu
+
+
+def _settled(parity, x0, T, P):
+    """Return the reference's settled states (100 s) and step sizes for these cells."""
+    network = parity.network
+    settled = libref.entry("guard", network.signature, x0, T, P, path=network.reference)
+    return helpers.tensor(settled["xs"], parity.device), helpers.tensor(settled["hs"], parity.device)
+
+
+def test_nan_input_is_counted_not_recomputed(parity, verdict):
+    cells = 64
+    network = parity.network
+    x0, T, P = parity.starts(cells, 1, 0.0)
+    xs, hs = _settled(parity, x0, T, P)
+    keep = torch.arange(cells, device=parity.device) != 3
+    x = xs.clone()
+    x[3, 5] = float("nan")
+    y, _, d, _ = parity.solver(x, T, P, parity.full(cells, 1.0), hs)
+    counts = dict(parity.solver.fallback)
+    stored = network.stored_call(libref.arrays("guard/nan", path=network.reference))["x"][keep]
+    e = float(network.floored(y[keep][:, network.gas_index], stored).max())
+    ok = (
+        counts["bad_input"] == 1
+        and counts["recomputed"] == 0
+        and not bool(torch.isfinite(y[3]).all())
+        and not bool(d[3])
+        and e <= helpers.TOL
+        and bool(d[keep].all())
+    )
+    verdict(
+        "guard: NaN input",
+        ok,
+        f"counts {counts}; row 3 non-finite and unfinished, the other {cells - 1} cells within {e:.1e} dex of the "
+        "reference",
+    )
+
+
+def test_forced_failure_is_recomputed(parity, verdict):
+    cells = 64
+    network = parity.network
+    x0, T, P = parity.starts(cells, 1, 0.0)
+    xs, hs = _settled(parity, x0, T, P)
+    x, h, dt = xs.clone(), hs.clone(), parity.full(cells, 1.0)
+    x[7], h[7], dt[7] = x0[7], 1e-10, 500.0  # cell 7: cold start at 500 s
+    y, _, d, n, flag = parity.solver.launch(x, T, P, dt, h, max_steps=10)
+    counts = dict(parity.solver.fallback)
+    i = torch.tensor([7], device=parity.device)
+    tries = 10 * kincuda.REC_STEPS
+    stored = network.entry("guard/forced", x[i], T[i], P[i], dt[i], h[i], np.array(tries))
+    e = float(network.floored(y[i][:, network.gas_index], stored["x"]).max())
+    ok = (
+        counts["unfinished"] == 1
+        and counts["recomputed"] == 1
+        and counts["recovered"] + counts["still_failed"] == 1
+        and e <= helpers.TOL
+        and bool(torch.equal(n[i], stored["steps"]))
+        and bool(torch.equal(d[i], stored["done"]))
+        and int(flag[7]) == (1 if bool(stored["done"]) else 2)
+        and bool(d[torch.arange(cells, device=parity.device) != 7].all())
+    )
+    verdict(
+        "guard: forced failure (max_steps 10)",
+        ok,
+        f"counts {counts}; cell 7 recomputed with {tries} tries ({e:.1e} dex from the reference call "
+        f"with those tries, {int(stored['steps'])} accepted steps, finished {bool(stored['done'])}, "
+        f"flag {int(flag[7])})",
+    )
+
+
+def test_element_drift_is_recomputed(parity, verdict):
+    # With allowance 0 every rounding change of an element share is flagged. atol 1e-18: the default's clamping
+    # allowance covers rounding drift.
+    cells = 4096
+    network = parity.network
+    x0, T, P = parity.starts(cells, 2, 1.0)
+    args = (x0, T, P, parity.full(cells, 500.0), parity.full(cells, 1e-10))
+    with kincuda.CudaSolver(network.net, parity.device, drift=0.0) as strict:
+        y, _, dz, _, flag = strict.launch(*args, atol=1e-18)
+        counts = dict(strict.fallback)
+    yk, _, _, _, flag0 = parity.solver.launch(*args, atol=1e-18)  # the same call, nothing flagged
+    i, passed = (flag > 0).nonzero().squeeze(1), flag == 0
+    stored = network.entry("guard/drift", *args, np.array(4000 * kincuda.REC_STEPS))["x"][i]
+    e = float(network.floored(y[i][:, network.gas_index], stored).max())
+    ok = (
+        counts["drift"] > 0
+        and counts["recomputed"] == counts["drift"]
+        and counts["recovered"] + counts["still_failed"] == counts["drift"]
+        and e <= helpers.TOL
+        and int(flag0.sum()) == 0
+        and bool(torch.equal(y[passed], yk[passed]))
+        and not bool(dz[flag == 2].any())
+    )
+    verdict(
+        "guard: element drift (allowance 0)",
+        ok,
+        f"counts {counts}; the flagged cells recomputed on the device ({e:.1e} dex from the reference call; still "
+        f"failing an allowance of 0 is expected, and those return done = 0), the others bitwise the kernel's result",
+    )
+
+
+def test_cold_cell_raises_in_check(parity, verdict):
+    cells = 4096
+    x0, T, P = parity.starts(cells, 2, 1.0)
+    t_cold = T.clone()
+    t_cold[0] = 250.0
+    _, _, d, _ = parity.solver(x0, t_cold, P, parity.full(cells, 500.0), parity.full(cells, 1e-10))
+    with pytest.raises(ValueError, match="below") as raised:
+        parity.solver.check()
+    verdict(
+        "guard: T < 300 K raises in check()",
+        parity.solver.fallback["cold"] == 1 and not bool(d[0]),
+        f"cell 0 not stepped; ValueError: {raised.value}",
+    )
+
+
+def test_bad_inputs_are_counted(parity, verdict):
+    cells = 64
+    x0, T, P = parity.starts(cells, 1, 0.0)
+    xb, p_bad, dtb, hb = x0.clone(), P.clone(), parity.full(cells, 50.0), parity.full(cells, 1e-10)
+    xb[3] = 0.0
+    xb[7, 0] = -1e-3
+    p_bad[5] = 0.0
+    dtb[9] = -1.0
+    y, _, d, _ = parity.solver(xb, T, p_bad, dtb, hb)
+    counts = dict(parity.solver.fallback)
+    good = torch.ones(cells, dtype=torch.bool, device=parity.device)
+    good[[3, 5, 7, 9]] = False
+    yr, _, dr, _ = parity.solver(xb[good], T[good], p_bad[good], dtb[good], hb[good])
+    ok = (
+        counts["bad_input"] == 4
+        and counts["nonfinite"] == 0
+        and counts["recomputed"] == 0
+        and not bool(d[[3, 5, 7, 9]].any())
+        and bool(torch.equal(y[good], yr))
+        and bool(torch.equal(d[good], dr))
+    )
+    verdict(
+        "guard: all-zero x row, negative x, P = 0, dt < 0",
+        ok,
+        f"counts {counts}; rows 3, 5, 7, 9 counted as bad input and not done; the other {cells - 4} cells bitwise "
+        f"those of a batch without them",
+    )
+
+
+def test_non_finite_step_acts_as_dt(parity, verdict):
+    cells = 64
+    x0, T, P = parity.starts(cells, 2, 1.0)
+    dt = parity.full(cells, 50.0)
+    ref = parity.solver(x0, T, P, dt, dt.clone())
+    same = [
+        all(torch.equal(a, b) for a, b in zip(parity.solver(x0, T, P, dt, parity.full(cells, q)), ref, strict=True))
+        for q in (np.nan, -np.inf, np.inf)
+    ]
+    verdict("non-finite starting step", all(same), f"h = NaN, -inf, +inf bitwise the h = dt call: {same}")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["h one short", "T on the CPU", "P float32", "x one species short", "rtol 0", "atol NaN", "max_steps 0"],
+)
+def test_wrong_inputs_raise_before_any_launch(parity, bad):
+    cells = 64
+    x, T, P = parity.starts(cells, 2, 1.0)
+    dt = h = parity.full(cells, 50.0)
+    keywords: dict[str, dict[str, float]] = {
+        "rtol 0": {"rtol": 0.0},
+        "atol NaN": {"atol": float("nan")},
+        "max_steps 0": {"max_steps": 0},
+    }
+    h = h[:-1] if bad == "h one short" else h
+    T = T.cpu() if bad == "T on the CPU" else T
+    P = P.float() if bad == "P float32" else P
+    x = x[:, :-1] if bad == "x one species short" else x
+    with pytest.raises(ValueError, match=r"\S"):
+        parity.solver(x, T, P, dt, h, **keywords.get(bad, {}))
+
+
+def test_failed_constructor_leaves_no_error_at_deletion(gpu):
+    seen: list[object] = []  # a constructor that fails before it loads anything: nothing to unload
+    hook, sys.unraisablehook = sys.unraisablehook, seen.append
+    with pytest.raises(ValueError, match="photo=True"):
+        kincuda.CudaSolver(types.SimpleNamespace(photo=[], photo_missing=[]), gpu, photo=True)  # type: ignore[arg-type]  # refused before use
+    gc.collect()
+    sys.unraisablehook = hook
+    assert not seen
+
+
+def test_closed_solver_refuses_a_call(parity):
+    with kincuda.CudaSolver(parity.network.net, parity.device) as solver:
+        assert solver.fallback["cold"] == 0
+    solver.close()  # closing twice does nothing
+    x, T, P = parity.starts(8, 2, 1.0)
+    with pytest.raises(RuntimeError, match="closed"):
+        solver(x, T, P, parity.full(8, 1.0), parity.full(8, 1.0))
+
+
+def test_results_do_not_depend_on_the_batch(parity, verdict):
+    cells = 8192
+    x0, T, P = parity.starts(cells, 7, 1.0)
+    args = (x0, T, P, parity.full(cells, 50.0), parity.full(cells, 1e-10))
+    big, sel = parity.solver.launch(*args), torch.arange(0, cells, 64, device=parity.device)
+    perm = torch.randperm(cells, generator=torch.Generator().manual_seed(3)).to(parity.device)
+    shuffled = parity.solver.launch(*(q[perm] for q in args))
+    inverse = torch.empty_like(perm)
+    inverse[perm] = torch.arange(cells, device=parity.device)
+    alone = all(torch.equal(p[sel], q) for p, q in zip(big, parity.solver.launch(*(q[sel] for q in args)), strict=True))
+    one = all(
+        torch.equal(p[sel[:1]], q) for p, q in zip(big, parity.solver.launch(*(q[sel[:1]] for q in args)), strict=True)
+    )
+    order = all(torch.equal(p, q[inverse]) for p, q in zip(big, shuffled, strict=True))
+    verdict(
+        "batch size and order",
+        alone and one and order,
+        f"128 cells alone bitwise inside 8,192 {alone}; one cell alone bitwise {one}; 8,192 cells permuted "
+        f"bitwise {order}",
+    )

@@ -89,8 +89,7 @@ from source with `../.cuda`); the shared `../.venv` keeps the released snapy whe
   of species and stays reasonable, carry all species rather than add code and special cases.
 - Numerics: a change of method, tolerance, pivoting, step control or the constant-P form
   (dx/dt = (S v - x sum(S v)) / n_tot) is a numerics change. It has to be checked against VULCAN; it is never a cleanup.
-  The method and production settings are still in `maxichem/kincuda.py`'s module docstring, until the cleanup moves them
-  to named constants and `docs/method.md`. Add nothing new there.
+  The method is in `docs/method.md`; the production settings are named constants.
 - The checks' references are stored files: `paths.LIBREF` holds the torch reference solver's outputs on exactly the
   checks' inputs. `tests/libref.py` refuses inputs whose digest differs (network files, inputs, max_steps). A change of
   a check's inputs or of the numerics needs a new reference, made with `../reference/make_libref.py`. If a reference
@@ -103,29 +102,18 @@ from source with `../.cuda`); the shared `../.venv` keeps the released snapy whe
 
 ## Checks
 Run the checks that cover a change once the change is finished, before committing it or saying it works: not after
-every edit, and never on a GPU where a timing is running. "Every check" means all of the following.
-- Before a commit: `uvx ruff format maxichem tests bench` and `uvx ruff check maxichem tests bench` (settings in
-  `pyproject.toml`), and clang-format on `cpp/`. The commit leaves them clean.
-- After a change under `maxichem/`: `python tests/kincuda_check.py $VULCAN_THERMO` (NCHO_photo; ~1 min). It tests
-  parity against the stored reference (`paths.LIBREF`) to 1e-6 dex (one cell-call in 100,000 may reach 1e-5) on
-  recorded cold starts, scrambled starts, a 2,000-call chain and the photolysis cases (lit calls,
-  a lit chain, lit recovery, bad J), plus the guard and recovery cases, the 300 K count and batch size and order. Also
-  `python bench/kintest.py quick --ref $CHEM_DATA/benches/kintest/<latest saved quick run>`: it must show 0 misses
-  against VULCAN, and no path's worst error may change by more than 0.01 dex.
-- After a change to the generated kernels or the reader, also the sulfur network: `python tests/kincuda_check.py
-  $VULCAN_THERMO --network SNCHO_photo_network_2025.txt` (91 species, 4 warps per cell; reference `paths.LIBREF_S`;
-  H2S, SO2, COS and S2 scored as well). For a new network, its rounding drift sets `drift`.
-- After a change to `maxichem/kincuda_ad.py` (or to the call arithmetic it repeats): `python tests/kincuda_ad_check.py
-  <network>` on NCHO_photo, SNCHO_photo_network_2025.txt and CHO_photo (primal bitwise CudaSolver's, tangents against finite
-  differences, JVP / VJP dot products, recovered cells, determinism; exit status 1 on a failure). Compare the failing
-  cases with the last result in notes.md.
-- After a change to `CudaSolver.export`, to the generated kernels or to `cpp/`: rebuild `cpp/build`, then for each of
-  the photolysis case, the thermal case (`photo` 0) and a forced-recovery case (`max_steps` 2) run
-  `python tests/cpp_export_case.py <dir> [cells] [photo] [max_steps] [network]` and `cpp/build/test_export
-  <dir>/export <dir>/case`, on NCHO_photo and on SNCHO_photo_network_2025.txt: the C++ call must equal the Python call
-  bit for bit, counts included.
-- For a comment-only edit, compare syntax trees (`ast.dump`, with docstrings stripped) instead of rerunning the checks.
-  A comment inside the CUDA templates changes the generated source, so compare the compiled cubins instead.
+every edit, and never on a GPU where a timing is running. `docs/testing.md` lists every test.
+- Before a commit: `uvx pre-commit run --files <changed files>`.
+- After any code change: `pytest -m "not slow and not gpu"` (CPU, under a minute).
+- After a change under `maxichem/`: `pytest tests/test_parity.py tests/test_guard.py -m gpu -s` (with `VULCAN_THERMO` set).
+  The bar is 1e-6 dex against the stored references (one cell-call in 100,000 may reach 1e-5). Also `pytest
+  tests/test_vulcan_truth.py -s`: 0 misses against VULCAN, and no path's worst error may change by more than 0.01 dex.
+- After a change to `maxichem/kincuda_ad.py` or the arithmetic it repeats: `pytest tests/test_ad.py -s`. Compare the
+  failing cases with the last result in notes.md.
+- After a change to the export, the kernels or `cpp/`: `pytest tests/test_export_cpp.py -s`: the C++ call must equal the
+  Python call bit for bit, counts included. For a new network, its rounding drift sets `drift`.
+- A comment-only edit needs no checks: compare syntax trees (docstrings stripped), or the compiled kernels for a comment
+  inside `maxichem/kernels/`.
 
 ## Data safety
 - Never run `git clean -x`, `-X` or `-fdx`, `git stash --all` / `-a`, or `git add -f` under `data/`. The ignored

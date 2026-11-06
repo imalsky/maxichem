@@ -23,6 +23,9 @@ Repository = "https://github.com/imalsky/maxichem"
 [tool.setuptools]
 packages = ["maxichem"]
 
+[tool.setuptools.package-data]
+maxichem = ["kernels/*"]
+
 [dependency-groups]
 test = [
   "pytest >=8",
@@ -88,11 +91,12 @@ max-complexity = 15
 
 [tool.ruff.lint.pep8-naming]
 # Math symbols allowed by N. List only names that match a published equation and are in the project's glossary.
-extend-ignore-names = ["T", "P", "K", "J", "S", "M", "N"]
+extend-ignore-names = ["T", "P", "K", "J", "S", "M", "N", "B", "D", "dT", "dP", "dJ", "Sp"]
 
 [tool.ruff.lint.per-file-ignores]
 # Scripts and command-line tools may print. Edit: add the project's script folders.
 "tests/**" = ["T20"]
+"tests/test_*.py" = ["D103"]  # a test's name says what it proves
 "tools/**" = ["T20"]
 "bench/**" = ["T20"]
 "examples/**" = ["T20"]
@@ -113,7 +117,12 @@ markers = [
 
 [tool.coverage.run]
 source = ["maxichem"]
-omit = []  # list here the modules that only run on a GPU; the local GPU tests cover them
+omit = [  # these only run on a GPU; the local GPU tests cover them
+  "maxichem/_cuda.py",
+  "maxichem/_export.py",
+  "maxichem/kincuda.py",
+  "maxichem/kincuda_ad.py",
+]
 
 [tool.coverage.report]
 fail_under = 80
@@ -128,15 +137,20 @@ files = ["maxichem", "tests"]
 strict = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 warn_unreachable = true
-disallow_untyped_defs = false
+disallow_untyped_defs = false  # test functions need no annotations; the package's override below requires them
 disallow_incomplete_defs = false
+disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
 module = "maxichem.*"
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+disallow_untyped_calls = true
 
 [[tool.mypy.overrides]]
 module = ["torch.*", "nvidia.*"]  # torch's stubs do not cover the CUDA driver calls; both stay Any
 ignore_missing_imports = true
 follow_imports = "skip"
+
+[tool.codespell]
+ignore-words-list = "nd,fo,mis,emac,wit"  # nd: number density; fo: forcing offset; mis: step mismatches; the rest: names in notes.md

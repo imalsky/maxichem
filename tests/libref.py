@@ -1,41 +1,44 @@
-"""Stored outputs of the torch reference solver for the checks (paths.LIBREF): the call computed by batched fp64 Rodas3
+"""Stored outputs of the torch reference solver for the checks (paths.LIBREF).
+
+Stored outputs of the torch reference solver for the checks (paths.LIBREF): the call computed by batched fp64 Rodas3
 in torch (rate coefficients, exact Jacobian, LU without row exchanges, the call kernel's step control), written once
 on exactly the checks' inputs. Every entry carries the sha256 of the inputs it was computed from (the network's
-reaction list and NASA-9 files, the inputs, max_steps); a check computes the same digest and refuses a mismatch."""
+reaction list and NASA-9 files, the inputs, max_steps); a check computes the same digest and refuses a mismatch.
+"""
 
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from maxichem import paths
 
-_D = {}
+_D: dict[Path, Any] = {}  # the open reference files: a cache
 
 
 def digest(*items):
-    """sha256 over arrays or tensors (dtype, shape and bytes), strings and bytes, in order."""
+    """Return the sha256 over arrays or tensors (dtype, shape and bytes), strings and bytes, in order."""
     h = hashlib.sha256()
-    for a in items:
-        if isinstance(a, str):
-            a = a.encode()
-        if isinstance(a, bytes):
-            h.update(b"b%d:" % len(a) + a)
+    for item in items:
+        raw = item.encode() if isinstance(item, str) else item
+        if isinstance(raw, bytes):
+            h.update(b"b%d:" % len(raw) + raw)
             continue
-        a = np.ascontiguousarray(a.detach().cpu().numpy() if hasattr(a, "detach") else np.asarray(a))
+        a = np.ascontiguousarray(raw.detach().cpu().numpy() if hasattr(raw, "detach") else np.asarray(raw))
         h.update(f"a{a.dtype.str}{a.shape}:".encode() + a.tobytes())
     return h.hexdigest()
 
 
 def netsig(network_file, nasa_dir, species):
-    """Digest of a network: its reaction list file, the species order and each species' NASA-9 file."""
+    """Return the digest of a network: its reaction list file, the species order and each species' NASA-9 file."""
     return digest(
         Path(network_file).read_bytes(), "|".join(species), *(Path(f"{nasa_dir}/{q}.txt").read_bytes() for q in species)
     )
 
 
 def load(path=None):
-    """The stored arrays (an open npz, loaded once per path)."""
+    """Return the stored arrays (an open npz, loaded once per path)."""
     path = Path(path or paths.LIBREF)
     if path not in _D:
         paths.need(path)
@@ -44,16 +47,20 @@ def load(path=None):
 
 
 def arrays(key, path=None):
-    """The arrays stored directly under key: {name: array}."""
-    D = load(path)
-    return {k[len(key) + 1 :]: D[k] for k in D.files if k.startswith(key + "/") and k.count("/") == key.count("/") + 1}
+    """Return the arrays stored directly under key: {name: array}."""
+    stored = load(path)
+    return {
+        k[len(key) + 1 :]: stored[k]
+        for k in stored.files
+        if k.startswith(key + "/") and k.count("/") == key.count("/") + 1
+    }
 
 
 def entry(key, *inputs, path=None):
-    """arrays(key) after checking the digest of the inputs against key/sha."""
-    D = load(path)
-    if f"{key}/sha" not in D.files:
+    """Return arrays(key) after checking the digest of the inputs against key/sha."""
+    stored = load(path)
+    if f"{key}/sha" not in stored.files:
         raise KeyError(f"{key}: not in {path or paths.LIBREF}")
-    if str(D[f"{key}/sha"]) != digest(*inputs):
+    if str(stored[f"{key}/sha"]) != digest(*inputs):
         raise ValueError(f"{key}: the inputs differ from those the stored reference was written for")
     return arrays(key, path)

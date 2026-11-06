@@ -13,10 +13,15 @@
 #include <stddef.h>
 extern "C" __device__ void* memcpy(void*, const void*, size_t);
 extern "C" __device__ void* memset(void*, int, size_t);
-#define CUDA_TIDY_F1(f) __device__ double f(double);
-CUDA_TIDY_F1(exp) CUDA_TIDY_F1(log) CUDA_TIDY_F1(log10) CUDA_TIDY_F1(sqrt) CUDA_TIDY_F1(fabs) CUDA_TIDY_F1(floor)
-CUDA_TIDY_F1(ceil) CUDA_TIDY_F1(trunc) CUDA_TIDY_F1(rint)
-#undef CUDA_TIDY_F1
+__device__ double exp(double);
+__device__ double log(double);
+__device__ double log10(double);
+__device__ double sqrt(double);
+__device__ double fabs(double);
+__device__ double floor(double);
+__device__ double ceil(double);
+__device__ double trunc(double);
+__device__ double rint(double);
 __device__ double fmax(double, double);
 __device__ double fmin(double, double);
 __device__ double pow(double, double);
@@ -25,18 +30,30 @@ __device__ int isfinite(double);
 __device__ int isnan(double);
 __device__ int isinf(double);
 __device__ int abs(int);
-template <typename T> __device__ T __shfl_sync(unsigned, T, int, int = 32);
-template <typename T> __device__ T __shfl_xor_sync(unsigned, T, int, int = 32);
-template <typename T> __device__ T __shfl_up_sync(unsigned, T, unsigned, int = 32);
-template <typename T> __device__ T __shfl_down_sync(unsigned, T, unsigned, int = 32);
+__device__ int min(int, int);
+__device__ int max(int, int);
+template <typename T>
+__device__ T __shfl_sync(unsigned, T, int, int = 32);
+template <typename T>
+__device__ T __shfl_xor_sync(unsigned, T, int, int = 32);
+template <typename T>
+__device__ T __shfl_up_sync(unsigned, T, unsigned, int = 32);
+template <typename T>
+__device__ T __shfl_down_sync(unsigned, T, unsigned, int = 32);
 __device__ void __syncthreads();
 __device__ void __syncwarp(unsigned = 0xffffffff);
-template <typename T> __device__ T __ldg(const T*);
-template <typename T> __device__ T atomicAdd(T*, T);
-template <typename T> __device__ T atomicMax(T*, T);
-template <typename T> __device__ T atomicMin(T*, T);
-template <typename T> __device__ T atomicOr(T*, T);
-template <typename T> __device__ T atomicCAS(T*, T, T);
+template <typename T>
+__device__ T __ldg(const T*);
+template <typename T>
+__device__ T atomicAdd(T*, T);
+template <typename T>
+__device__ T atomicMax(T*, T);
+template <typename T>
+__device__ T atomicMin(T*, T);
+template <typename T>
+__device__ T atomicOr(T*, T);
+template <typename T>
+__device__ T atomicCAS(T*, T, T);
 __device__ double __longlong_as_double(long long);
 __device__ long long __double_as_longlong(double);
 __device__ double __dsub_rn(double, double);

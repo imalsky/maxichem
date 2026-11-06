@@ -5,12 +5,17 @@ The classes load on first use, so importing the package does not import torch:
 """
 
 import importlib
+from typing import Any
 
 _HOME = {"VulcanNetwork": "kinvulcan", "CudaSolver": "kincuda", "ADSolver": "kincuda_ad"}
-__all__ = list(_HOME)
+__all__ = ["ADSolver", "CudaSolver", "VulcanNetwork"]
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     if name in _HOME:
         return getattr(importlib.import_module(f".{_HOME[name]}", __name__), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

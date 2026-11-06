@@ -8,7 +8,7 @@ The chemistry is a VULCAN reaction network. The default is the C-H-N-O network o
 [VULCAN-JAX](https://github.com/imalsky/VULCAN3) (`NCHO_photo_network.txt`: 69 species, 390 reversible reactions, 48
 photolysis branches). With sulfur, the default is its `SNCHO_photo_network_2025.txt` (91 species, 532 reversible
 reactions, 61 photolysis branches). maxichem solves the network as a 0-D kinetics problem in CUDA kernels. The kernels
-are generated for the network and run over many cells at once.
+are compiled for the network and run over many cells at once.
 
 - **Physics.** Mass-action kinetics at constant T and P within a call: dx/dt = (S v - x sum(S v)) / n_tot, with
   n_tot = P / kT. Forward rates come from the network file. Reverse rates come from NASA-9 thermodynamics. Elements are
@@ -28,7 +28,7 @@ are generated for the network and run over many cells at once.
 ## Networks
 
 Any VULCAN-format network up to 254 species can be read, with these rate laws: one or two Arrhenius terms, falloff,
-the Troe factor, efficiencies and explicit reverse laws; at most 3 species on a side. All 11 networks of VULCAN-JAX
+the Troe factor and efficiencies; at most 3 species on a side. All 11 networks of VULCAN-JAX
 load and run. In a short test of loading and running (4,096 cells from NCHO states, one long dark call, then 20 calls
 with J) no cell failed and the element shares moved by at most 4e-11 over the 20 calls; this is not an accuracy test:
 
@@ -44,9 +44,7 @@ with J) no cell failed and the element shares moved by at most 4e-11 over the 20
 | SNCHO_photo_C3 | 92 | 524 | 60 | one duplicate reaction |
 | TiSNCHO_photo | 96 | 541 | 65 | three duplicate reactions |
 
-On SNCHO_photo_2025 the parity check against the stored reference passes 27 of its 28 cases. In the 2,000-call chain,
-2 of 1,024 hot cells (2,500-2,900 K) drift from the reference by up to 2.1e-6 dex in H2S, COS and S2, more cell-calls
-than the 1e-6 dex bar allows; the solver steps match the reference's in every cell-call.
+On SNCHO_photo_2025 every case of the parity check against the stored reference passes.
 
 The reader refuses a reaction whose atoms do not balance. A duplicate reaction (the same species on both sides) is
 kept, and the rates add, as in VULCAN; the reader lists the duplicates in `net.duplicates`.
@@ -83,10 +81,10 @@ import torch
 from maxichem import CudaSolver, VulcanNetwork
 
 th = "/path/to/VULCAN-JAX/src/vulcan3/thermo"
-net = VulcanNetwork(f"{th}/NCHO_photo_network.txt", f"{th}/NASA9")    # 69 species, He last
+net = VulcanNetwork(f"{th}/NCHO_photo_network.txt", f"{th}/NASA9")  # 69 species, He last
 solver = CudaSolver(net, torch.device("cuda"), photo=True)
-x, h, done, steps = solver(x, T, P, dt, h, J=J)    # float64 CUDA tensors, one row per cell
-counts = solver.check()                             # guard counts; raises if a cell was below 300 K
+x, h, done, steps = solver(x, T, P, dt, h, J=J)  # float64 CUDA tensors, one row per cell
+counts = solver.check()  # guard counts; raises if a cell was below 300 K
 ```
 
 ## Using it in a GCM
@@ -120,8 +118,8 @@ counts = solver.check()                             # guard counts; raises if a 
   their tables and the launch sizes; `cpp/maxichem.hpp` (`maxichem::Solver`, libtorch and the CUDA driver API) loads
   the export and launches the same kernels with the same arguments, so a call gives the same bits as in Python.
   Export on the machine that runs it (a cubin is for one GPU architecture). Build: `cmake -S cpp -B cpp/build
-  -DPython3_EXECUTABLE=<python with torch> -DCUDAToolkit_ROOT=<CUDA toolkit>`. Check: `tests/cpp_export_case.py`
-  writes an export and one call, and `cpp/build/test_export` compares the C++ call with it bit for bit.
+  -DPython3_EXECUTABLE=<python with torch> -DCUDAToolkit_ROOT=<CUDA toolkit>`. Check: `tests/test_export_cpp.py` writes
+  an export and one call, and compares the C++ call with it bit for bit.
 
 ## Accuracy
 
@@ -223,8 +221,8 @@ parameters, with the step sizes frozen or with the step control differentiated. 
 their primal result is bitwise the call's. They take networks up to 96 species with photolysis, the Troe factor and the
 collision limit (every VULCAN-JAX network).
 
-`tests/kincuda_ad_check.py` checks them against finite differences of the call and by dot products between the two
-kernels. Every case passes on CHO_photo, NCHO_photo and SNCHO_photo_2025 (101 of 101; on the sulfur network the
+`tests/test_ad.py` checks them against finite differences of the call and by dot products between the two
+kernels. Every case passes on CHO_photo, NCHO_photo and SNCHO_photo_2025 (on the sulfur network the
 branches the check's boxes lack take the J of a 1-D WASP-39b model). In a dark cell, the J tangent at exactly J = 0 is not verified at the default
 atol: finite differences cannot resolve it. We infer that it holds only for a tiny, state-dependent range of J. For a
 J derivative there, call at a small positive rate (the check uses 1e-8 s^-1, where it passes). There is no independent
@@ -232,11 +230,8 @@ reference for these derivatives on the current networks.
 
 ## Tests and the data they need
 
-| Check | What it verifies |
-| --- | --- |
-| `tests/kincuda_check.py <VULCAN_THERMO> [--network SNCHO_photo_network_2025.txt]` | the CUDA call against stored outputs of an independent torch reference solver: cold, scrambled and 2,000-call chained calls; photolysis calls, a lit chain and lit recovery; bad inputs; guard and recovery; batch size and order (NCHO_photo by default; the sulfur network also scores H2S, SO2, COS, S2) |
-| `bench/kintest.py quick --ref <saved run>` | the solver against VULCAN-0D truth boxes and truth paths, misses first, paired with a saved run |
-| `tests/kincuda_ad_check.py [network]` | the derivative kernels: primal bitwise the call's, tangents against finite differences, dot products, recovered cells, determinism |
+`pytest -m "not slow and not gpu"` runs the CPU tests. `pytest -m gpu -s` runs the GPU tests and prints each case's numbers.
+[docs/testing.md](docs/testing.md) lists what each test verifies.
 
 The checks and benches read stored references and truth data that are not part of this repository. They are found
 under `CHEM_DATA`:
@@ -251,7 +246,7 @@ under `CHEM_DATA`:
     truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz   input states of the derivative check
     benches/kintest/                   saved quick runs of bench/kintest.py
 
-Each check stops with a message that names the missing files. Each stored reference of `tests/kincuda_check.py`
+Each check stops with a message that names the missing files. Each stored reference of the parity tests
 carries a digest of its inputs, and the check refuses inputs that differ. `bench/kintest.py` refuses a truth set that
 is not complete (boxes not run, failed runs, bad states, or truth paths missing from its job list), and a paired run
 refuses a saved run made on other truth data (a digest of the scored truth).
@@ -259,12 +254,14 @@ refuses a saved run made on other truth data (a digest of the scored truth).
 ## Layout
 
     maxichem/kinvulcan.py    reader of VULCAN-format networks and NASA-9 files (VulcanNetwork)
-    maxichem/kincuda.py      the call as generated CUDA kernels (CudaSolver)
+    maxichem/kincuda.py      the call (CudaSolver)
+    maxichem/kernels/        the CUDA kernels; _kernel_header.py writes each network's numbers for them
     maxichem/kincuda_ad.py   tangent and adjoint kernels (ADSolver; networks up to 96 species)
     maxichem/paths.py        data locations (CHEM_DATA, VULCAN_THERMO)
     cpp/                     the C++ caller of an exported solver (maxichem.hpp) and its test
     tests/, bench/           the checks and the benches
     examples/quickstart.py   the example above
+    docs/                    the method, the architecture, the API and a glossary
     notes.md                 the research record
 
 ## Citation

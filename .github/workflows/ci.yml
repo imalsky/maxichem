@@ -31,6 +31,8 @@ jobs:
         with:
           python-version: "3.x"
       - uses: astral-sh/setup-uv@v10.3.0
+      - name: Write the kernels' data header for clang-tidy
+        run: PYTHONPATH=. uv run --no-project --with numpy python tools/write_kernel_header.py
       - name: Format, lint, types, spelling
         run: uvx pre-commit run --all-files --show-diff-on-failure
         env:
@@ -58,12 +60,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v10.3.0
+      - name: Write the kernels' data header
+        run: PYTHONPATH=. uv run --no-project --with numpy python tools/write_kernel_header.py
       - name: Compile every tracked .cu file
         run: |
           mapfile -t kernels < <(git ls-files '*.cu')
-          if [ "${#kernels[@]}" -gt 0 ]; then
-            uv run --no-project --with nvidia-cuda-nvrtc-cu12 python tools/nvrtc_compile.py "${kernels[@]}"
-          fi
+          uv run --no-project --with nvidia-cuda-nvrtc-cu12==12.8.93 python tools/nvrtc_compile.py \
+            -I build/kernels -I maxichem/kernels "${kernels[@]}"
 
   tests:
     name: CPU tests on Python ${{ matrix.python-version }}
@@ -73,7 +76,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Edit: the oldest and newest versions in requires-python.
         python-version: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v7

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -15,6 +16,11 @@
 namespace maxichem {
 
 namespace {
+
+// These three match maxichem/_constants.py: EXPORT_FORMAT, COUNT_SLOTS and GUARD_BLOCK_THREADS.
+constexpr int kExportFormat = 2;
+constexpr int64_t kCountSlots = 10;
+constexpr int kGuardBlockThreads = 128;
 
 void check(CUresult r, char const* what) {
   if (r != CUDA_SUCCESS) {
@@ -40,6 +46,64 @@ torch::Dtype dtype_of(std::string const& name) {
   throw std::runtime_error("maxichem: table dtype " + name);
 }
 
+// meta.txt: "key value..." per line, with the tables, the kernels' arguments and the names apart.
+void read_meta(std::string const& path, std::map<std::string, std::string>& meta,
+               std::vector<std::vector<std::string>>& tables,
+               std::map<std::string, std::vector<std::string>>& arguments, std::vector<std::string>& species,
+               std::vector<std::string>& elements) {
+  std::istringstream lines(read_file(path));
+  for (std::string line; std::getline(lines, line);) {
+    std::istringstream ws(line);
+    std::vector<std::string> tok;
+    for (std::string t; ws >> t;) tok.push_back(t);
+    if (tok.empty()) continue;
+    if (tok[0] == "table") {
+      tables.push_back(tok);
+    } else if (tok[0] == "args") {
+      arguments[tok[1]].assign(tok.begin() + 2, tok.end());
+    } else if (tok[0] == "species" || tok[0] == "elements") {
+      (tok[0] == "species" ? species : elements).assign(tok.begin() + 1, tok.end());
+    } else if (tok.size() >= 2) {
+      meta[tok[0]] = tok[1];
+    }
+  }
+}
+
+// The device's multiprocessors, after checking that the export's cubin is for its architecture.
+int multiprocessors_on(int index, std::string const& arch) {
+  CUdevice dev;
+  check(cuDeviceGet(&dev, index), "device");
+  int major = 0, minor = 0, sms = 0;
+  check(cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev), "attribute");
+  check(cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev), "attribute");
+  check(cuDeviceGetAttribute(&sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev), "attribute");
+  if (std::to_string(major * 10 + minor) != arch)
+    throw std::runtime_error("maxichem: the export is for sm_" + arch + ", this device is sm_" +
+                             std::to_string(major * 10 + minor) + "; export on this machine");
+  return sms;
+}
+
+// As CudaSolver: opt the kernel in to its dynamic shared memory, then the blocks one multiprocessor holds.
+int blocks_per_multiprocessor(CUfunction fn, int threads, int smem) {
+  int blocks = 0;
+  check(cuFuncSetAttribute(fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem), "shared memory");
+  check(cuOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, fn, threads, smem), "occupancy");
+  if (blocks < 1) throw std::runtime_error("maxichem: the kernel does not fit on this device");
+  return blocks;
+}
+
+// One table from its line of meta.txt: table name dtype dims...
+torch::Tensor read_table(std::string const& folder, std::vector<std::string> const& line) {
+  std::vector<int64_t> shape;
+  for (size_t i = 3; i < line.size(); ++i) shape.push_back(std::stoll(line[i]));
+  auto cpu = torch::empty(shape, torch::TensorOptions().dtype(dtype_of(line[2])));
+  std::string bytes = read_file(folder + "/tables/" + line[1] + ".bin");
+  if (bytes.size() != static_cast<size_t>(cpu.nbytes()))
+    throw std::runtime_error("maxichem: table " + line[1] + " has the wrong size");
+  std::memcpy(cpu.data_ptr(), bytes.data(), bytes.size());
+  return cpu;
+}
+
 }  // namespace
 
 Solver::Solver(std::string const& folder, torch::Device device) : device_(device) {
@@ -49,28 +113,17 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
   device = device_;
   torch::zeros({1}, torch::TensorOptions().device(device));  // torch's context is current
 
-  // meta.txt: "key value..." per line
   std::map<std::string, std::string> meta;
   std::vector<std::vector<std::string>> tables;
-  std::istringstream lines(read_file(folder + "/meta.txt"));
-  for (std::string line; std::getline(lines, line);) {
-    std::istringstream ws(line);
-    std::vector<std::string> tok;
-    for (std::string t; ws >> t;) tok.push_back(t);
-    if (tok.empty()) continue;
-    if (tok[0] == "table") {
-      tables.push_back(tok);
-    } else if (tok[0] == "species" || tok[0] == "elements") {
-      (tok[0] == "species" ? species : elements).assign(tok.begin() + 1, tok.end());
-    } else if (tok.size() >= 2) {
-      meta[tok[0]] = tok[1];
-    }
-  }
+  read_meta(folder + "/meta.txt", meta, tables, arguments_, species, elements);
   auto geti = [&](char const* k) {
     auto it = meta.find(k);
     if (it == meta.end()) throw std::runtime_error(std::string("maxichem: meta.txt lacks ") + k);
     return std::stoll(it->second);
   };
+  if (geti("export_format") != kExportFormat)
+    throw std::runtime_error("maxichem: export format " + meta.at("export_format") + ", this code reads " +
+                             std::to_string(kExportFormat) + "; export again with this version");
   ns = static_cast<int>(geti("ns"));
   nj = static_cast<int>(geti("nj"));
   w_ = static_cast<int>(geti("w"));
@@ -87,15 +140,7 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
     throw std::runtime_error("maxichem: meta.txt lists " + std::to_string(species.size()) + " species, ns is " +
                              std::to_string(ns));
 
-  CUdevice dev;
-  check(cuDeviceGet(&dev, device_.index()), "device");
-  int major = 0, minor = 0, sms = 0;
-  check(cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev), "attribute");
-  check(cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev), "attribute");
-  check(cuDeviceGetAttribute(&sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev), "attribute");
-  if (std::to_string(major * 10 + minor) != meta.at("arch"))
-    throw std::runtime_error("maxichem: the export is for sm_" + meta.at("arch") + ", this device is sm_" +
-                             std::to_string(major * 10 + minor) + "; export on this machine");
+  int sms = multiprocessors_on(device_.index(), meta.at("arch"));
 
   std::string cubin = read_file(folder + "/kernel.cubin");
   CUmodule mod;
@@ -108,36 +153,15 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
     call_ = f[0];
     guard_ = f[1];
     recover_ = f[2];
-    // as CudaSolver: the dynamic shared memory opt-in, then blocks from the occupancy
-    int nl = 32 * w_;
-    int occ[2];
-    CUfunction fn2[2] = {f[0], f[2]};
-    int threads[2] = {nl * cpb_, nl};
-    int smem[2] = {smem_, smem_rec_};
-    for (int i = 0; i < 2; ++i) {
-      check(cuFuncSetAttribute(fn2[i], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[i]), "shared memory");
-      check(cuOccupancyMaxActiveBlocksPerMultiprocessor(&occ[i], fn2[i], threads[i], smem[i]), "occupancy");
-      if (occ[i] < 1) throw std::runtime_error("maxichem: the kernel does not fit on this device");
-    }
-    max_blocks_ = sms * occ[0];
-    rec_blocks_ = sms * occ[1];
-
-    for (auto const& t : tables) {  // table name dtype dims...
-      std::vector<int64_t> shape;
-      for (size_t i = 3; i < t.size(); ++i) shape.push_back(std::stoll(t[i]));
-      auto dt = dtype_of(t[2]);
-      auto cpu = torch::empty(shape, torch::TensorOptions().dtype(dt));
-      std::string bytes = read_file(folder + "/tables/" + t[1] + ".bin");
-      if (bytes.size() != static_cast<size_t>(cpu.nbytes()))
-        throw std::runtime_error("maxichem: table " + t[1] + " has the wrong size");
-      std::memcpy(cpu.data_ptr(), bytes.data(), bytes.size());
-      tab_[t[1]] = cpu.to(device);
-    }
+    int threads = 32 * w_;
+    max_blocks_ = sms * blocks_per_multiprocessor(f[0], threads * cpb_, smem_);
+    rec_blocks_ = sms * blocks_per_multiprocessor(f[2], threads, smem_rec_);
+    for (auto const& t : tables) tab_[t[1]] = read_table(folder, t).to(device);
     auto f64 = torch::TensorOptions().dtype(torch::kFloat64).device(device);
     scratch_ = torch::empty({max_blocks_ * cpb_ * stride_}, f64);
     scratch_rec_ = torch::empty({rec_blocks_ * stride_rec_}, f64);
-    count = torch::zeros({10}, torch::TensorOptions().dtype(torch::kInt32).device(device));
-    total = torch::zeros({10}, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    count = torch::zeros({kCountSlots}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    total = torch::zeros({kCountSlots}, torch::TensorOptions().dtype(torch::kInt64).device(device));
   } catch (...) {
     cuModuleUnload(mod);
     module_ = nullptr;
@@ -191,58 +215,49 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   count.zero_();
   CUstream stream = reinterpret_cast<CUstream>(at::cuda::getCurrentCUDAStream().stream());
 
-  // pointers and scalars, in CudaSolver.launch's order
-  std::vector<void*> ptrs;
-  ptrs.reserve(64);
-  std::vector<void*> args;
-  auto P_ = [&](torch::Tensor const& t) {
-    ptrs.push_back(t.data_ptr());
-    args.push_back(&ptrs.back());
+  // the address of each kernel parameter's value, by name; meta.txt gives each kernel's order
+  std::deque<void*> pointers;
+  std::map<std::string, void*> values;
+  auto tensor = [&](std::string const& name, torch::Tensor const& t) {
+    pointers.push_back(t.data_ptr());
+    values[name] = &pointers.back();
   };
-  int recsteps = rec_steps_ * max_steps;
-  auto launch = [&](void* fn, unsigned grid, unsigned block, unsigned smem, char const* what) {
+  for (auto const& [name, t] : tab_) tensor(name, t);
+  std::array<std::pair<char const*, torch::Tensor const*>, 12> inputs{{{"x0", &x},
+                                                                       {"Ta", &T},
+                                                                       {"Pa", &P},
+                                                                       {"dta", &dt},
+                                                                       {"hin", &h},
+                                                                       {"hio", &ho},
+                                                                       {"xout", &xo},
+                                                                       {"doneo", &done},
+                                                                       {"noko", &nok},
+                                                                       {"redo", &redo},
+                                                                       {"list", &lst},
+                                                                       {"count", &count}}};
+  for (auto const& [name, t] : inputs) tensor(name, *t);
+  if (nj) tensor("Jin", J);
+  values["B"] = &B;
+  values["rtol"] = &rtol;
+  values["atol"] = &atol;
+  values["sround"] = &sround_;
+  values["jround"] = &jround_;
+  auto launch = [&](void* fn, std::string const& kernel, unsigned grid, unsigned block, unsigned smem) {
+    std::vector<void*> args;
+    for (auto const& name : arguments_.at(kernel)) args.push_back(values.at(name));
     check(cuLaunchKernel(static_cast<CUfunction>(fn), grid, 1, 1, block, 1, 1, smem, stream, args.data(), nullptr),
-          what);
-    args.clear();
-    ptrs.clear();
+          kernel.c_str());
   };
 
-  // call
-  for (auto const* t : {&x, &T, &P, &dt, &ho, &xo, &done, &nok, &count}) P_(*t);
-  args.push_back(&B);
-  args.push_back(&rtol);
-  args.push_back(&atol);
-  args.push_back(&max_steps);
-  for (char const* n : {"perm", "blob", "rc", "rf", "nasa"}) P_(tab_.at(n));
-  P_(scratch_);
-  for (char const* n : {"sst", "jt", "lu", "optr"}) P_(tab_.at(n));
-  args.push_back(&sround_);
-  args.push_back(&jround_);
-  if (nj) P_(J);
-  int nb = std::max(1, std::min((B + cpb_ - 1) / cpb_, max_blocks_));
-  launch(call_, nb, 32 * w_ * cpb_, smem_, "launch call");
+  values["max_steps"] = &max_steps;
+  tensor("scratch", scratch_);
+  launch(call_, "call", std::max(1, std::min((B + cpb_ - 1) / cpb_, max_blocks_)), 32 * w_ * cpb_, smem_);
+  launch(guard_, "guard", std::max(1, (B + kGuardBlockThreads - 1) / kGuardBlockThreads), kGuardBlockThreads, 0);
 
-  // guard
-  for (auto const* t : {&x, &T, &P, &dt, &xo, &done, &nok}) P_(*t);
-  P_(tab_.at("atoms"));
-  for (auto const* t : {&redo, &lst, &count}) P_(*t);
-  args.push_back(&B);
-  args.push_back(&atol);
-  if (nj) P_(J);
-  launch(guard_, std::max(1, (B + 127) / 128), 128, 0, "launch guard");
-
-  // recover
-  for (auto const* t : {&x, &T, &P, &dt, &h, &xo, &ho, &done, &nok, &redo, &lst, &count}) P_(*t);
-  args.push_back(&rtol);
-  args.push_back(&atol);
-  args.push_back(&recsteps);
-  for (char const* n : {"perm", "blob", "rc", "rf", "nasa"}) P_(tab_.at(n));
-  P_(scratch_rec_);
-  for (char const* n : {"sst", "jt", "didx", "atoms"}) P_(tab_.at(n));
-  args.push_back(&sround_);
-  args.push_back(&jround_);
-  if (nj) P_(J);
-  launch(recover_, std::max(1, std::min(B, rec_blocks_)), 32 * w_, smem_rec_, "launch recover");
+  int recsteps = rec_steps_ * max_steps;
+  values["max_steps"] = &recsteps;
+  tensor("scratch", scratch_rec_);
+  launch(recover_, "recover", std::max(1, std::min(B, rec_blocks_)), 32 * w_, smem_rec_);
 
   total += count;
   return {xo, ho, done.to(torch::kBool), nok};

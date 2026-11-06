@@ -26,6 +26,10 @@
 
 namespace maxichem {
 
+// DEFAULT_RTOL and DEFAULT_MAX_STEPS in maxichem/_constants.py; a test compares them.
+inline constexpr double kDefaultRtol = 1e-3;
+inline constexpr int kDefaultMaxSteps = 4000;
+
 class Solver {
  public:
   Solver(std::string const& folder, torch::Device device);
@@ -34,8 +38,9 @@ class Solver {
   Solver& operator=(Solver const&) = delete;
 
   std::array<torch::Tensor, 4> operator()(torch::Tensor x, torch::Tensor T, torch::Tensor P, torch::Tensor dt,
-                                          torch::Tensor h, torch::Tensor J = torch::Tensor(), double rtol = 1e-3,
-                                          double atol = -1.0, int max_steps = 4000);
+                                          torch::Tensor h, torch::Tensor J = torch::Tensor(),
+                                          double rtol = kDefaultRtol, double atol = -1.0,
+                                          int max_steps = kDefaultMaxSteps);
 
   int ns = 0;                                  // species
   std::vector<std::string> species, elements;  // names; the atoms table is species x elements
@@ -56,6 +61,7 @@ class Solver {
   void* guard_ = nullptr;
   void* recover_ = nullptr;
   std::map<std::string, torch::Tensor> tab_;
+  std::map<std::string, std::vector<std::string>> arguments_;  // each kernel's parameters, in order
   torch::Tensor scratch_, scratch_rec_;
 };
 

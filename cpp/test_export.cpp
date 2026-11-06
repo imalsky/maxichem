@@ -3,8 +3,7 @@
 // The case folder holds raw little-endian files written by tests/cpp_export_case.py: the inputs x.bin [B, ns],
 // T.bin, P.bin, dt.bin, h.bin [B], J.bin [B, nj] (photolysis networks; all float64), the Python call's results
 // x_out.bin, h_out.bin, steps_out.bin (float64), done_out.bin (int8) and counts_out.bin (int32 [10]), and B.txt and
-// max_steps.txt. The call runs twice: the first is compared in full (counts included), the second is timed and
-// compared again.
+// max_steps.txt. The call runs twice, and both are compared in full (counts included); the second is timed.
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -33,8 +32,8 @@ int main(int argc, char** argv) {
   std::string ex = argv[1], cs = argv[2];
   torch::Device dev(torch::kCUDA, 0);
   maxichem::Solver chem(ex, dev);
-  int64_t B;
-  std::ifstream(cs + "/B.txt") >> B;
+  int64_t B = 0;
+  if (!(std::ifstream(cs + "/B.txt") >> B) || B < 1) throw std::runtime_error("cannot read " + cs + "/B.txt");
   auto f64 = torch::kFloat64;
   auto x = load(cs + "/x.bin", {B, chem.ns}, f64).to(dev);
   auto T = load(cs + "/T.bin", {B}, f64).to(dev);
@@ -53,6 +52,7 @@ int main(int argc, char** argv) {
   torch::cuda::synchronize();
   auto t0 = std::chrono::steady_clock::now();
   auto r2 = chem(x, T, P, dt, h, J, 1e-3, -1.0, max_steps);
+  auto counts2 = chem.count.cpu().clone();
   torch::cuda::synchronize();
   double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   auto xo = load(cs + "/x_out.bin", {B, chem.ns}, f64);
@@ -63,8 +63,10 @@ int main(int argc, char** argv) {
   auto same = [](torch::Tensor a, torch::Tensor b) {
     return torch::equal(a.cpu().contiguous().view(torch::kInt64), b.contiguous().view(torch::kInt64));
   };
-  bool ok = same(r[0], xo) && same(r[1], ho) && same(r[3], so) && torch::equal(r[2].cpu(), dn) && same(r2[0], xo) &&
-            same(r2[1], ho) && torch::equal(counts, co);
+  auto all_same = [&](std::array<torch::Tensor, 4> const& q, torch::Tensor const& c) {
+    return same(q[0], xo) && same(q[1], ho) && same(q[3], so) && torch::equal(q[2].cpu(), dn) && torch::equal(c, co);
+  };
+  bool ok = all_same(r, counts) && all_same(r2, counts2);
   std::cout << "cells " << B << ", species " << chem.ns << ", branches " << chem.nj << ": C++ call "
             << (ok ? "bitwise identical to the Python call" : "DIFFERENT") << "; second call " << ms << " ms ("
             << 1e3 * ms / B << " us per cell)"
