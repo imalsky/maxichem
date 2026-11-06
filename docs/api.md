@@ -20,9 +20,14 @@ first appearance in the list, with He appended. `bulk` is the gas whose efficien
 | `skipped` | Condensation lines skipped |
 | `duplicates` | Pairs of entries with the same species on both sides; their rates add, as in VULCAN |
 
-It refuses a reaction whose atoms do not balance, a reaction after `# reverse stops` outside photolysis or condensation, a
-photolysis line whose reactant is not its absorber, a repeated absorber and branch, and an `# irreversible` reaction: it holds no
-explicit reverse law.
+It refuses a reaction whose atoms do not balance, a reaction above the first heading (it has no rate law), a reaction after
+`# reverse stops` outside photolysis or condensation, a photolysis line whose reactant is not its absorber, a repeated absorber and
+branch, and an `# irreversible` reaction: every reverse comes from NASA-9.
+
+After the first heading, a comment must be a known heading (`KNOWN_HEADINGS`), a line of column titles (`# id`), a commented-out
+reaction or empty: reactions under an unknown heading would keep the law of the section above. Free text goes above the first
+heading. A NASA-9 file must hold 20 or 30 numbers, and G / RT may jump by at most `MAX_GIBBS_JUMP` at 1000 K. VULCAN's
+`TiH.txt` fails this, so `TiSNCHO_photo_network.txt` is refused until that file is corrected.
 
 ## `CudaSolver(net, device, drift=None, photo=False)`
 
@@ -40,8 +45,9 @@ on torch's current stream.
 | `info` | The kernel's layout |
 | `close()` | Unloads the kernels |
 
-J is [B, len(net.photo)], columns in `net.photo`'s order; `None` means 0. A row with a negative or non-finite J or a negative mole
-fraction is bad input: not stepped, and counted.
+J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells) and refused
+without it. A row with a negative or non-finite J or a negative mole fraction is bad input: not stepped, and counted. A non-finite h
+acts as dt and is counted in `nonfinite_h`. `launch` and a call both add their counts to `total`.
 
 ## `ADSolver(net, device, cap=CAP, drift=None, photo=False)`
 
@@ -51,6 +57,9 @@ fraction is bad input: not stepped, and counted.
 | `vjp(x, T, P, dt, h, gx, gh, lm, rc, adapt, rtol, atol, max_steps, J)` | Returns (x, h, done, accepted steps, cotangents dict) |
 | `status`, `check()`, `flag` | Counts as `CudaSolver`, and the last call's per-cell flag |
 | `close()` | Unloads the kernels |
+
+A non-finite log multiplier in `lm` takes no try: its cell comes back with done 0, flag 2 and NaN derivatives, counted as unfinished,
+recomputed and still failed. `cap` is a positive integer; `drift`, in both solvers, is finite and at least 0.
 
 With a leading axis of at most `DMAX` directions on every tangent, the directions share one call. See
 [method.md](method.md#derivatives) for `adapt`.

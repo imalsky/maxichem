@@ -61,6 +61,14 @@ from .kinvulcan import VulcanNetwork
 __all__ = ["ATOL", "COUNTS", "DRIFT", "K_COLL", "REC_STEPS", "T_MIN", "CudaSolver", "check_inputs"]
 
 
+def checked_drift(drift: float | None) -> float:
+    """Return the element-drift allowance, relative; refuse one that is negative or not finite (None: ``DRIFT``)."""
+    value = float(DRIFT if drift is None else drift)
+    if not (math.isfinite(value) and value >= 0.0):
+        raise ValueError(f"drift: a finite allowance of at least 0 expected, got {drift}")
+    return value
+
+
 def check_inputs(
     dev: torch.device,
     ns: int,
@@ -145,8 +153,8 @@ class CudaSolver:
                 "photo=True needs a network with photolysis branches whose species are all in its species "
                 f"list (branches {len(net.photo)}, missing species {net.photo_missing})"
             )
+        self.drift = checked_drift(drift)
         self.dev = device_of(device)
-        self.drift = float(DRIFT if drift is None else drift)
         self._modules: list[Any] = []  # every module loaded, also when the setup fails part of the way
         self._setup(net, photo)
 
@@ -307,13 +315,14 @@ class CudaSolver:
         max_steps : int
             Tries per call; the recovery has ``REC_STEPS`` times as many.
         J : torch.Tensor, optional
-            Photolysis rates [B, branches] in s^-1 (``photo=True`` only); None means 0.
+            Photolysis rates [B, branches] in s^-1: required with ``photo=True``, refused without it. Dark cells
+            pass zeros.
 
         Returns
         -------
         tuple of torch.Tensor
             x, h, done, accepted steps, and a per-cell flag: 0 (the call's result passed the guard), 1 (recomputed,
-            passes) or 2 (recomputed, still fails). The counts go to ``self.count``.
+            passes) or 2 (recomputed, still fails). The counts go to ``self.count``, and are added to ``self.total``.
         """
         if not self._modules:
             raise RuntimeError("this solver was closed; build a new one")
@@ -354,16 +363,17 @@ class CudaSolver:
         values |= {"max_steps": ctypes.c_int(REC_STEPS * max_steps), "scratch": self._scratch_rec}
         grid = max(1, min(B, self.rec_blocks))
         launch_kernel(self._rec, grid, 32 * self.w, self.smem_rec, stream, self._arguments("recover", values))
+        self.total += self.count
         return xo, ho, done.bool(), nok, redo
 
     def _photolysis_rates(self, J: torch.Tensor | None, cells: int) -> torch.Tensor | None:
-        """Return the call's J, zeros when it is not given; refuse a J of the wrong form."""
+        """Return the call's J; refuse a missing J, or one of the wrong form."""
         if not self.nj:
             if J is not None:
                 raise ValueError("this solver has no photolysis (built with photo=False)")
             return None
         if J is None:
-            return torch.zeros(cells, self.nj, dtype=torch.float64, device=self.dev)
+            raise ValueError(f"J [B, {self.nj}] is required with photo=True: pass zeros for dark cells")
         if J.device == self.dev and J.dtype == torch.float64 and tuple(J.shape) == (cells, self.nj):
             return J.contiguous()
         raise ValueError(f"J [B, {self.nj}]: a float64 tensor on the device of x")
@@ -385,9 +395,8 @@ class CudaSolver:
         max_steps: int = DEFAULT_MAX_STEPS,
         J: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
-        """Run the call: ``launch`` without the flag, and the counts added to ``self.total`` on the stream."""
+        """Run the call: ``launch`` without the flag."""
         xo, ho, done, nok, _ = self.launch(x, T, P, dt, h, rtol, atol, max_steps, J)
-        self.total += self.count
         return xo, ho, done, nok
 
     def export(self, folder: str | Path) -> None:

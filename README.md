@@ -28,7 +28,7 @@ are compiled for the network and run over many cells at once.
 ## Networks
 
 Any VULCAN-format network up to 254 species can be read, with these rate laws: one or two Arrhenius terms, falloff,
-the Troe factor and efficiencies; at most 3 species on a side. All 11 networks of VULCAN-JAX
+the Troe factor and efficiencies; at most 3 species on a side. Ten of the 11 networks of VULCAN-JAX
 load and run. In a short test of loading and running (4,096 cells from NCHO states, one long dark call, then 20 calls
 with J) no cell failed and the element shares moved by at most 4e-11 over the 20 calls; this is not an accuracy test:
 
@@ -42,11 +42,12 @@ with J) no cell failed and the element shares moved by at most 4e-11 over the 20
 | SNCHO_photo | 88 | 513 | 60 | the earlier sulfur network; its tests are superseded |
 | SNCHO_DMS_photo_Tsai2024 | 95 | 536 | 64 | |
 | SNCHO_photo_C3 | 92 | 524 | 60 | one duplicate reaction |
-| TiSNCHO_photo | 96 | 541 | 65 | three duplicate reactions |
+| TiSNCHO_photo | 96 | 541 | 65 | refused: the NASA-9 fit of TiH is unsound below 1000 K; also three duplicate reactions |
 
 On SNCHO_photo_2025 every case of the parity check against the stored reference passes.
 
-The reader refuses a reaction whose atoms do not balance. A duplicate reaction (the same species on both sides) is
+The reader refuses a reaction whose atoms do not balance, a reaction no heading gives a law, an unknown heading and a
+NASA-9 file whose two ranges do not meet at 1000 K (docs/api.md). A duplicate reaction (the same species on both sides) is
 kept, and the rates add, as in VULCAN; the reader lists the duplicates in `net.duplicates`.
 
 ## Requirements
@@ -93,9 +94,9 @@ counts = solver.check()  # guard counts; raises if a cell was below 300 K
   - `x` [cells, species]: mole fractions in the order of `net.species`;
   - `T` [cells] in K; `P` [cells] in dyn cm^-2 (1 bar = 1e6); `dt` [cells] in s;
   - `h` [cells]: the step size the cell's last call returned (any positive value at the first call, for example 1e-10).
-    It is only a first guess: the call clips it to [1e-12 s, dt], and a non-finite h acts as dt;
+    It is only a first guess: the call clips it to [1e-12 s, dt], and a non-finite h acts as dt and is counted;
   - `J` [cells, branches]: photolysis rates in s^-1, one column per branch in the order of `net.photo` (each entry
-    names its absorber and branch index as in the network file). Use zeros at night.
+    names its absorber and branch index as in the network file). Required with `photo=True`; use zeros at night.
 - Outputs: the new `x`, the step size to keep, a per-cell `done` flag (the call finished and its result passed the
   guard) and the number of accepted steps.
 - Tolerances are arguments of every call, in Python (`rtol=1e-3, atol=1e-25`) and in the C++ caller (`rtol`, `atol`;

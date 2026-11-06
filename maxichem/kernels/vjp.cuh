@@ -469,8 +469,8 @@ __device__ __forceinline__ void nan_cotangents(double* __restrict__ gx0, double*
 // The call and the cotangents of its inputs, one warp per cell. DN = false: every cell, the call kernel's attempts
 // (queue count[0]; CAP stored attempts per cell in rec). DN = true: the first count[COUNT_RECOMPUTED] cells of list,
 // the recover kernel's attempts (dense W in wscr; max_steps = the recovery's tries; CAPR stored attempts; queue
-// count[9]); its result tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8] and NaN
-// cotangents.
+// the recovery's queue); its result tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8]
+// and NaN cotangents.
 template <bool DN>
 // size-limit-ok: one cell's state runs through every part: a further split passes 30 or more arguments per helper
 __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, double* wscr,
@@ -506,10 +506,12 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       screen_x(N[i], p, pm);
     }
     screen_J(Jin, cell, lane, 32, p);
+    screen_lm(lmc, lane, p);
     const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
     if (fin && !cold) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
     __syncwarp();
-    const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it)
+    const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it), and is counted
+    if (!DN && !hfin && lane == 0) atomicAdd(count + COUNT_NONFINITE_H, 1);
     const double hi = hfin ? hin[cell] : dt, m0 = fmin(hi, dt), h0 = fmax(m0, H_MIN);
     double h = h0, t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;

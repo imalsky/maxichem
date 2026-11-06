@@ -162,11 +162,32 @@ def test_non_finite_step_acts_as_dt(parity, verdict):
     x0, T, P = parity.starts(cells, 2, 1.0)
     dt = parity.full(cells, 50.0)
     ref = parity.solver(x0, T, P, dt, dt.clone())
-    same = [
-        all(torch.equal(a, b) for a, b in zip(parity.solver(x0, T, P, dt, parity.full(cells, q)), ref, strict=True))
-        for q in (np.nan, -np.inf, np.inf)
-    ]
-    verdict("non-finite starting step", all(same), f"h = NaN, -inf, +inf bitwise the h = dt call: {same}")
+    none_counted = parity.solver.fallback["nonfinite_h"] == 0
+    same, counted = [], []
+    for q in (np.nan, -np.inf, np.inf):
+        out = parity.solver(x0, T, P, dt, parity.full(cells, q))
+        same.append(all(torch.equal(a, b) for a, b in zip(out, ref, strict=True)))
+        counted.append(parity.solver.fallback["nonfinite_h"] == cells)
+    verdict(
+        "non-finite starting step",
+        all(same) and all(counted) and none_counted,
+        f"h = NaN, -inf, +inf bitwise the h = dt call: {same}; each cell counted once: {counted}; finite h counted "
+        f"none: {none_counted}",
+    )
+
+
+def test_launch_adds_to_the_total(parity):
+    cells = 8
+    x, T, P = parity.starts(cells, 2, 1.0)
+    before = parity.solver.total.clone()
+    parity.solver.launch(x, T, P, parity.full(cells, 1.0), parity.full(cells, 1.0))
+    assert torch.equal(parity.solver.total - before, parity.solver.count.to(torch.int64))
+
+
+def test_lit_solver_refuses_a_missing_j(parity):
+    x, T, P = parity.starts(8, 2, 1.0)
+    with pytest.raises(ValueError, match="required"):
+        parity.lit(x, T, P, parity.full(8, 1.0), parity.full(8, 1.0))
 
 
 @pytest.mark.parametrize(

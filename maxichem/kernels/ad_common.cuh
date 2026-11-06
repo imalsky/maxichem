@@ -8,6 +8,13 @@ __device__ const unsigned char PX[] = {PX_SLOTS};  // photolysis branches' produ
 
 __device__ __forceinline__ double sgn(double a) { return a > 0.0 ? 1.0 : (a < 0.0 ? -1.0 : 0.0); }
 
+// A non-finite log multiplier makes the bad-input sum NaN, so its cell takes no try; a finite one leaves the sum's
+// value.
+__device__ __forceinline__ void screen_lm(const double* lmc, int lane, double& p) {
+  if (lmc)
+    for (int r = lane; r < NR; r += 32) p += 0.0 * lmc[r];
+}
+
 // The call kernel's rhs on one warp, kept apart because it has warp barriers where rhs has the cell's named barrier;
 // the primal test in test_ad.py holds the two to the same bits. F = (n_tot / nd) S v(n) at Y, u0 = S v / nd unless
 // null; each lane walks W of the call kernel's NL lane streams, so every sum is the call kernel's. Returns n_tot.

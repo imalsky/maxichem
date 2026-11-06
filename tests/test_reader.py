@@ -1,9 +1,12 @@
 """The reader on the invented networks: rate laws, stoichiometry and refusals."""
 
+import shutil
+
+import helpers
 import numpy as np
 import pytest
 
-from maxichem.kinvulcan import VulcanNetwork
+from maxichem.kinvulcan import MAX_GIBBS_JUMP, VulcanNetwork
 
 
 def test_reads_every_rate_law(read_network):
@@ -35,6 +38,8 @@ def test_reactions_conserve_atoms(read_network, stem):
         ("19 [ CH4 -> CH3 + H                  ]  CH4  1", "19 [ H2O -> H + OH ]  H2O  1"),  # the same branch twice
         ("# photo disscoiation (no reversals)", "1 [ H + OH -> H2 + O ] 1.0 0.0 0.0\n# photo"),  # after reverse stops
         ("# special cases", "# irreversible\n25 [ H2 + O -> H + OH ] 1.0 0.0 0.0 1.0 0.0 0.0\n# special cases"),
+        ("# Two-body Reactions", "1 [ H + OH -> H2 + O ] 1.0 0.0 0.0\n# Two-body Reactions"),  # no section: no law
+        ("# 3-body and Disscoiation Reactions", "# Three-body Reactions"),  # a heading the reader does not know
     ],
 )
 def test_refuses_a_bad_network(tmp_path, network_text, nasa_dir, old, new):
@@ -43,3 +48,65 @@ def test_refuses_a_bad_network(tmp_path, network_text, nasa_dir, old, new):
     path.write_text(network_text.replace(old, new))
     with pytest.raises(ValueError, match=r"\S"):
         VulcanNetwork(path, nasa_dir)
+
+
+def test_keeps_free_text_above_the_first_heading_and_titles_below_it(tmp_path, network_text, nasa_dir):
+    path = tmp_path / "commented.txt"
+    head = "# free text: rates updated\n# Two-body Reactions\n# id  [ reaction ]\n#\n# 1 [ H + O ]\n"
+    path.write_text(network_text.replace("# Two-body Reactions\n", head))
+    assert len(VulcanNetwork(path, nasa_dir).reac) > 0
+
+
+def _nasa_with_jump(tmp_path, nasa_dir, name, jump):
+    """Return a NASA-9 folder whose species has its low range's b2 moved, so G / RT jumps by this much at 1000 K."""
+    folder = tmp_path / "NASA9"
+    shutil.copytree(nasa_dir, folder)
+    numbers = np.loadtxt(nasa_dir / f"{name}.txt").flatten()
+    numbers[9] -= jump  # G / RT = H / RT - S / R, and b2 enters S / R
+    np.savetxt(folder / f"{name}.txt", numbers.reshape(-1, 5))
+    return folder
+
+
+def test_gibbs_jump_is_refused_above_the_limit(tmp_path, nasa_dir, network_text):
+    network = tmp_path / "network.txt"
+    network.write_text(network_text)
+    VulcanNetwork(network, _nasa_with_jump(tmp_path / "under", nasa_dir, "H2O", 0.9 * MAX_GIBBS_JUMP))
+    with pytest.raises(ValueError, match=f"jumps by {1.1 * MAX_GIBBS_JUMP:.3g}"):
+        VulcanNetwork(network, _nasa_with_jump(tmp_path / "over", nasa_dir, "H2O", 1.1 * MAX_GIBBS_JUMP))
+
+
+def test_free_comments_past_the_thermal_sections_are_read(tmp_path, nasa_dir, network_text):
+    heading = "# photo disscoiation (no reversals)"
+    path = tmp_path / "network.txt"
+    path.write_text(network_text.replace(heading, f"{heading}\n# wavelength switch\n# branching info start"))
+    assert [r["absorber"] for r in VulcanNetwork(path, nasa_dir).photo] == ["H2O", "CH4", "O2"]
+
+
+def test_nasa_file_with_four_ranges_reads_its_first_two(tmp_path, nasa_dir, read_network, network_text):
+    network = tmp_path / "network.txt"
+    network.write_text(network_text)
+    folder = tmp_path / "NASA9"
+    shutil.copytree(nasa_dir, folder)
+    numbers = np.loadtxt(nasa_dir / "H2O.txt").flatten()[:20]
+    np.savetxt(folder / "H2O.txt", np.r_[numbers, np.full(20, 7.0)].reshape(-1, 5))
+    assert np.array_equal(VulcanNetwork(network, folder).lo, read_network().lo)
+
+
+def test_only_the_network_with_the_unsound_tih_fit_is_refused():
+    thermo = helpers.thermo_folder()
+    for network in thermo.glob("*network*.txt"):
+        if network.name == "TiSNCHO_photo_network.txt":
+            with pytest.raises(ValueError, match=r"TiH\.txt: G / RT jumps by 0\.143"):
+                VulcanNetwork(network, thermo / "NASA9")
+        else:
+            VulcanNetwork(network, thermo / "NASA9")
+
+
+def test_nasa_file_of_another_size_is_refused(tmp_path, nasa_dir, network_text):
+    network = tmp_path / "network.txt"
+    network.write_text(network_text)
+    folder = tmp_path / "NASA9"
+    shutil.copytree(nasa_dir, folder)
+    (folder / "H2O.txt").write_text("1.0 2.0 3.0\n")
+    with pytest.raises(ValueError, match="numbers"):
+        VulcanNetwork(network, folder)

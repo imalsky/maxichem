@@ -7,11 +7,11 @@
 //   auto [x1, h1, done, steps] = chem(x, T, P, dt, h, J);
 //
 // x [B, ns] mole fractions in the network's species order, T [B] K, P [B] dyn cm^-2, dt [B] s, h [B] the
-// starting step sizes (all float64 on the solver's device); J [B, nj] s^-1 for a network exported with
-// photo=True (undefined: 0). Returns the new mole fractions, the next step sizes, done (bool) and the accepted
-// steps per cell (float64). No host sync: `count` holds the call's counts on the device (int32 [10]: queue,
-// then bad_input, cold, nonfinite, unfinished, drift, recomputed, recovered, still_failed, then the recovery's
-// queue) and `total` their sum since construction (int64 [10]).
+// starting step sizes (all float64 on the solver's device); J [B, nj] s^-1, required for a network exported with
+// photo=True (zeros for dark cells). Returns the new mole fractions, the next step sizes, done (bool) and the accepted
+// steps per cell (float64). No host sync: `count` holds the call's counts on the device (int32 [11]: queue,
+// then bad_input, cold, nonfinite, unfinished, drift, recomputed, recovered, still_failed, nonfinite_h, then the
+// recovery's queue) and `total` their sum since construction (int64 [11]).
 //
 // The cubin is for one GPU architecture (meta.txt "arch"): export on the machine that runs it.
 // Calls share the scratch and the counts, so they run one at a time: on one stream, or synchronize before

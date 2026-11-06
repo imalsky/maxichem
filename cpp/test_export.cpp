@@ -2,7 +2,7 @@
 //   test_export <export folder> <case folder>
 // The case folder holds raw little-endian files written by tests/cpp_export_case.py: the inputs x.bin [B, ns],
 // T.bin, P.bin, dt.bin, h.bin [B], J.bin [B, nj] (photolysis networks; all float64), the Python call's results
-// x_out.bin, h_out.bin, steps_out.bin (float64), done_out.bin (int8) and counts_out.bin (int32 [10]), and B.txt and
+// x_out.bin, h_out.bin, steps_out.bin (float64), done_out.bin (int8) and counts_out.bin (int32 [11]), and B.txt and
 // max_steps.txt. The call runs twice, and both are compared in full (counts included); the second is timed.
 #include <chrono>
 #include <cstring>
@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
   auto ho = load(cs + "/h_out.bin", {B}, f64);
   auto so = load(cs + "/steps_out.bin", {B}, f64);
   auto dn = load(cs + "/done_out.bin", {B}, torch::kInt8).to(torch::kBool);
-  auto co = load(cs + "/counts_out.bin", {10}, torch::kInt32);
+  auto co = load(cs + "/counts_out.bin", {11}, torch::kInt32);
   auto same = [](torch::Tensor a, torch::Tensor b) {
     return torch::equal(a.cpu().contiguous().view(torch::kInt64), b.contiguous().view(torch::kInt64));
   };
@@ -70,6 +70,6 @@ int main(int argc, char** argv) {
   std::cout << "cells " << B << ", species " << chem.ns << ", branches " << chem.nj << ": C++ call "
             << (ok ? "bitwise identical to the Python call" : "DIFFERENT") << "; second call " << ms << " ms ("
             << 1e3 * ms / B << " us per cell)"
-            << "; max_steps " << max_steps << "; counts " << counts.view({1, 10}) << std::endl;
+            << "; max_steps " << max_steps << "; counts " << counts.view({1, 11}) << std::endl;
   return ok ? 0 : 1;
 }

@@ -104,6 +104,7 @@ from source with `../.cuda`); the shared `../.venv` keeps the released snapy whe
 Run the checks that cover a change once the change is finished, before committing it or saying it works: not after
 every edit, and never on a GPU where a timing is running. `docs/testing.md` lists every test.
 - Before a commit: `uvx pre-commit run --files <changed files>`.
+  clang-tidy reads `build/kernels/network.h`: run `PYTHONPATH=. python tools/write_kernel_header.py` when the header's macros change.
 - After any code change: `pytest -m "not slow and not gpu"` (CPU, under a minute).
 - After a change under `maxichem/`: `pytest tests/test_parity.py tests/test_guard.py -m gpu -s` (with `VULCAN_THERMO` set).
   The bar is 1e-6 dex against the stored references (one cell-call in 100,000 may reach 1e-5). Also `pytest

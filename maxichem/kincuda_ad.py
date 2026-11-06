@@ -5,6 +5,7 @@ adaptive, are in docs/method.md.
 """
 
 import ctypes
+import operator
 from typing import Any, Self
 
 import numpy as np
@@ -38,7 +39,7 @@ from ._cuda import (
 )
 from ._kernel_header import derivative_header, kernel_sources
 from ._tables import pack_small_tables, tables_for_device
-from .kincuda import check_inputs
+from .kincuda import check_inputs, checked_drift
 from .kinvulcan import VulcanNetwork
 
 __all__ = ["CAP", "DMAX", "ADSolver"]
@@ -81,6 +82,13 @@ class ADSolver:
                 "photo=True needs a network with photolysis branches whose species are all in its species "
                 f"list (branches {len(net.photo)}, missing species {net.photo_missing})"
             )
+        try:
+            cap = operator.index(cap)
+        except TypeError:
+            raise ValueError(f"cap: an integer expected, got {cap!r}") from None
+        if cap < 1:
+            raise ValueError(f"cap: at least 1 stored attempt expected, got {cap}")
+        checked_drift(drift)
         self.dev = device_of(device)
         self._modules: list[Any] = []  # every module loaded, also when the setup fails part of the way
         self._setup(net, cap, drift, photo)
@@ -201,7 +209,9 @@ class ADSolver:
         if J is not None and not self.nj:
             raise ValueError("J given, but the solver was built without photolysis (photo=False)")
         if self.nj:
-            J = torch.zeros(B, self.nj, dtype=torch.float64, device=self.dev) if J is None else J.contiguous()
+            if J is None:
+                raise ValueError(f"J [B, {self.nj}] is required with photo=True: pass zeros for dark cells")
+            J = J.contiguous()
             if J.dtype != torch.float64 or J.device != x.device or tuple(J.shape) != (B, self.nj):
                 raise ValueError(f"J [B, {self.nj}]: float64 on the device of x")
         return B, [a.contiguous() for a in (x, T, P, dt, h)], lm, rc, J

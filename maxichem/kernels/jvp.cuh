@@ -208,8 +208,8 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
 // at [d * B + cell] (dx0, dxout, dlm, dJin by rows of NS, NR or NJ), drc at [d * NR * 9]; dlm, drc, dJin may be
 // null; Jin [B, NJ] (null when NJ = 0). DN = false: every
 // cell, the call kernel's attempts (queue count[0]). DN = true: the first count[COUNT_RECOMPUTED] cells of list, the
-// recover kernel's attempts (dense W in wscr, one NS x NS per warp; max_steps = the recovery's tries; queue count[9]),
-// each result then tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8] and NaN
+// recover kernel's attempts (dense W in wscr, one NS x NS per warp; max_steps = the recovery's tries; the recovery's
+// queue), each result then tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8] and NaN
 // tangents.
 template <bool DN>
 // size-limit-ok: one cell's state runs through every part: a further split passes 30 or more arguments per helper
@@ -247,10 +247,12 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
     for (int d = 0; d < D; d++)
       for (int i = lane; i < NS; i += 32) Ng[d * NS + i] = dx0[((size_t)d * B + cell) * NS + perm[i]];
     screen_J(Jin, cell, lane, 32, p);
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
+    screen_lm(lmc, lane, p);
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
     if (fin && !cold) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
-    const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it)
+    const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it), and is counted
+    if (!DN && !hfin && lane == 0) atomicAdd(count + COUNT_NONFINITE_H, 1);
     const double hi = hfin ? hin[cell] : dt, m = fmin(hi, dt);
     for (int d = 0; d < D; d++) {
       const size_t qd = (size_t)d * B + cell;

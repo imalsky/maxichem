@@ -420,7 +420,8 @@ def run(blocks, S, solver, ticks, snap, full, force, t_all, gi, fl, dev):
         if ids:
             idx = ids[0] if len(ids) == 1 else torch.cat(ids)
             fo = offs[0] if len(offs) == 1 else torch.cat(offs)
-            xo, ho, done, nok = solver(x_state[idx], S["T"][fo], S["P"][fo], S["dt"][fo], h_state[idx])
+            dark = torch.zeros(fo.shape[0], solver.nj, dtype=torch.float64, device=dev)  # these paths run without light
+            xo, ho, done, nok = solver(x_state[idx], S["T"][fo], S["P"][fo], S["dt"][fo], h_state[idx], J=dark)
             add_fb(fb, solver)
             x_state[idx], h_state[idx] = xo, ho
             cellcalls += idx.numel()

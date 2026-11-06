@@ -1250,6 +1250,52 @@ Data: experiments/2026-11-05_gcm10d/research (column_night.py, top_budget.py, re
   needs about 40 species and 30 padding reactions to fit. The smallest real network has 35 species and 149 reactions.
 - clang-tidy reports 128 findings on the kernels, all style: implicit widening 77, narrowing 27, unset variables 22, widening casts 2.
 
+### 2026-11-06 03:53: code cleanup, steps 14 and 15: shared kernel arithmetic, refusals, the guard (experiments/2026-11-05_cleanup_baseline)
+- No result changed on valid input. Float64 outputs of call, recovery, jvp and vjp bitwise equal to the baseline on 6 of 6 cases after
+  every item; reader and table hashes 31 of 31 on all 11 networks.
+- Small networks: the README was right and the table builder wrong. A network with few terms per lane cut its Jacobian slots into more
+  extra pieces than Y holds. The even share now grows until they fit; the real networks fit at the first share. Supersedes the "Found,
+  not changed" line of the entry above. A 6-species network runs in every kernel (equilibrium, recovery, tangent, adjoint).
+- clang-tidy: implicit widening dropped (77 of 128 findings, each an index or size that cannot reach 2^31); narrowing, unset variables
+  and widening casts fixed; 0 findings. The hook reads `build/kernels/network.h`: regenerate it when the header's macros change.
+- Shared arithmetic: rates, the bad-input test, stream words, stage right-hand sides and the step error are forced-inline helpers. Compiled
+  kernels change, bits do not. Speed, gpu_speed, 69 species, two rounds each: dark 0.3618 to 0.3587 us per cell-call, lit 0.6612 to 0.6544.
+- Long kernels: 10 of 13 now meet the limits. Backed out: the `call` kernel's split, bits equal but +1.1 % against the commit before it
+  (dark 0.3577 to 0.3618, lit 0.6537 to 0.6608); with `call` whole, msolve and check_cell still split, 0.3580 and 0.6535. `call`, `jvp_cells` and
+  `vjp_cells` keep a written exception; a further split of the last two needs 30 or more arguments per helper (a count by hand).
+- Final speed at 67e07e9, one round: dark 0.3570, lit 0.6547 us per cell-call. Derivative kernels, base against final, NCHO_photo, 4,096 cells, two rounds each: vjp 705.9 to 700.0 ms (-0.8 %), jvp 338.4 to 342.3 ms (+1.15 %). The jvp rise is above the 1 % rule, its cause is not found and it is not backed out: open.
+- Removed: the explicit reverse law and its table support; a hand-built reaction with one is refused.
+- New: count slot `nonfinite_h` (export format 3). `photo=True` raises on `J=None`, in Python and C++: `bench/kintest.py` relied on it on its dark
+  paths and now passes zeros; the GCM drivers and tests pass J. `lm` screened in the kernel: a non-finite one takes no try, and comes back with
+  flag 2. `cap` and `drift` checked. `launch` adds to `total`.
+- Reader: a reaction above the first heading raises. After the first heading a comment must be a known heading, `# id` column titles, a
+  commented-out reaction or empty, else it raises: none of the 11 networks' comment lines trips this, their free text sits above the first
+  heading. `MAX_GIBBS_JUMP = 1.0` on G / RT at 1000 K: largest of the 114 species 0.143 (TiH), then 1.6e-6; the old HNO3 file 17.62. A factor e is
+  0.43 dex in an equilibrium constant, well above the 0.1 dex of a miss. Three species' files (HO2, CH3O2, SH) hold 30 numbers, and read equal.
+- The parity bar stays at 1e-6 dex.
+- pre-commit passes on every file; the git hooks and the marker line are in. Parity, derivatives, known answers, C++ and CPU tests ran in parallel
+  on one card at 67e07e9, the truth and CPU tests again at d16f41e; compiles of equal sources came from a disk cache keyed by the source text.
+- `MAX_GIBBS_JUMP` tightened from 1.0 to 0.15 (0.065 dex, under the 0.1 dex of a miss): all 11 networks still load. TiH sets the floor at 0.143; without
+  it the largest is 1.6e-6 (TiC). TiH's low range is not a sound fit: Cp / R is 40463 at 100 K, 819 at 200 K, -23 at 300 K, 18 at 700 K and 332 at 999 K,
+  against 5.6 at 1000 K on the high range. The join check does not see this. Only TiSNCHO carries TiH.
+- TiH checked against its sources (experiments/2026-11-06_tih_thermo). `NASA9/TiH.txt` is identical in VULCAN's three pinned clones, so this is VULCAN's data, not
+  a reader error. Against Burrows et al. 2005 eq. A2, the formula it was fitted to: high range within 0.01 dex; low range within 0.07 dex at 500-1000 K, but 0.11 to
+  0.73 dex at 250-450 K. On 200-1000 K its Cp / R runs from -36 to 819; of the 120 files only liquid water H2O_l_s, which the reader never reads as a species, is also this far off.
+  Separately, eq. A2 itself sits 0.44 to 0.48 dex above log10 K computed directly from the paper's constants at 700-3000 K (0.36 at 500 K), and Barklem+ 2016 (A&A 588, A96) agree
+  with the direct sum to 0.05 dex at 200-3000 K. The offset is nearly constant in T, so it is not the dissociation energy; the cause is not found. Burrows's own Q(TiH) is
+  within about 6 % of the direct sum at 2000-3000 K, so it is not Q(TiH). The dissociation energy's error, 0.091 eV (Barklem), is itself 0.46 dex at 1000 K and 0.92 dex at 500 K.
+  G is all the reverse rates use; the T derivatives use the fit's enthalpy. TiH is not one of the 12 scored gases, and TiO + 1.5 H2 = TiH + H2O at 1 bar (estimate: pH2 0.85, pH2O
+  5e-4 bar, TiO2 ignored) gives TiH / TiO of 1e-32 at 300 K, 1e-9 at 1000 K, 1e-4 at 2000 K, 5e-3 at 3000 K. No effect on the scored gases is expected (inferred, no run made).
+  The file is unchanged.
+- Isaac's call: refuse the bad data. `MAX_GIBBS_JUMP` is now 1e-5, six times the 1.6e-6 of TiC, the largest sound fit. TiSNCHO is refused with an error naming TiH.txt, the other 10
+  networks load. A test pins this, using the real files. The fix is in todo.md. vulcan3 is not changed: its reader already refuses TiSNCHO by default for the duplicate reactions.
+- Results review of the cleanup. Derivative speed, commit before step 14.3 against 964c347, NCHO_photo, 4 alternating rounds on an idle GPU 1 (`review_speed/pair.log`): jvp 339.33 to 342.45 ms (+0.92 %),
+  vjp 706.86 to 700.80 ms (-0.86 %). This replaces the +1.15 % above and is under the 1 % rule, so nothing is backed out. Two further rounds (`two.log`) put most of the jvp rise at the helper split (34fa3ef to 1023e5a).
+- The review found two reader regressions, now fixed: free comments past the thermal sections were refused, and so were 40-number NASA-9 files such as PO's (its ranges meet to 2.5e-8). A non-finite `lm`, -inf included, takes no try;
+  -inf used to switch a reaction off. docs/api.md states this, and nothing here uses it. Extra bitwise comparison of the arguments the proof skipped (lm, dlm, rc, drc, dJ, adapt=False), 3962d00 against 964c347, `review_speed/bits*.log`:
+  NCHO lit 54 arrays, synthetic dark and lit 117; falloff, small and decay networks were not compared.
+- `vulcan-truth` keeps `nega_cut` -1 although VULCAN-JAX moved to -1e4: it is this project's reference, and changing it could invalidate the stored truth sets (inferred).
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.

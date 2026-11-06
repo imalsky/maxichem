@@ -10,12 +10,12 @@ when `VULCAN_THERMO` is unset or its reference data are missing (README.md lists
 
 | File | What it tests | Needs |
 | --- | --- | --- |
-| `test_reader.py` | The reader on invented networks: every rate law, atoms, refusals | CPU |
-| `test_tables_source.py` | The term streams hold the stoichiometry; the header selects the rate-law forms; the argument table matches the kernels' signatures | CPU |
+| `test_reader.py` | The reader on invented networks: every rate law, atoms, refusals of reactions, headings and NASA-9 files | CPU |
+| `test_tables_source.py` | The term streams hold the stoichiometry, on a small network too; the header selects the rate-law forms; the argument table matches every kernel's signature; `drift`, `cap` and the export's format and count slots | CPU |
 | `test_kernels_compile.py` | Every form of the kernels compiles, including forms no real network reaches | CPU |
 | `test_paths.py` | Data locations follow the environment; missing data give a clear error | CPU |
 | `test_packaging.py` | The built wheel holds the kernels and assembles them without the checkout | CPU, slow |
-| `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation | GPU |
+| `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation; a small network in every kernel | GPU |
 | `test_order.py` | Rodas3's order of accuracy | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
 | `test_guard.py` | The guard and recovery, bad inputs, independence from the batch | GPU, data |
@@ -44,7 +44,8 @@ multipliers are lm = 0.1 N(0, 1) per reaction unless named lm = 0.
   1e-20. Trace species near 0 carry rounding of the clamp at 0, so they take 0.
 - **Recovered cells** (max_steps 3): primal and flags; dot products; the rc cotangent of a batch of them alone; finite derivatives on flags
   0 and 1, NaN on flag 2.
-- **The rc batch dot product**, several directions in one call, determinism, a non-finite starting step and a negative x.
+- **The rc batch dot product**, several directions in one call, determinism, a non-finite starting step, a negative x, a NaN log
+  multiplier and a missing J.
 
 The limits, and why each is what it is, are at the top of `test_ad.py`.
 

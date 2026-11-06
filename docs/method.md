@@ -68,7 +68,7 @@ Sherman-Morrison formula adds the rank-one term.
 ### Step control
 
 - The first try is $\max(\min(h, dt), h_\mathrm{min})$, with h the step size the cell carried from its last call. A
-  non-finite h acts as dt. Each try is $\min(h, dt - t)$.
+  non-finite h acts as dt, and is counted. Each try is $\min(h, dt - t)$.
 - With $q_i = K_{4,i} / (\mathrm{atol} + \mathrm{rtol}\max(|N_i|, |N'_i|))$, err is the RMS of q. While the call has no
   accepted step, err is $\max(\mathrm{RMS}, \max_i |q_i|)$: the first try uses a step size from the last call, and the gas may
   have changed abruptly, so one fast species' error must not hide in the mean.

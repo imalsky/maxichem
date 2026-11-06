@@ -1,3 +1,4 @@
+# code-standards-template
 # Based on scientific-python/cookie.
 default_install_hook_types: [pre-commit, commit-msg]
 default_stages: [pre-commit]

@@ -7,8 +7,19 @@ DEFAULT_RTOL = 1e-3  # relative tolerance of a call
 DEFAULT_MAX_STEPS = 4000  # tries per call before a cell is flagged as unfinished
 ATOL = 1e-25  # default absolute tolerance, in mole fraction (docs/method.md)
 K_COLL = 1e-9  # cm3 s^-1: no thermal rate may exceed this as a bimolecular-equivalent rate (docs/method.md)
-COUNTS = ("bad_input", "cold", "nonfinite", "unfinished", "drift", "recomputed", "recovered", "still_failed")
-EXPORT_FORMAT = 2  # raised when the export's files or the kernels' arguments change; cpp/maxichem.cpp checks it
+# nonfinite_h: cells whose starting step was not finite, so it acted as dt
+COUNTS = (
+    "bad_input",
+    "cold",
+    "nonfinite",
+    "unfinished",
+    "drift",
+    "recomputed",
+    "recovered",
+    "still_failed",
+    "nonfinite_h",
+)
+EXPORT_FORMAT = 3  # raised when the export's files or the kernels' arguments change; cpp/maxichem.cpp checks it
 MAX_SPECIES = 254  # species slots are uint8, with one value left for the padding
 NTAIL = 32  # rows of the trailing block factored in registers (at most 32)
 CAP = 100  # attempts stored per cell before the adjoint switches to segment checkpoints (calls up to CAP^2 attempts)

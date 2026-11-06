@@ -34,3 +34,12 @@ Tasks Isaac put off and wants to return to, with the date deferred.
 - 2026-11-05. Rerun the sphere work with the corrected heating formula (notes.md, 2026-11-05 18:53), after the code cleanup.
   - The 2-day runs at 100, 120 and 140 layers from both starts, then the lid comparison on 0.1-1 bar and a lid choice.
   - The 10-day runs with and without chemistry and their figures, then the radiation-step and sponge tests as needed.
+- 2026-11-06. Fix the TiH NASA-9 data, so TiSNCHO runs again (notes.md, 2026-11-06).
+  - Bug: VULCAN's `NASA9/TiH.txt` has Cp / R from -36 to 819 below 1000 K, G / RT off by up to 0.73 dex at 250-450 K, and
+    a formula behind it about 0.46 dex from the direct calculation at all temperatures, cause not found.
+  - State: the reader refuses it (`MAX_GIBBS_JUMP`, 1e-5), and with it TiSNCHO, the only network that carries TiH.
+  - Needed: refit both ranges with a physical Cp, starting from `experiments/2026-11-06_tih_thermo/direct_stat_mech.py`; decide
+    where the corrected file lives, since it departs from VULCAN; update the test that expects the refusal. The dissociation
+    energy's error still leaves TiH uncertain by about 0.5 dex at 1000 K.
+- 2026-11-06. For the final cleanup: replace `__getattr__`, `__dir__` and the stubs in `maxichem/paths.py` with plain
+  functions (about 45 uses), and rename `kincuda.checked_drift` with a leading `_`. Prove with the cleanup's usual checks.

@@ -548,12 +548,48 @@ def test_non_finite_step_acts_as_twice_dt(checks, verdict):
             and all(torch.equal(a, b) for a, b in zip(vn[:4], v2[:4], strict=True))
             and all(torch.equal(vn[4][k], v2[4][k]) for k in vn[4])
             and bool((vn[4]["h"] == 0).all())
+            and checks.ad.status["nonfinite_h"] == x.shape[0]
         )
     verdict(
         "non-finite starting step",
         all(nonfin.values()),
         f"h = NaN / -inf bitwise the h = 2 dt call (tangents, cotangents; h cotangent zero): {nonfin}",
     )
+
+
+def test_nan_log_multiplier_takes_no_tries(checks, verdict):
+    x, T, P, J, d, _, _, tanh, dlm, dJ, lm, c, _, _ = _directions(checks)
+    lm_bad = lm.clone()
+    lm_bad[0, 0] = float("nan")
+    jb = checks.ad.jvp(x, T, P, d, 2.0 * d, *tanh, lm=lm_bad, dlm=dlm, dJ=dJ, J=J)
+    cj = checks.ad.status
+    vb = checks.ad.vjp(x, T, P, d, 2.0 * d, c, lm=lm_bad, J=J)
+    cv = checks.ad.status
+    j2 = checks.ad.jvp(x, T, P, d, 2.0 * d, *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
+    v2 = checks.ad.vjp(x, T, P, d, 2.0 * d, c, lm=lm, J=J)
+    ok = (
+        int(jb[3][0]) == 0
+        and int(vb[3][0]) == 0
+        and not bool(jb[2][0])
+        and not bool(vb[2][0])
+        and cj["still_failed"] == 1
+        and cv["still_failed"] == 1
+        and all(torch.equal(a[1:], b[1:]) for a, b in zip(jb[:4], j2[:4], strict=True))
+        and all(torch.equal(a[1:], b[1:]) for a, b in zip(vb[:4], v2[:4], strict=True))
+    )
+    verdict(
+        "NaN log multiplier",
+        ok,
+        f"jvp {cj}; vjp {cv}; cell 0 takes no step and fails, the others bitwise the valid batch's",
+    )
+
+
+def test_missing_j_is_refused(checks):
+    x, T, P, _, d, _, _, tanh, _, _, _, c, _, _ = _directions(checks)
+    with pytest.raises(ValueError, match="required"):
+        checks.ad.jvp(x, T, P, d, 2.0 * d, *tanh)
+    with pytest.raises(ValueError, match="required"):
+        checks.ad.vjp(x, T, P, d, 2.0 * d, c)
 
 
 def test_negative_x_is_bad_input(checks, verdict):

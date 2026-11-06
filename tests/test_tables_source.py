@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from maxichem import _constants, _kernel_header, _tables
+from maxichem import _constants, _kernel_header, _tables, kincuda, kincuda_ad
 
 
 def _stoichiometry_from_stream(tab):
@@ -77,6 +77,27 @@ def test_argument_table_matches_the_kernel_signature(kernel):
         parameters = parameters.replace(macro, definition.group(1).replace("\\\n", " "))
     names = [re.findall(r"\w+", parameter)[-1] for parameter in parameters.split(",")]
     assert tuple(names) == _constants.KERNEL_ARGUMENTS[kernel]
+
+
+def test_cpp_format_and_counts_match_python():
+    source = (Path(__file__).parents[1] / "cpp" / "maxichem.cpp").read_text()
+    assert f"kExportFormat = {_constants.EXPORT_FORMAT};" in source
+    assert f"kCountSlots = {len(_constants.COUNT_SLOTS)};" in source
+
+
+@pytest.mark.parametrize("drift", [float("nan"), float("inf"), -1e-6])
+def test_bad_drift_is_refused_before_any_device_use(read_network, drift):
+    net = read_network()
+    with pytest.raises(ValueError, match="drift"):
+        kincuda.CudaSolver(net, "cuda", drift=drift)
+    with pytest.raises(ValueError, match="drift"):
+        kincuda_ad.ADSolver(net, "cuda", drift=drift)
+
+
+@pytest.mark.parametrize("cap", [0, -1, 2.5])
+def test_bad_cap_is_refused_before_any_device_use(read_network, cap):
+    with pytest.raises(ValueError, match="cap"):
+        kincuda_ad.ADSolver(read_network(), "cuda", cap=cap)
 
 
 def test_cpp_defaults_match_the_python_defaults():

@@ -18,8 +18,8 @@ namespace maxichem {
 namespace {
 
 // These three match maxichem/_constants.py: EXPORT_FORMAT, COUNT_SLOTS and GUARD_BLOCK_THREADS.
-constexpr int kExportFormat = 2;
-constexpr int64_t kCountSlots = 10;
+constexpr int kExportFormat = 3;
+constexpr int64_t kCountSlots = 11;
 constexpr int kGuardBlockThreads = 128;
 
 void check(CUresult r, char const* what) {
@@ -199,9 +199,8 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   h = h.contiguous();
   if (nj == 0) {
     TORCH_CHECK(!J.defined(), "maxichem: this solver has no photolysis");
-  } else if (!J.defined()) {
-    J = torch::zeros({B, nj}, x.options());
   } else {
+    TORCH_CHECK(J.defined(), "maxichem: J [B, ", nj, "] is required for a network exported with photo=True");
     TORCH_CHECK(J.device() == device_ && J.scalar_type() == torch::kFloat64 && J.dim() == 2 && J.size(0) == B &&
                     J.size(1) == nj,
                 "maxichem: J [B, ", nj, "] float64 on the solver's device");

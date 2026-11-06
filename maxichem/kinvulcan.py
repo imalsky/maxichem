@@ -2,7 +2,7 @@
 
 Public names: ``VulcanNetwork``, ``formula``, ``SPECIAL``, ``KB``, ``P0``. The rate laws are in docs/method.md, the
 object's attributes in docs/api.md. Each reaction dict holds its law: kind (2 two-body, 3 falloff, 5 low-pressure
-only, 6 special), the Arrhenius terms, and optional troe, width, eff and rev.
+only, 6 special), the Arrhenius terms, and optional troe, width and eff.
 """
 
 import ast
@@ -12,10 +12,17 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["KB", "P0", "SPECIAL", "VulcanNetwork", "formula"]
+__all__ = ["KB", "MAX_GIBBS_JUMP", "P0", "SPECIAL", "VulcanNetwork", "formula"]
 
 KB = 1.380649e-16  # erg K^-1
 P0 = 1.0e6  # dyn cm^-2 (1 bar)
+NASA_SPLIT_T = 1000.0  # K: where the NASA-9 fits change range (the kernels' NASA_SPLIT_T)
+# Largest |G/RT, low range - G/RT, high range| at NASA_SPLIT_T. Sound fits meet: over the 11 networks the largest jump
+# is 1.6e-6 (TiC). TiH, at 0.143, is refused on purpose, and TiSNCHO with it: below 1000 K its fit has Cp / R from -36
+# to 819 (notes.md). A file with a wrong coefficient set reaches 17.6 (HNO3 with its below-200 K set read as the low
+# range).
+MAX_GIBBS_JUMP = 1.0e-5
+NASA_FILE_SIZES = (20, 30, 40)  # numbers in a NASA-9 file: two to four ranges of 10 (those past the second are unused)
 
 
 def formula(name: str) -> dict[str, int]:
@@ -51,6 +58,8 @@ SECTIONS = (
     ("# special", "special"),
     ("# irreversible", "irrev"),
 )
+KNOWN_HEADINGS = (*STOP, *(head for head, _ in SECTIONS))
+COLUMN_TITLES = "# id"  # the comment line above a section's reactions, which names its columns
 
 
 def _reaction_line(line: str, where: str) -> tuple[str, list[str]]:
@@ -127,6 +136,19 @@ def _extra_line(line: str, where: str, reactions: list[dict[str, Any]], bulk: st
     reactions[-1]["eff"] = float(efficiencies[bulk])
 
 
+def _check_comment(low: str, line: str, where: str) -> None:
+    """Refuse a comment after the first heading that a section's reactions could be read under by mistake.
+
+    Free text belongs before the first heading. After it a comment is a known heading, a line of column titles, or a
+    reaction that is commented out; any other could be a heading the reader does not know, under which the reactions
+    below would keep the law of the section above.
+    """
+    if not (low.startswith((*KNOWN_HEADINGS, COLUMN_TITLES)) or "[" in low or not low.strip("# ")):
+        raise ValueError(
+            f"{where}: unknown heading: {line}. The headings are {KNOWN_HEADINGS}; free text goes above the first one"
+        )
+
+
 def _read_reactions(network_file: str | Path, bulk: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     """Read a reaction list: the thermal reactions, the photolysis branches and the condensation lines skipped."""
     section, stopped, skipped = None, None, 0
@@ -136,6 +158,8 @@ def _read_reactions(network_file: str | Path, bulk: str) -> tuple[list[dict[str,
         line, where = raw.strip(), f"{network_file}:{number}"
         if line.startswith("#"):
             low = line.lower()
+            if section is not None and not stopped:  # past the thermal sections no comment can change a reaction's law
+                _check_comment(low, line, where)
             if low.startswith(STOP):
                 stopped = stopped or low
                 if low.startswith("# photo"):
@@ -153,7 +177,9 @@ def _read_reactions(network_file: str | Path, bulk: str) -> tuple[list[dict[str,
                 raise ValueError(f"reaction after '# reverse stops' outside photolysis / condensation: {line}")
         elif line.startswith(("Troe", "effi")):
             _extra_line(line, where, reactions, bulk)
-        elif line and "[" in line and section is not None:
+        elif "[" in line:
+            if section is None:
+                raise ValueError(f"{where}: a reaction above the first heading has no rate law: {line}")
             reactions.append(_thermal_reaction(line, where, section))
     return reactions, photo, skipped
 
@@ -167,6 +193,17 @@ def _stoichiometry(reactions: list[dict[str, Any]], n_species: int) -> np.ndarra
         for i in r.get("pr", ()):
             stoichiometry[i, j] += 1
     return stoichiometry
+
+
+def _gibbs_rt(a: np.ndarray, T: float) -> float:
+    """Return G / RT of a species at T (K) from one range's coefficients a1..a7, b1, b2."""
+    enthalpy = (
+        -a[0] / T**2 + a[1] * np.log(T) / T + a[2] + a[3] * T / 2 + a[4] * T**2 / 3 + a[5] * T**3 / 4 + a[6] * T**4 / 5
+    ) + a[7] / T
+    entropy = (
+        -a[0] / T**2 / 2 - a[1] / T + a[2] * np.log(T) + a[3] * T + a[4] * T**2 / 2 + a[5] * T**3 / 3 + a[6] * T**4 / 4
+    ) + a[8]
+    return float(enthalpy - entropy)
 
 
 def _balanced(branch: dict[str, Any]) -> bool:
@@ -239,8 +276,16 @@ class VulcanNetwork:
             if not path.exists():
                 raise FileNotFoundError(f"no NASA-9 file for {name}: {path}; pass the folder that holds it")
             a = np.loadtxt(path).flatten()
+            if a.size not in NASA_FILE_SIZES:
+                raise ValueError(f"{path}: {a.size} numbers, a NASA-9 file holds {NASA_FILE_SIZES}; check the file")
             lo.append(np.concatenate([a[0:7], a[8:10]]))  # the 8th entry of each range is unused
             hi.append(np.concatenate([a[10:17], a[18:20]]))
+            jump = abs(_gibbs_rt(lo[-1], NASA_SPLIT_T) - _gibbs_rt(hi[-1], NASA_SPLIT_T))
+            if not jump <= MAX_GIBBS_JUMP:
+                raise ValueError(
+                    f"{path}: G / RT jumps by {jump:.3g} at {NASA_SPLIT_T:g} K, above {MAX_GIBBS_JUMP:g}: the two "
+                    "ranges read do not meet; check that the file's first two ranges are the ones below and above it"
+                )
         return np.array(lo, np.float64), np.array(hi, np.float64)
 
     def _index_species(self, reactions: list[dict[str, Any]], network_file: str | Path) -> None:
