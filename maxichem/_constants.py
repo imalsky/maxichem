@@ -23,7 +23,6 @@ RATE_LAW_FLAGS = {
     "FL_THREE_BODY": 1 << 2,
     "FL_TROE": 1 << 6,
     "FL_EFF": 1 << 7,
-    "FL_REV": 1 << 8,
     "FL_VM11": 1 << 9,
 }
 RATE_LAW_SHIFTS = {
@@ -33,7 +32,21 @@ RATE_LAW_SHIFTS = {
 }
 
 # Each kernel's parameters, in the order of its signature in kernels/. The Python and C++ callers build their launches
-# from this table; a test compares it with the kernel files. A photolysis network adds PHOTOLYSIS_ARGUMENT at the end.
+# from this table; a test compares it with the kernel files. A photolysis network adds PHOTOLYSIS_ARGUMENT at the end of
+# SOLVER_KERNEL_NAMES' lists; the derivative kernels always take it, null without photolysis.
+_JVP_ARGUMENTS = (
+    "x0", "Ta", "Pa", "dta", "hin", "lm", "rc", "dx0", "dTa", "dPa", "ddta", "dhin", "dlm", "drc", "D",
+    "xout", "hout", "doneo", "noko", "dxout", "dhout", "count", "B", "rtol", "atol", "max_steps", "adapt",
+    "perm", "blob", "rf", "nasa", "scratch", "sst", "jt", "lu", "optr", "sround", "jround", "Jin", "dJin",
+)  # fmt: skip
+_VJP_ARGUMENTS = (
+    "x0", "Ta", "Pa", "dta", "hin", "lm", "rc", "gx", "gh", "xout", "hout", "doneo", "noko",
+    "gx0", "gT", "gP", "gdt", "ghin", "glm", "count", "B", "rtol", "atol", "max_steps", "adapt",
+    "perm", "blob", "rf", "nasa", "scratch", "rec", "sst", "jt", "lu", "optr", "gt", "xg",
+    "sround", "jround", "ground", "Jin", "gJ", "gA",
+)  # fmt: skip
+_RECOVERY_ARGUMENTS = ("redo", "list", "wscr", "didx", "atoms")  # what a derivative kernel's recovery adds
+SOLVER_KERNEL_NAMES = ("call", "guard", "recover")  # the kernels of SOLVER_KERNELS' file, and what the export holds
 KERNEL_ARGUMENTS = {
     "call": (
         "x0", "Ta", "Pa", "dta", "hio", "xout", "doneo", "noko", "count", "B", "rtol", "atol", "max_steps",
@@ -44,6 +57,11 @@ KERNEL_ARGUMENTS = {
         "x0", "Ta", "Pa", "dta", "hin", "xout", "hio", "doneo", "noko", "redo", "list", "count", "rtol", "atol",
         "max_steps", "perm", "blob", "rc", "rf", "nasa", "scratch", "sst", "jt", "didx", "atoms", "sround", "jround",
     ),
+    "jvp": _JVP_ARGUMENTS,
+    "jvp_rec": _JVP_ARGUMENTS + _RECOVERY_ARGUMENTS,
+    "vjp": _VJP_ARGUMENTS,
+    "vjp_rec": _VJP_ARGUMENTS + _RECOVERY_ARGUMENTS,
+    "arrh": ("gA", "Ta", "Pa", "rc", "rf", "grc", "B"),
 }  # fmt: skip
 PHOTOLYSIS_ARGUMENT = "Jin"
 

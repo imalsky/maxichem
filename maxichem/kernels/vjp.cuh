@@ -1,9 +1,67 @@
 // The adjoint kernels: the call and the cotangents of its inputs.
 
 // ---------------------------------------------------------------------------------------------------------- adjoint
+// tsolve's U^T: y_j -= U_kj w_k (j > k) over the sparse rows, then the dense rows.
+__device__ __forceinline__ void transposed_upper(const double* M, const u16* smap, const bool (&hp)[RP],
+                                                 const double (&d0)[RP], double d1, int lane, double (&a0)[RP],
+                                                 double& a1) {
+  const bool ht = lane < NT;
+#pragma unroll
+  for (int k = 0; k < K0; k++) {
+    if (!((UROW >> k) & 1ull)) continue;
+    const double wk = __shfl_sync(FULL, a0[k >> 5] * d0[k >> 5], k & 31);
+#pragma unroll
+    for (int p = 0; p < RP; p++) {
+      const int j = lane + 32 * p;
+      if (hp[p] && j > k) {
+        const unsigned s = smap[k * NS + j];
+        if (s != NO_SLOT) a0[p] -= M[s] * wk;
+      }
+    }
+    if (ht) {
+      const unsigned s = smap[k * NS + K0 + lane];
+      if (s != NO_SLOT) a1 -= M[s] * wk;
+    }
+  }
+#pragma unroll
+  for (int k = 0; k < NT - 1; k++) {
+    const double wk = __shfl_sync(FULL, a1 * d1, k);
+    if (ht && lane > k) a1 -= M[smap[(K0 + k) * NS + K0 + lane]] * wk;
+  }
+}
+
+// tsolve's L^T: w_j -= L_kj x_k (j < k) over the dense rows, then the sparse rows.
+__device__ __forceinline__ void transposed_lower(const double* M, const u16* smap, const bool (&hp)[RP], int lane,
+                                                 double (&a0)[RP], double& a1) {
+  const bool ht = lane < NT;
+#pragma unroll
+  for (int k = NT - 1; k >= 0; k--) {
+    const double xk = __shfl_sync(FULL, a1, k);
+    if (ht && lane < k) a1 -= M[smap[(K0 + k) * NS + K0 + lane]] * xk;
+#pragma unroll
+    for (int p = 0; p < RP; p++)
+      if (hp[p]) {
+        const unsigned s = smap[(K0 + k) * NS + lane + 32 * p];
+        if (s != NO_SLOT) a0[p] -= M[s] * xk;
+      }
+  }
+#pragma unroll
+  for (int k = K0 - 1; k >= 0; k--) {
+    if (!((LROW >> k) & 1ull)) continue;
+    const double xk = __shfl_sync(FULL, a0[k >> 5], k & 31);
+#pragma unroll
+    for (int p = 0; p < RP; p++) {
+      const int j = lane + 32 * p;
+      if (hp[p] && j < k) {
+        const unsigned s = smap[k * NS + j];
+        if (s != NO_SLOT) a0[p] -= M[s] * xk;
+      }
+    }
+  }
+}
+
 // y <- W^-T y = M0^-T (y + c0 (u . y) 1) (W = M0 - w 1^T, u = M0^-1 w): U^T then L^T with every factor read from M (the
 // dense block's factors written back), lane l holding the leading entries l + 32 p (< K0) and K0 + l.
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
 __device__ __forceinline__ void tsolve(const double* M, const double* dinv, double* y, const double* u, double c0,
                                        const u16* smap, int lane) {
   const bool ht = lane < NT;
@@ -24,55 +82,11 @@ __device__ __forceinline__ void tsolve(const double* M, const double* dinv, doub
     if (hp[p]) a0[p] += al;
   if (ht) a1 += al;
   const double d1 = ht ? dinv[K0 + lane] : 0.0;
-#pragma unroll
-  for (int k = 0; k < K0; k++) {  // U^T, sparse rows: y_j -= U_kj w_k (j > k)
-    if (!((UROW >> k) & 1ull)) continue;
-    const double wk = __shfl_sync(FULL, a0[k >> 5] * d0[k >> 5], k & 31);
-#pragma unroll
-    for (int p = 0; p < RP; p++) {
-      const int j = lane + 32 * p;
-      if (hp[p] && j > k) {
-        const unsigned s = smap[k * NS + j];
-        if (s != NO_SLOT) a0[p] -= M[s] * wk;
-      }
-    }
-    if (ht) {
-      const unsigned s = smap[k * NS + K0 + lane];
-      if (s != NO_SLOT) a1 -= M[s] * wk;
-    }
-  }
-#pragma unroll
-  for (int k = 0; k < NT - 1; k++) {  // U^T, dense rows
-    const double wk = __shfl_sync(FULL, a1 * d1, k);
-    if (ht && lane > k) a1 -= M[smap[(K0 + k) * NS + K0 + lane]] * wk;
-  }
+  transposed_upper(M, smap, hp, d0, d1, lane, a0, a1);
 #pragma unroll
   for (int p = 0; p < RP; p++) a0[p] *= d0[p];
   a1 *= d1;
-#pragma unroll
-  for (int k = NT - 1; k >= 0; k--) {  // L^T, dense rows: w_j -= L_kj x_k (j < k)
-    const double xk = __shfl_sync(FULL, a1, k);
-    if (ht && lane < k) a1 -= M[smap[(K0 + k) * NS + K0 + lane]] * xk;
-#pragma unroll
-    for (int p = 0; p < RP; p++)
-      if (hp[p]) {
-        const unsigned s = smap[(K0 + k) * NS + lane + 32 * p];
-        if (s != NO_SLOT) a0[p] -= M[s] * xk;
-      }
-  }
-#pragma unroll
-  for (int k = K0 - 1; k >= 0; k--) {  // L^T, sparse rows
-    if (!((LROW >> k) & 1ull)) continue;
-    const double xk = __shfl_sync(FULL, a0[k >> 5], k & 31);
-#pragma unroll
-    for (int p = 0; p < RP; p++) {
-      const int j = lane + 32 * p;
-      if (hp[p] && j < k) {
-        const unsigned s = smap[k * NS + j];
-        if (s != NO_SLOT) a0[p] -= M[s] * xk;
-      }
-    }
-  }
+  transposed_lower(M, smap, hp, lane, a0, a1);
   __syncwarp();
 #pragma unroll
   for (int p = 0; p < RP; p++)
@@ -191,14 +205,88 @@ __device__ __forceinline__ void rhs_vjp(double* work, const double* Y, const dou
   __syncwarp();
 }
 
+// Stages' concentration derivatives and the rho of rhs_vjp_n: the reverse terms of one reaction r, added to its sums.
+__device__ __forceinline__ void reverse_reaction(int r, const double* work, double* lbk, double* rho, const double* n,
+                                                 const double (&rt)[4], double g, const double* kf, const double* kr,
+                                                 double (&ff)[4], double (&ffd)[4], double (&tl)[4], double (&tdl)[4],
+                                                 double& ffF, double& tF, const Tab& tab) {
+  constexpr int OZ[4] = {A_KB1, A_KB2, A_KB3, A_Z}, ON1[4] = {A_N1, A_YB, A_YB2, A_NBD};
+  const u8* q = tab.rx + 6 * r;
+  double mre = 0.0, mpr = 0.0;
+#pragma unroll
+  for (int m = 0; m < 3; m++) {
+    mre += q[m] < NS ? 1.0 : 0.0;
+    mpr += q[3 + m] < NS ? 1.0 : 0.0;
+  }
+  const double n0 = n[q[0]], n1 = n[q[1]], n2 = n[q[2]], n3 = n[q[3]], n4 = n[q[4]], n5 = n[q[5]];
+  const double pp = n0 * n1 * n2;
+  const double a = kf[r] * pp, b = kr[r] * (n3 * n4 * n5), ab = a - b;
+  double vbF = 0.0, cot_k = 0.0, lr = 0.0, lp = 0.0;  // lp: a photolysis row's cotangent of kf itself
+#pragma unroll
+  for (int s = 0; s < 4; s++) {
+    const double *z = work + OZ[s], *d = work + ON1[s];
+    double sb = 0.0;
+#pragma unroll
+    for (int m = 0; m < 3; m++) {
+      if (q[m] < NS) sb -= z[q[m]];
+      if (q[3 + m] < NS) sb += z[q[3 + m]];
+      if (r >= NRT && PX[3 * (r - NRT) + m] < NS) sb += z[PX[3 * (r - NRT) + m]];
+    }
+    const double vb = sb * g;
+    const double Pd = d[q[0]] * n1 * n2 + n0 * d[q[1]] * n2 + n0 * n1 * d[q[2]];
+    const double Qd = d[q[3]] * n4 * n5 + n3 * d[q[4]] * n5 + n3 * n4 * d[q[5]];
+    const double ad = kf[r] * Pd, bd = kr[r] * Qd;
+    lp += vb * rt[s] * pp + vb * Pd;
+    cot_k += vb * rt[s] * ab + vb * (ad - bd);
+    lr -= vb * rt[s] * b + vb * bd;
+    ff[s] += vb * ab;
+    ffd[s] += vb * (ad - bd);
+    tl[s] += vb * (mre * a - mpr * b);
+    tdl[s] += vb * ((mre - 1.0) * ad - (mpr - 1.0) * bd);
+    rho[s * 2 * NR + r] = vb * kf[r];
+    rho[s * 2 * NR + NR + r] = -vb * kr[r];
+    if (s < 2) vbF += vb;
+  }
+  cot_k += vbF * ab;
+  lp += vbF * pp;
+  lr -= vbF * b;
+  ffF += vbF * ab;
+  tF += vbF * (mre * a - mpr * b);
+  lbk[r] += r < NRT ? cot_k : lp;
+  lbk[NR + r] += lr;
+}
+
+// The gather of rhs_vjp_n: the pieces of Nb from rho, with the concentrations n and their derivatives along each K_i.
+__device__ __forceinline__ void reverse_gather(const double* work, const double* rho, const double* n, double* part,
+                                               const u64* __restrict__ gt, int ground, int lane) {
+  constexpr int ON1[4] = {A_N1, A_YB, A_YB2, A_NBD};
+  double acc = 0.0;
+  for (int qq = 0; qq < ground; qq++) {
+    const u64 word = __ldg(gt + qq * 32 + lane);
+    if ((word >> 37) & 1ull) {
+      const int k = (int)(word & 4095ull), ia = (int)((word >> 12) & 127ull), ib = (int)((word >> 19) & 127ull);
+      const double na = n[ia], nb = n[ib], r0 = rho[k], r1 = rho[2 * NR + k];
+      acc = fma(r0 + r1, na * nb, acc);
+#pragma unroll
+      for (int s = 0; s < 4; s++) {
+        const double* d = work + ON1[s];
+        acc = fma(s == 0 ? r0 : (s == 1 ? r1 : rho[s * 2 * NR + k]), d[ia] * nb + na * d[ib], acc);
+      }
+      if ((word >> 35) & 1ull) {
+        part[(word >> 26) & 511ull] = acc;
+        acc = 0.0;
+      }
+    }
+  }
+}
+
 // The reverse at N of F(N) for the cotangent z1 + z2 and of the four stages' Jacobian terms: Nb += J(N)^T (z1 + z2) +
 // sum_i d/ds [J(N + s K_i)^T z_i] (z_i = W^-T of stage i's cotangent: z1..z3 in Kb1..Kb3, z4 in z), and the matching
 // rate cotangents, in one pass over the reactions and one gather (n1_i = the concentrations' derivative along K_i).
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
 __device__ __forceinline__ void rhs_vjp_n(double* work, double* lbk, double* rho, double& lbnd, const double* kf,
                                           const double* kr, double nd, const Tab& tab, const u64* __restrict__ gt,
                                           const int* __restrict__ xg, int ground, int lane) {
-  constexpr int OZ[4] = {A_KB1, A_KB2, A_KB3, A_Z}, ON1[4] = {A_N1, A_YB, A_YB2, A_NBD};
+  constexpr int ON1[4] = {A_N1, A_YB, A_YB2, A_NBD};
   double *N = work + A_NN, *Nb = work + A_NB, *n = work + A_N0, *part = work + A_PART;
   const double* K = work + A_K1;
   double p = 0.0, pd[4] = {0.0, 0.0, 0.0, 0.0};
@@ -231,51 +319,8 @@ __device__ __forceinline__ void rhs_vjp_n(double* work, double* lbk, double* rho
     tl[s] = 0.0;
     tdl[s] = 0.0;
   }
-  for (int r = lane; r < NR; r += 32) {
-    const u8* q = tab.rx + 6 * r;
-    double mre = 0.0, mpr = 0.0;
-#pragma unroll
-    for (int m = 0; m < 3; m++) {
-      mre += q[m] < NS ? 1.0 : 0.0;
-      mpr += q[3 + m] < NS ? 1.0 : 0.0;
-    }
-    const double n0 = n[q[0]], n1 = n[q[1]], n2 = n[q[2]], n3 = n[q[3]], n4 = n[q[4]], n5 = n[q[5]];
-    const double pp = n0 * n1 * n2;
-    const double a = kf[r] * pp, b = kr[r] * (n3 * n4 * n5), ab = a - b;
-    double vbF = 0.0, cot_k = 0.0, lr = 0.0, lp = 0.0;  // lp: a photolysis row's cotangent of kf itself
-#pragma unroll
-    for (int s = 0; s < 4; s++) {
-      const double *z = work + OZ[s], *d = work + ON1[s];
-      double sb = 0.0;
-#pragma unroll
-      for (int m = 0; m < 3; m++) {
-        if (q[m] < NS) sb -= z[q[m]];
-        if (q[3 + m] < NS) sb += z[q[3 + m]];
-        if (r >= NRT && PX[3 * (r - NRT) + m] < NS) sb += z[PX[3 * (r - NRT) + m]];
-      }
-      const double vb = sb * g;
-      const double Pd = d[q[0]] * n1 * n2 + n0 * d[q[1]] * n2 + n0 * n1 * d[q[2]];
-      const double Qd = d[q[3]] * n4 * n5 + n3 * d[q[4]] * n5 + n3 * n4 * d[q[5]];
-      const double ad = kf[r] * Pd, bd = kr[r] * Qd;
-      lp += vb * rt[s] * pp + vb * Pd;
-      cot_k += vb * rt[s] * ab + vb * (ad - bd);
-      lr -= vb * rt[s] * b + vb * bd;
-      ff[s] += vb * ab;
-      ffd[s] += vb * (ad - bd);
-      tl[s] += vb * (mre * a - mpr * b);
-      tdl[s] += vb * ((mre - 1.0) * ad - (mpr - 1.0) * bd);
-      rho[s * 2 * NR + r] = vb * kf[r];
-      rho[s * 2 * NR + NR + r] = -vb * kr[r];
-      if (s < 2) vbF += vb;
-    }
-    cot_k += vbF * ab;
-    lp += vbF * pp;
-    lr -= vbF * b;
-    ffF += vbF * ab;
-    tF += vbF * (mre * a - mpr * b);
-    lbk[r] += r < NRT ? cot_k : lp;
-    lbk[NR + r] += lr;
-  }
+  for (int r = lane; r < NR; r += 32)
+    reverse_reaction(r, work, lbk, rho, n, rt, g, kf, kr, ff, ffd, tl, tdl, ffF, tF, tab);
   __syncwarp();
   const double FF_F = wsum(ffF), tau_F = wsum(tF);
   double sc = (FF_F - tau_F) / ntot, lb = tau_F - FF_F;
@@ -286,26 +331,7 @@ __device__ __forceinline__ void rhs_vjp_n(double* work, double* lbk, double* rho
     sc += (FFd - taud) / ntot - (FF - tau) * rt[s] / ntot;
     lb += taud - FFd;
   }
-  {
-    double acc = 0.0;
-    for (int qq = 0; qq < ground; qq++) {
-      const u64 word = __ldg(gt + qq * 32 + lane);
-      if ((word >> 37) & 1ull) {
-        const int k = (int)(word & 4095ull), ia = (int)((word >> 12) & 127ull), ib = (int)((word >> 19) & 127ull);
-        const double na = n[ia], nb = n[ib], r0 = rho[k], r1 = rho[2 * NR + k];
-        acc = fma(r0 + r1, na * nb, acc);
-#pragma unroll
-        for (int s = 0; s < 4; s++) {
-          const double* d = work + ON1[s];
-          acc = fma(s == 0 ? r0 : (s == 1 ? r1 : rho[s * 2 * NR + k]), d[ia] * nb + na * d[ib], acc);
-        }
-        if ((word >> 35) & 1ull) {
-          part[(word >> 26) & 511ull] = acc;
-          acc = 0.0;
-        }
-      }
-    }
-  }
+  reverse_gather(work, rho, n, part, gt, ground, lane);
   __syncwarp();
   for (int i = lane; i < NS; i += 32) {
     double s = part[i];
@@ -421,30 +447,39 @@ __device__ __forceinline__ void save(double* rp, const double* N, double h, doub
       max_steps, adapt, perm, blob, rf, nasa, scratch, rec, sst, jt, lu, optr, gt, xg, sround, jround, ground, Jin, \
       gJ, gA
 
+// The cotangents of a failed cell's inputs: NaN.
+__device__ __forceinline__ void nan_cotangents(double* __restrict__ gx0, double* __restrict__ gT,
+                                               double* __restrict__ gP, double* __restrict__ gdt,
+                                               double* __restrict__ ghin, double* __restrict__ glm,
+                                               double* __restrict__ gJ, double* __restrict__ gA, int cell, int lane) {
+  for (int i = lane; i < NS; i += 32) gx0[(size_t)cell * NS + i] = DNAN;
+  for (int r = lane; r < NR; r += 32) {
+    glm[(size_t)cell * NR + r] = DNAN;
+    gA[(size_t)cell * NR + r] = DNAN;
+  }
+  for (int b = lane; b < NJ; b += 32) gJ[(size_t)cell * NJ + b] = DNAN;
+  if (lane == 0) {
+    gT[cell] = DNAN;
+    gP[cell] = DNAN;
+    gdt[cell] = DNAN;
+    ghin[cell] = DNAN;
+  }
+}
+
 // The call and the cotangents of its inputs, one warp per cell. DN = false: every cell, the call kernel's attempts
 // (queue count[0]; CAP stored attempts per cell in rec). DN = true: the first count[COUNT_RECOMPUTED] cells of list,
 // the recover kernel's attempts (dense W in wscr; max_steps = the recovery's tries; CAPR stored attempts; queue
 // count[9]); its result tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8] and NaN
 // cotangents.
 template <bool DN>
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
+// size-limit-ok: one cell's state runs through every part: a further split passes 30 or more arguments per helper
 __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, double* wscr,
                                           const u16* __restrict__ didx, const double* __restrict__ atoms) {
   constexpr int CP = DN ? CAPR : CAP;
   extern __shared__ double smem[];
   unsigned* tb32 = (unsigned*)(smem + WPB * PERWA);
-  for (int i = threadIdx.x; i < TBYTES / 4; i += blockDim.x) tb32[i] = blob[i];
-  __syncthreads();
-  const u8* tb = (const u8*)tb32;
-  Tab tab;
-  tab.smap = (const u16*)(tb + O_SMAP);
-  tab.rowptr = (const u16*)(tb + O_ROWPTR);
-  tab.diag = (const u16*)(tb + O_DIAG);
-  tab.colof = tb + O_COLOF;
-  tab.rx = tb + O_RX;
-  tab.xp = tb + O_XP;
-  tab.blen = tb + O_BLEN;
-  const int lane = threadIdx.x & 31, wib = threadIdx.x >> 5;
+  const Tab tab = load_tab(tb32, blob);
+  const int lane = (int)(threadIdx.x & 31), wib = (int)(threadIdx.x >> 5);
   const int myt = lane < NT ? lane : -1;
   double c[NT];
 #pragma unroll
@@ -452,7 +487,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
   double* work = smem + wib * PERWA;
   double *M = work + A_M, *N = work + A_NN, *Y = work + A_Y, *Nb = work + A_NB, *Yb = work + A_YB, *z = work + A_Z,
          *K4 = work + A_K4;
-  const size_t wid = (size_t)(blockIdx.x * WPB + wib);
+  const size_t wid = (size_t)blockIdx.x * WPB + wib;
   double* kf = scratch + wid * (14 * NR + 2);
   double *kr = kf + NR, *lbk = kr + NR + 2, *rho = lbk + 2 * NR, *cw = rho + 8 * NR;  // rho: 4 x 2 NR
   if (lane == 0) kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
@@ -460,7 +495,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
   double* recB = recA + CP * REC;
   double* Wd = DN ? wscr + wid * NS * NS : nullptr;
   const int nc = DN ? count[COUNT_RECOMPUTED] : B;
-  int q = blockIdx.x * WPB + wib;
+  int q = (int)(blockIdx.x * WPB + wib);
   while (q < nc) {
     const int cell = DN ? list[q] : q;
     const double Tc = Ta[cell], dt = dta[cell], Pc = Pa[cell], nd = Pc / (KBOLTZ * Tc);
@@ -468,17 +503,10 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     double p = 0.0, pm = 0.0;
     for (int i = lane; i < NS; i += 32) {
       N[i] = x0[(size_t)cell * NS + perm[i]];
-      p += N[i] >= 0.0 ? N[i] : DNAN;
-      pm = fmax(pm, N[i]);
+      screen_x(N[i], p, pm);
     }
-    for (int b = lane; b < NJ; b += 32) {
-      const double qj = Jin[(size_t)cell * NJ + b];
-      p += qj >= 0.0 ? 0.0 * qj : DNAN;
-    }
-    const double ps = wsum(p);  // bad input as the call kernel's: non-finite, x < 0, no x > 0, P <= 0 or dt < 0
-    const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
-                     dt >= 0.0,
-               cold = Tc < TMIN;
+    screen_J(Jin, cell, lane, 32, p);
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
     if (fin && !cold) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
     __syncwarp();
     const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it)
@@ -496,14 +524,9 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       if (na < CP && lane == 0) recA[na * REC + NS + 2] = ok ? 1.0 : 0.0;
       na++;
     }
-    p = 0.0;
-    for (int i = lane; i < NS; i += 32) p += N[i];
-    const double s = wsum(p);
+    const double s = write_state(N, xout + (size_t)cell * NS, perm, lane, lane, 32);
     double gs = 0.0;
-    for (int i = lane; i < NS; i += 32) {
-      xout[(size_t)cell * NS + perm[i]] = N[i] / s;
-      gs += gx[(size_t)cell * NS + perm[i]] * N[i];
-    }
+    for (int i = lane; i < NS; i += 32) gs += gx[(size_t)cell * NS + perm[i]] * N[i];
     gs = wsum(gs);
     const int dn = (fin && t >= dt * CALL_END) ? 1 : 0;
     if (lane == 0) {
@@ -574,7 +597,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
         for (int i = lane; i < NS; i += 32) N[i] = rp[i];
         const double hj = rp[NS], tj = rp[NS + 1], rem = dt - tj, ha = fmin(hj, rem);
         __syncwarp();
-        double c0 = c0_l, en = en_l, dfe, dfh, dfp, dfq;
+        double c0 = c0_l, en = en_l, dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
         bool ok = rp[NS + 2] != 0.0;
         if (j < j1 - 1)  // else the attempt just run, still in place
           en = xattempt<DN>(work, c, Wd, ha, tj == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr, didx,
@@ -666,7 +689,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
         }
         glm[(size_t)cell * NR + r] = cot_k;
         const int fl = rf[r];
-        double dT, dn, D[9];
+        double dT = 0.0, dn = 0.0, D[9];
         kpart(rc + RCW * r, fl, Tc, lT, iT, nd, dT, dn, D);
         const u8* x = tab.rx + 6 * r;
         const double ddg = gTs[x[3]] + gTs[x[4]] + gTs[x[5]] - gTs[x[0]] - gTs[x[1]] - gTs[x[2]];
@@ -690,20 +713,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       gT[cell] = run ? gTt - lnd / Tc : 0.0;
       gP[cell] = run ? lnd / Pc : 0.0;
     }
-    if (DN && bad) {  // still failed after the recovery
-      for (int i = lane; i < NS; i += 32) gx0[(size_t)cell * NS + i] = DNAN;
-      for (int r = lane; r < NR; r += 32) {
-        glm[(size_t)cell * NR + r] = DNAN;
-        gA[(size_t)cell * NR + r] = DNAN;
-      }
-      for (int b = lane; b < NJ; b += 32) gJ[(size_t)cell * NJ + b] = DNAN;
-      if (lane == 0) {
-        gT[cell] = DNAN;
-        gP[cell] = DNAN;
-        gdt[cell] = DNAN;
-        ghin[cell] = DNAN;
-      }
-    }
+    if (DN && bad) nan_cotangents(gx0, gT, gP, gdt, ghin, glm, gJ, gA, cell, lane);  // still failed after the recovery
     int nxt = 0;
     if (lane == 0) nxt = gridDim.x * WPB + atomicAdd(count + (DN ? COUNT_RECOVERY_QUEUE : COUNT_QUEUE), 1);
     q = __shfl_sync(FULL, nxt, 0);
@@ -731,7 +741,7 @@ extern "C" __global__ void arrh(const double* __restrict__ gA, const double* __r
                                 const double* __restrict__ Pa, const double* __restrict__ rc,
                                 const int* __restrict__ rf, double* __restrict__ grc, int B) {
   __shared__ double red[9][256];
-  const int r = blockIdx.x, tid = threadIdx.x, fl = rf[r];
+  const int r = (int)blockIdx.x, tid = (int)threadIdx.x, fl = rf[r];
   double acc[9];
 #pragma unroll
   for (int j = 0; j < 9; j++) acc[j] = 0.0;
@@ -739,7 +749,7 @@ extern "C" __global__ void arrh(const double* __restrict__ gA, const double* __r
     const double g = gA[(size_t)cell * NR + r];
     if (g == 0.0) continue;
     const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
-    double dT, dn, D[9];
+    double dT = 0.0, dn = 0.0, D[9];
     kpart(rc + RCW * r, fl, Tc, log(Tc), 1.0 / Tc, nd, dT, dn, D);
 #pragma unroll
     for (int j = 0; j < 9; j++) acc[j] += g * D[j];

@@ -31,7 +31,7 @@ every helper of the call is shared.
 
 | File | Holds |
 | --- | --- |
-| `common.cuh` | Constants, helpers, the rate law, the right-hand side `rhs`, the triangular solve `msolve` |
+| `common.cuh` | Constants, the arithmetic every kernel shares as forced-inline helpers, the right-hand side `rhs`, the triangular solve `msolve` |
 | `call.cuh` | The `call` kernel |
 | `guard.cuh` | `check_cell` and the `guard` kernel |
 | `recover.cuh` | The dense factorization and the `recover` kernel |
@@ -57,6 +57,11 @@ per thread, the register file already caps a block at 2 or 3 cells, so the extra
 - **Queue.** Persistent cells take work from an atomic queue, so no cell waits for the stiffest one. Results do not depend on the
   batch size or order.
 
+Shared arithmetic is `__forceinline__`: a noinline helper changes which operations fuse, and so the bits. What stays repeated says
+why beside it: the kernels' `rhs` and `rhs1` differ in barriers and lanes, the call's LU reads its update words ahead, and the
+derivative forms of the rate law (`kpart`) need the terms the primal `law` folds. `test_ad.py` holds them to the call's bits and to
+finite differences.
+
 The derivative kernels use one warp per cell. Each lane walks `W` of the call kernel's lane streams, so every sum of the primal
 is the call kernel's. They take networks up to 96 species (64 leading rows and the 32-row trailing block) and 2,047 reactions.
 
@@ -66,8 +71,8 @@ Some facts must stay equal in Python, the kernels and the C++ caller. `_constant
 
 - `RATE_LAW_FLAGS`, `RATE_LAW_SHIFTS`: the bits of a reaction's flag word.
 - `COUNT_SLOTS`: the device's count array.
-- `KERNEL_ARGUMENTS`: each kernel's parameters, in order. `CudaSolver.launch` and the C++ caller build their launches from it. A
-  test compares it with the kernel files.
+- `KERNEL_ARGUMENTS`: each kernel's parameters, in order. `CudaSolver.launch`, `ADSolver` and the C++ caller build their launches
+  from it. A test compares it with the kernel files.
 - `EXPORT_FORMAT`: the export's version. The C++ caller refuses any other.
 
 ## The C++ caller

@@ -160,16 +160,14 @@ def _reaction_tables(
     ns: int,
     n_thermal: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """Return the reactions' species slots (padding ns: n[ns] = 1, g[ns] = 0) and rate laws.
-
-    Rows nr + r of the laws hold explicit reverse laws.
-    """
+    """Return the reactions' species slots (padding ns: n[ns] = 1, g[ns] = 0) and rate laws."""
     nr = len(reac)
-    rev = any("rev" in r for r in reac)
     rx = np.full((nr, 6), ns, np.uint8)
-    rc = np.zeros((2 * nr if rev else nr, 14), np.float64)
-    rf = np.zeros(len(rc), np.int32)
+    rc = np.zeros((nr, 14), np.float64)
+    rf = np.zeros(nr, np.int32)
     for j, r in enumerate(reac):
+        if "rev" in r:
+            raise ValueError(f"reaction {r.get('eq', j)} has an explicit reverse law: every reverse comes from NASA-9")
         rx[j, : len(reactants[j])] = [pos[q] for q in reactants[j]]
         if j >= n_thermal:  # photolysis: no reverse side, no law (kf = J, kr = 0 in the kernel)
             continue
@@ -178,17 +176,10 @@ def _reaction_tables(
         rf[j] |= (
             (r["kind"] in (3, 5, 6)) * RATE_LAW_FLAGS["FL_THREE_BODY"]
             | (len(products[j]) - len(reactants[j]) + 4) << RATE_LAW_SHIFTS["FL_DMU_SHIFT"]
-            | ("rev" in r) * RATE_LAW_FLAGS["FL_REV"]
             | len(reactants[j]) << RATE_LAW_SHIFTS["FL_FORWARD_SHIFT"]
             | len(products[j]) << RATE_LAW_SHIFTS["FL_REVERSE_SHIFT"]
         )
-        if "rev" in r:
-            rc[nr + j], rf[nr + j] = _law(r["rev"])
-    law = sorted(
-        {"troe" for r in reac if "troe" in r or "troe" in r.get("rev", {})}
-        | {"eff" for r in reac if "eff" in r or "eff" in r.get("rev", {})}
-        | ({"rev"} if rev else set())
-    )
+    law = sorted({"troe" for r in reac if "troe" in r} | {"eff" for r in reac if "eff" in r})
     if not {"troe", "eff"} & set(law):
         rc = rc[:, :9]
     return rx, rc, rf, law

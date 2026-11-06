@@ -28,6 +28,7 @@ from ._constants import (
     PHOTOLYSIS_ARGUMENT,
     REC_STEPS,
     REGISTER_ALLOCATION_UNIT,
+    SOLVER_KERNEL_NAMES,
     T_MIN,
 )
 from ._cuda import (
@@ -214,7 +215,7 @@ class CudaSolver:
 
         def load(cells_per_block: int) -> tuple[Any, list[Any]]:
             sources = kernel_sources(call_header(tab, cells_per_block, wsh, self.drift))
-            return load_module(compile_cubin(SOLVER_KERNELS, sources, arch), KERNEL_ARGUMENTS, self._modules)
+            return load_module(compile_cubin(SOLVER_KERNELS, sources, arch), SOLVER_KERNEL_NAMES, self._modules)
 
         def drop(module: Any) -> None:
             self._modules.remove(module)

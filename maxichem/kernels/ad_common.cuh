@@ -8,9 +8,9 @@ __device__ const unsigned char PX[] = {PX_SLOTS};  // photolysis branches' produ
 
 __device__ __forceinline__ double sgn(double a) { return a > 0.0 ? 1.0 : (a < 0.0 ? -1.0 : 0.0); }
 
-// The call kernel's rhs on one warp: F = (n_tot / nd) S v(n) at Y, u0 = S v / nd unless null; each lane walks W of the
-// call kernel's NL lane streams, so every sum is the call kernel's. Returns n_tot.
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
+// The call kernel's rhs on one warp, kept apart because it has warp barriers where rhs has the cell's named barrier;
+// the primal test in test_ad.py holds the two to the same bits. F = (n_tot / nd) S v(n) at Y, u0 = S v / nd unless
+// null; each lane walks W of the call kernel's NL lane streams, so every sum is the call kernel's. Returns n_tot.
 __device__ __noinline__ double rhs1(const double* Y, double* F, double* u0, double* n, double* v, double* part,
                                     const double* kf, const double* kr, double nd, const Tab& tab,
                                     const unsigned* __restrict__ sst, int sround, int lane) {
@@ -23,51 +23,17 @@ __device__ __noinline__ double rhs1(const double* Y, double* F, double* u0, doub
   __syncwarp();
 #pragma unroll
   for (int qq = 0; qq < (NR + NL - 1) / NL; qq++) {
-    const int na = VSA(qq), nb = VSB(qq);
 #pragma unroll
     for (int m = 0; m < W; m++) {
       const int r = lane + 32 * m + NL * qq;
-      if (r < NR) {
-        const u8* q = tab.rx + 6 * r;
-        if (na == 3 || nb == 3) {
-          const double a = kf[r] * n[q[0]] * n[q[1]] * n[q[2]];
-          const double b = kr[r] * n[q[3]] * n[q[4]] * n[q[5]];
-          v[r] = __dsub_rn(a, b);
-        } else {
-          double a = kf[r] * n[q[0]], b = kr[r] * n[q[3]];
-          if (na == 2) a = a * n[q[1]];
-          if (nb == 2) b = b * n[q[4]];
-          v[r] = __dsub_rn(a, b);
-        }
-      }
+      if (r < NR) reaction_rate(r, VSA(qq), VSB(qq), n, v, kf, kr, tab);
     }
   }
   __syncwarp();
 #pragma unroll
-  for (int m = 0; m < W; m++) {
-    const int cl = lane + 32 * m;
-    double acc = 0.0;
-#pragma unroll 4
-    for (int q = 0; q < sround; q++) {
-      const unsigned word = __ldg(sst + q * NL + cl);
-      if (word >> 31) {
-        const double cf = ((word >> SV_DOUBLE) & 1u) ? (((word >> SV_SIGN) & 1u) ? -2.0 : 2.0)
-                                                     : (((word >> SV_SIGN) & 1u) ? -1.0 : 1.0);
-        acc = fma(cf, v[word & SV_REACTION_MASK], acc);
-        if ((word >> SV_END) & 1u) {
-          part[(word >> SV_PIECE) & SV_PIECE_MASK] = acc;
-          acc = 0.0;
-        }
-      }
-    }
-  }
+  for (int m = 0; m < W; m++) sv_lane(lane + 32 * m, v, part, sst, sround);
   __syncwarp();
-  for (int i = lane; i < NS; i += 32) {
-    double s = part[i];
-    for (int e = tab.xp[i]; e < tab.xp[i + 1]; e++) s += part[NS + e];
-    F[i] = s * ixf;
-    if (u0) u0[i] = s / nd;
-  }
+  for (int i = lane; i < NS; i += 32) gather_row(i, part, F, u0, nd, ixf, tab);
   __syncwarp();
   return ntot;
 }
@@ -83,12 +49,12 @@ __device__ __forceinline__ void svs2(const double* w1, const double* w2, double*
     for (int q = 0; q < sround; q++) {
       const unsigned x = __ldg(sst + q * NL + cl);
       if (x >> 31) {
-        const int r = x & SV_REACTION_MASK;
-        const double cf = (((x >> SV_DOUBLE) & 1u) ? 2.0 : 1.0) * (((x >> SV_SIGN) & 1u) ? -1.0 : 1.0);
+        const int r = (int)(x & SV_REACTION_MASK);
+        const double cf = stream_coefficient(x, SV_DOUBLE, SV_SIGN);
         a1 += cf * w1[r];
         a2 += cf * w2[r];
         if ((x >> SV_END) & 1u) {
-          const int d = (x >> SV_PIECE) & SV_PIECE_MASK;
+          const int d = (int)((x >> SV_PIECE) & SV_PIECE_MASK);
           part[2 * d] = a1;
           part[2 * d + 1] = a2;
           a1 = 0.0;
@@ -115,7 +81,7 @@ __device__ __forceinline__ void svs2(const double* w1, const double* w2, double*
 // larger (1/2 at a tie; a direction of fewer than two molecules does not count).
 __device__ __forceinline__ void cap_w(int fl, double kf, double kr, double nd, double& wA, double& wG) {
   const int mf = (fl >> FL_FORWARD_SHIFT) & 3, mr = (fl >> FL_REVERSE_SHIFT) & 3;
-  const double qf = mf >= 2 ? kf * (mf == 3 ? nd : 1.0) : 0.0, qr = mr >= 2 ? kr * (mr == 3 ? nd : 1.0) : 0.0;
+  const double qf = bimolecular_rate(mf, kf, nd), qr = bimolecular_rate(mr, kr, nd);
   const double q = fmax(qf, qr), weight = q > KCOLL ? 1.0 : (q == KCOLL ? 0.5 : 0.0);
   wA = weight;
   wG = weight * (qr > qf ? 1.0 : (qr < qf ? 0.0 : 0.5));
@@ -130,16 +96,7 @@ __device__ __forceinline__ void rates(double* work, double* kf, double* kr, doub
                                       int lane) {
   const double lT = log(Tc), iT = 1.0 / Tc, lKT = log(KBOLTZ * Tc / P0BAR);
   double* g = work + A_V;  // G / RT of each species
-  const double* cf = nasa + (Tc < NASA_SPLIT_T ? 0 : NS * 9);
-  for (int i = lane; i < NS; i += 32) {
-    const double* a = cf + 9 * i;
-    const double T2 = Tc * Tc, T3 = T2 * Tc, T4 = T3 * Tc;
-    const double hh = -a[0] * iT * iT + a[1] * lT * iT + a[2] + a[3] * Tc / 2 + a[4] * T2 / 3 + a[5] * T3 / 4 +
-                      a[6] * T4 / 5 + a[7] * iT;
-    const double ss =
-        -a[0] * iT * iT / 2 - a[1] * iT + a[2] * lT + a[3] * Tc + a[4] * T2 / 2 + a[5] * T3 / 3 + a[6] * T4 / 4 + a[8];
-    g[i] = hh - ss;
-  }
+  gibbs_rt(g, nasa, Tc, lT, iT, lane, 32);
   if (lane == 0) g[NS] = 0.0;
   __syncwarp();
   for (int r = lane; r < NR; r += 32) {
@@ -152,14 +109,9 @@ __device__ __forceinline__ void rates(double* work, double* kf, double* kr, doub
       continue;
     }
     const int fl = rf[r];
-    const double k = law(rc + RCW * r, fl, Tc, lT, iT, nd);
-    const u8* x = tab.rx + 6 * r;
-    const double dg = g[x[3]] + g[x[4]] + g[x[5]] - g[x[0]] - g[x[1]] - g[x[2]];
-    const double c3 = (fl & FL_THREE_BODY) ? nd : 1.0;
-    kf[r] = k * c3;
-    kr[r] = REVERSE_RATE;
+    rate_pair(r, fl, rc, tab.rx + 6 * r, g, Tc, lT, iT, lKT, nd, kf[r], kr[r]);
     cap_w(fl, kf[r], kr[r], nd, cw[r], cw[NR + r]);
-    COLL(fl, kf[r], kr[r], nd);
+    collision_limit(fl, kf[r], kr[r], nd);
     if (lmc) {
       const double e = exp(lmc[r]);
       kf[r] *= e;
@@ -169,11 +121,13 @@ __device__ __forceinline__ void rates(double* work, double* kf, double* kr, doub
   __syncwarp();
 }
 
-// Partial derivatives of ln kf of a thermal reaction (rate law q = its rc row, flags fl; the collision limit not
-// included) at (T, nd): dT = d/dT, dn = d/d ln nd, D[j] = d/d q[j] for the nine Arrhenius columns (the Troe parameters
-// and the efficiency are not differentiated). ln kr adds d(sum G/RT, products - reactants)/dT + dmu / T to dT.
-// Troe factor: log10 F = f / (1 + y^2), f = log10 Fc(T), z = log10 Pr, N = 0.75 - 1.27 f; vm11 y = z / N, standard
-// x = z - 0.4 - 0.67 f, y = x / (N - 0.14 x); s = d log10 F / dz enters d ln k / d ln k_low, d ln k_inf, d ln nd.
+// Repeats the law's terms because their derivatives need ea, eb, ec apart, where law() folds them; test_ad.py compares
+// them with finite differences. Partial derivatives of ln kf of a thermal reaction (rate law q = its rc row, flags fl;
+// the collision limit not included) at (T, nd): dT = d/dT, dn = d/d ln nd, D[j] = d/d q[j] for the nine Arrhenius
+// columns (the Troe parameters and the efficiency are not differentiated). ln kr adds d(sum G/RT, products -
+// reactants)/dT + dmu / T to dT. Troe factor: log10 F = f / (1 + y^2), f = log10 Fc(T), z = log10 Pr, N = 0.75 - 1.27
+// f; vm11 y = z / N, standard x = z - 0.4 - 0.67 f, y = x / (N - 0.14 x); s = d log10 F / dz enters d ln k / d ln
+// k_low, d ln k_inf, d ln nd.
 __device__ __forceinline__ void kpart(const double* q, int fl, double Tc, double lT, double iT, double nd, double& dT,
                                       double& dn, double* D) {
   const double e0 = exp(q[0] + q[1] * lT - q[2] * iT),
@@ -217,9 +171,7 @@ __device__ __forceinline__ void gibbs_dT(double* g, double Tc, const double* __r
   for (int i = lane; i < NS; i += 32) {
     const double* a = cf + 9 * i;
     const double T2 = Tc * Tc, T3 = T2 * Tc, T4 = T3 * Tc;
-    const double hh = -a[0] * iT * iT + a[1] * lT * iT + a[2] + a[3] * Tc / 2 + a[4] * T2 / 3 + a[5] * T3 / 4 +
-                      a[6] * T4 / 5 + a[7] * iT;
-    g[i] = -hh * iT;
+    g[i] = -enthalpy_rt(a, Tc, lT, iT, T2, T3, T4) * iT;
   }
   if (lane == 0) g[NS] = 0.0;
   __syncwarp();
@@ -246,7 +198,7 @@ __device__ __forceinline__ void rates_tan(double* work, double* dk, double Tc, d
       continue;
     }
     const int fl = rf[r];
-    double dT, dn, D[9];
+    double dT = 0.0, dn = 0.0, D[9];
     kpart(rc + RCW * r, fl, Tc, lT, iT, nd, dT, dn, D);
     double dA = dT * dTc + dn * dlnd;
     if (drc)
@@ -267,32 +219,16 @@ __device__ __forceinline__ void rates_tan(double* work, double* dk, double Tc, d
 // y <- M0^-1 y on one warp (the call kernel's msolve, results stored).
 __device__ __forceinline__ void msol(const double* M, const double* dinv, double* y, const u16* smap,
                                      const double (&c)[NT], int lane, int myt) {
-  double a0[RP], a1;
+  double a0[RP], a1 = 0.0;
   msolve(M, dinv, y, smap, c, lane, myt, a0, a1);
   __syncwarp();
-#pragma unroll
-  for (int p = 0; p < RP; p++)
-    if (lane + 32 * p < K0) y[lane + 32 * p] = a0[p];
-  if (lane < NT) y[K0 + lane] = a1;
+  store_solved(y, a0, a1, lane);
   __syncwarp();
 }
 
-// The Sherman-Morrison update of a solved stage: y <- y + c0 (sum y) u (the call kernel's arithmetic).
+// The Sherman-Morrison update of a solved stage, then the warp's barrier.
 __device__ __forceinline__ void smup(double* y, const double* u, double c0, int lane) {
-  const bool ht = lane < NT;
-  double a0[RP];
-#pragma unroll
-  for (int p = 0; p < RP; p++) a0[p] = lane + 32 * p < K0 ? y[lane + 32 * p] : 0.0;
-  const double a1 = ht ? y[K0 + lane] : 0.0;
-  double sa = a0[0];
-#pragma unroll
-  for (int p = 1; p < RP; p++) sa += a0[p];
-  const double s = wsum(sa + a1) * c0;
-  __syncwarp();
-#pragma unroll
-  for (int p = 0; p < RP; p++)
-    if (lane + 32 * p < K0) y[lane + 32 * p] = a0[p] + s * u[lane + 32 * p];
-  if (ht) y[K0 + lane] = a1 + s * u[K0 + lane];
+  sherman_morrison_update(y, u, c0, lane);
   __syncwarp();
 }
 
@@ -315,11 +251,41 @@ __device__ __forceinline__ void xsolve(double* work, const double* Wd, const dou
     wsolve(work + A_M, work + A_DINV, y, work + A_U, c0, smap, c, lane, myt);
 }
 
-// One Rodas3 attempt of size ha from N with the call kernel's arithmetic on one warp (its NL lane streams walked W per
-// lane): the LU of M0 in M (leading slots and the trailing block's factors) and c (the block), dinv, u = M0^-1 w, c0,
-// K1..K4, Y = the new state; ok = accepted; returns the error (the call kernel's: the RMS, max(RMS, max-norm) while
-// first, i.e. no step of the call is accepted yet).
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
+// LU of M0 on one warp: the sparse leading columns, then the dense trailing block in registers c and back in its slots
+// (transposed solves); 1 / the pivots in dinv.
+__device__ __forceinline__ void factor_warp(double* M, double* dinv, double (&c)[NT], const Tab& tab,
+                                            const u64* __restrict__ lu, const int* __restrict__ optr, int lane,
+                                            int myt) {
+  for (int k = 0; k < K0; k++) {
+    const int len = tab.blen[k];
+    if (len) {
+      for (int i = lane; i < len; i += 32) dinv[k + i] = 1.0 / M[tab.diag[k + i]];
+      __syncwarp();
+    }
+    if (!(LPRE(k) | LTAIL(k))) continue;
+    const int oa = optr[k], ob = optr[k + 1];
+    const double dk = dinv[k];
+    scale_column(k, dk, M, tab, lane, 32);
+    __syncwarp();
+    for (int e = oa + lane; e < ob; e += 32) lu_update(M, __ldg(lu + e));
+    __syncwarp();
+  }
+  if (myt >= 0) {
+#pragma unroll
+    for (int j = 0; j < NT; j++) c[j] = M[TB0 + myt * NT + j];
+  }
+  factor_trailing(c, dinv, myt);
+  if (myt >= 0) {
+#pragma unroll
+    for (int j = 0; j < NT; j++) M[TB0 + myt * NT + j] = c[j];
+  }
+}
+
+// One Rodas3 attempt, its order repeating the call kernel's, whose two warps split what this one warp does in sequence;
+// the primal test in test_ad.py holds the two to the same bits. Size ha from N, with the call kernel's arithmetic on
+// one warp (its NL lane streams walked W per lane): the LU of M0 in M (leading slots and the trailing block's factors)
+// and c (the block), dinv, u = M0^-1 w, c0, K1..K4, Y = the new state; ok = accepted; returns the error (the call
+// kernel's: the RMS, max(RMS, max-norm) while first, i.e. no step of the call is accepted yet).
 __device__ __forceinline__ double attempt(double* work, double (&c)[NT], double ha, bool first, const double* kf,
                                           const double* kr, double nd, double rtol, double atol, double& c0, bool& ok,
                                           const Tab& tab, const unsigned* __restrict__ sst, const u64* __restrict__ jt,
@@ -332,127 +298,38 @@ __device__ __forceinline__ double attempt(double* work, double (&c)[NT], double 
   const double ntot = rhs1(N, F, u, n, v, part, kf, kr, nd, tab, sst, sround, lane);
   for (int s = lane; s < NNZ; s += 32) M[s] = 0.0;
   __syncwarp();
-  {  // M = -Jn: the call kernel's lane streams of 32-bit terms
-    const unsigned* jw = (const unsigned*)jt;
 #pragma unroll
-    for (int m = 0; m < W; m++) {
-      const int cl = lane + 32 * m;
-      const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
-      double acc = 0.0;
-      int ne = 0;
-#pragma unroll 4
-      for (int q = 0; q < jround; q++) {
-        const unsigned word = __ldg(jw + q * NL + cl);
-        const double pr =
-            kf[word & J_RATE_MASK] * n[(word >> J_A) & J_SPECIES_MASK] * n[(word >> J_B) & J_SPECIES_MASK];
-        const double cf =
-            ((word >> J_DOUBLE) & 1u) ? (((word >> J_SIGN) & 1u) ? -2.0 : 2.0) : (((word >> J_SIGN) & 1u) ? -1.0 : 1.0);
-        acc = fma(cf, pr, acc);
-#if NFIX
-        if ((word >> J_END) & 1u) {
-          const unsigned d = __ldg(jsl + ne);
-          if (d < NNZ)
-            M[d] = -acc;
-          else
-            Y[d - NNZ] = -acc;
-          acc = 0.0;
-          ne++;
-        }
-#else
-        if ((word >> J_END) & 1u) {
-          M[__ldg(jsl + ne)] = -acc;
-          acc = 0.0;
-          ne++;
-        }
-#endif
-      }
-    }
-  }
+  for (int m = 0; m < W; m++) jacobian_lane(lane + 32 * m, M, Y, kf, n, jt, jround);
   __syncwarp();
 #if NFIX
-  if (lane == 0) {
-    const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
-    for (int e = 0; e < NFIX; e++) M[__ldg(fx + e)] += Y[e];
-  }
+  if (lane == 0) jacobian_extras(M, Y, jt, jround);
   __syncwarp();
 #endif
   for (int i = lane; i < NS; i += 32) {  // u = w = S v / nd - Jn x; M = M0 = I / (gamma h) - Jn
-    double acc = 0.0;
-    const int s1 = tab.rowptr[i + 1];
-    for (int s = tab.rowptr[i]; s < s1; s++) acc += M[s] * N[tab.colof[s]];
-    if (i >= K0)
-      for (int j = 0; j < NT; j++) acc += M[TB0 + (i - K0) * NT + j] * N[K0 + j];
-    u[i] = u[i] + acc / ntot;
+    u[i] = u[i] + jacobian_times_x(i, M, N, tab) / ntot;
     M[tab.diag[i]] += igh;
   }
   __syncwarp();
-  for (int k = 0; k < K0; k++) {  // LU of the sparse leading columns
-    const int len = tab.blen[k];
-    if (len) {
-      for (int i = lane; i < len; i += 32) dinv[k + i] = 1.0 / M[tab.diag[k + i]];
-      __syncwarp();
-    }
-    if (!(LPRE(k) | LTAIL(k))) continue;
-    const int oa = optr[k], ob = optr[k + 1];
-    const double dk = dinv[k];
-    for (int i = lane; i < NS; i += 32) {
-      const unsigned q = tab.smap[i * NS + k];
-      if (i > k && q != NO_SLOT) M[q] *= dk;
-    }
-    __syncwarp();
-    for (int e = oa + lane; e < ob; e += 32) {
-      const u64 op = __ldg(lu + e);
-      M[op & LU_SLOT_MASK] -= M[(op >> LU_B) & LU_SLOT_MASK] * M[(op >> LU_C) & LU_SLOT_MASK];
-    }
-    __syncwarp();
-  }
-  if (myt >= 0) {  // dense trailing block in registers; 1 / its diagonal into dinv
-#pragma unroll
-    for (int j = 0; j < NT; j++) c[j] = M[TB0 + myt * NT + j];
-  }
-#pragma unroll
-  for (int k = 0; k < NT; k++) {
-    const double rp = 1.0 / __shfl_sync(FULL, c[k], k);
-    if (myt == k) dinv[K0 + k] = rp;
-    const bool act = myt > k;
-    const double l = act ? c[k] * rp : 0.0;
-    if (act) c[k] = l;
-#pragma unroll
-    for (int j = k + 1; j < NT; j++) {
-      const double uu = __shfl_sync(FULL, c[j], k);
-      if (act) c[j] -= l * uu;
-    }
-  }
-  if (myt >= 0) {  // the factors back into the block's slots (transposed solves)
-#pragma unroll
-    for (int j = 0; j < NT; j++) M[TB0 + myt * NT + j] = c[j];
-  }
+  factor_warp(M, dinv, c, tab, lu, optr, lane, myt);
   for (int i = lane; i < NS; i += 32) K1[i] = F[i];
   __syncwarp();
   msol(M, dinv, K1, tab.smap, c, lane, myt);  // stage 1: K1 and u = M0^-1 w, c0 = 1 / (1 - sum u)
   {
-    const bool ht = lane < NT;
-    double a0[RP], a1;
+    double a0[RP], a1 = 0.0;
     msolve(M, dinv, u, tab.smap, c, lane, myt, a0, a1);
-    double sb = lane < K0 ? a0[0] : 0.0;
-#pragma unroll
-    for (int p = 1; p < RP; p++) sb += lane + 32 * p < K0 ? a0[p] : 0.0;
-    c0 = 1.0 / (1.0 - wsum(sb + (ht ? a1 : 0.0)));
+    c0 = sherman_morrison_factor(a0, a1, lane);
     __syncwarp();
-#pragma unroll
-    for (int p = 0; p < RP; p++)
-      if (lane + 32 * p < K0) u[lane + 32 * p] = a0[p];
-    if (ht) u[K0 + lane] = a1;
+    store_solved(u, a0, a1, lane);
     __syncwarp();
   }
   smup(K1, u, c0, lane);
-  for (int i = lane; i < NS; i += 32) K2[i] = fma(RODAS_C21 * ih, K1[i], F[i]);
+  for (int i = lane; i < NS; i += 32) K2[i] = stage2_rhs(ih, K1[i], F[i]);
   __syncwarp();
   wsolve(M, dinv, K2, u, c0, tab.smap, c, lane, myt);
   for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i];
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, tab, sst, sround, lane);
-  for (int i = lane; i < NS; i += 32) K3[i] = fma(ih, K1[i] - K2[i], F[i]);
+  for (int i = lane; i < NS; i += 32) K3[i] = stage3_rhs(ih, K1[i], K2[i], F[i]);
   __syncwarp();
   wsolve(M, dinv, K3, u, c0, tab.smap, c, lane, myt);
   for (int i = lane; i < NS; i += 32) {
@@ -462,32 +339,18 @@ __device__ __forceinline__ double attempt(double* work, double (&c)[NT], double 
   }
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, tab, sst, sround, lane);
-  for (int i = lane; i < NS; i += 32) K4[i] = fma(ih, fma(-RODAS_C43, K3[i], K1[i] - K2[i]), F[i]);
+  for (int i = lane; i < NS; i += 32) K4[i] = stage4_rhs(ih, K1[i], K2[i], K3[i], F[i]);
   __syncwarp();
   wsolve(M, dinv, K4, u, c0, tab.smap, c, lane, myt);
-  double e2 = 0.0, em = 0.0;
-  bool nn = true;
-  for (int i = lane; i < NS; i += 32) {
-    const double y = N[i] + 2.0 * K1[i] + K3[i] + K4[i];
-    Y[i] = y;
-    const double sc = atol + rtol * fmax(fabs(N[i]), fabs(y));
-    const double q = K4[i] / sc;
-    e2 += q * q;
-    em = fmax(em, fabs(q));
-    nn = nn && (y >= -atol);
-  }
-  const double er = sqrt(wsum(e2) / NS), emx = wmax(em);
-  const double en = (first && isfinite(er)) ? fmax(er, emx) : er;
-  const bool nonneg = __all_sync(FULL, nn), efin = isfinite(en);
-  ok = (en <= 1.0) && nonneg && efin;
+  const double en = try_error(N, K1, K3, K4, Y, true, first, rtol, atol, lane, ok);
   __syncwarp();
   return en;
 }
 
-// One attempt of the recover kernel (kincuda) on one warp, its arithmetic bitwise: W = I / (gamma h) - Jn - w 1^T
+// One attempt of the recover kernel on one warp, repeating its order, which spreads the right-hand side over the cell's
+// warps (test_ad.py holds the two to the same bits): W = I / (gamma h) - Jn - w 1^T
 // formed densely in Wd from the call kernel's streams, dense_lu (1 / U_ii in dinv, the row order in pr = S + A_M as
 // ints), the stages with dense_solve; K1..K4, Y = the new state; ok = accepted; returns the error (as attempt).
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
 __device__ __forceinline__ double rattempt(double* work, double* Wd, double ha, bool first, const double* kf,
                                            const double* kr, double nd, double rtol, double atol, bool& ok,
                                            const Tab& tab, const unsigned* __restrict__ sst, const u64* __restrict__ jt,
@@ -500,87 +363,37 @@ __device__ __forceinline__ double rattempt(double* work, double* Wd, double ha, 
   const double ntot = rhs1(N, F, u, n, v, part, kf, kr, nd, tab, sst, sround, lane);
   for (int s = lane; s < NS * NS; s += 32) Wd[s] = 0.0;
   __syncwarp();
-  {  // W = -Jn: the call kernel's term streams, written to the dense positions of the slots
-    const unsigned* jw = (const unsigned*)jt;
 #pragma unroll
-    for (int m = 0; m < W; m++) {
-      const int cl = lane + 32 * m;
-      const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
-      double acc = 0.0;
-      int ne = 0;
-#pragma unroll 4
-      for (int qq = 0; qq < jround; qq++) {
-        const unsigned word = __ldg(jw + qq * NL + cl);
-        const double pq =
-            kf[word & J_RATE_MASK] * n[(word >> J_A) & J_SPECIES_MASK] * n[(word >> J_B) & J_SPECIES_MASK];
-        const double cf =
-            ((word >> J_DOUBLE) & 1u) ? (((word >> J_SIGN) & 1u) ? -2.0 : 2.0) : (((word >> J_SIGN) & 1u) ? -1.0 : 1.0);
-        acc = fma(cf, pq, acc);
-        if ((word >> J_END) & 1u) {
-          const unsigned d = __ldg(jsl + ne);
-          if (d < NNZ)
-            Wd[__ldg(didx + d)] = -acc;
-          else
-            Y[d - NNZ] = -acc;
-          acc = 0.0;
-          ne++;
-        }
-      }
-    }
-  }
+  for (int m = 0; m < W; m++) jacobian_lane_dense(lane + 32 * m, Wd, Y, didx, kf, n, jt, jround);
   __syncwarp();
 #if NFIX
-  if (lane == 0) {  // the extra pieces of long slots, in order
-    const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
-    for (int e = 0; e < NFIX; e++) Wd[__ldg(didx + __ldg(fx + e))] += Y[e];
-  }
+  if (lane == 0) jacobian_extras_dense(Wd, Y, didx, jt, jround);
   __syncwarp();
 #endif
-  for (int i = lane; i < NS; i += 32) {  // u = w = S v / nd - Jn x (the call kernel's sums, columns in order)
-    double acc = 0.0;
-    for (int j = 0; j < NS; j++)
-      if (tab.smap[i * NS + j] != NO_SLOT) acc += Wd[i * NS + j] * N[j];
-    u[i] = u[i] + acc / ntot;
-  }
+  // u = w = S v / nd - Jn x
+  for (int i = lane; i < NS; i += 32) u[i] = u[i] + dense_times_x(i, Wd, N, tab) / ntot;
   __syncwarp();
-  for (int s = lane; s < NS * NS; s += 32) {  // W = I / (gamma h) - Jn - w 1^T
-    const int i = s / NS;
-    Wd[s] = (s == i * (NS + 1) ? Wd[s] + igh : Wd[s]) - u[i];
-  }
+  form_dense_w(Wd, u, igh, lane, 32);
   for (int i = lane; i < NS; i += 32) K1[i] = F[i];
   __syncwarp();
   dense_lu(Wd, dinv, pr, lane);
   dense_solve(Wd, dinv, pr, K1, lane);
-  for (int i = lane; i < NS; i += 32) K2[i] = fma(RODAS_C21 * ih, K1[i], F[i]);
+  for (int i = lane; i < NS; i += 32) K2[i] = stage2_rhs(ih, K1[i], F[i]);
   __syncwarp();
   dense_solve(Wd, dinv, pr, K2, lane);
   for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i];
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, tab, sst, sround, lane);
-  for (int i = lane; i < NS; i += 32) K3[i] = fma(ih, K1[i] - K2[i], F[i]);
+  for (int i = lane; i < NS; i += 32) K3[i] = stage3_rhs(ih, K1[i], K2[i], F[i]);
   __syncwarp();
   dense_solve(Wd, dinv, pr, K3, lane);
   for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i] + K3[i];
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, tab, sst, sround, lane);
-  for (int i = lane; i < NS; i += 32) K4[i] = fma(ih, fma(-RODAS_C43, K3[i], K1[i] - K2[i]), F[i]);
+  for (int i = lane; i < NS; i += 32) K4[i] = stage4_rhs(ih, K1[i], K2[i], K3[i], F[i]);
   __syncwarp();
   dense_solve(Wd, dinv, pr, K4, lane);
-  double e2 = 0.0, em = 0.0;
-  bool nn = true;
-  for (int i = lane; i < NS; i += 32) {
-    const double y = N[i] + 2.0 * K1[i] + K3[i] + K4[i];
-    Y[i] = y;
-    const double sc = atol + rtol * fmax(fabs(N[i]), fabs(y));
-    const double q4 = K4[i] / sc;
-    e2 += q4 * q4;
-    em = fmax(em, fabs(q4));
-    nn = nn && (y >= -atol);
-  }
-  const double er = sqrt(wsum(e2) / NS), emx = wmax(em);
-  const double en = (first && isfinite(er)) ? fmax(er, emx) : er;
-  const bool nonneg = __all_sync(FULL, nn), efin = isfinite(en);
-  ok = (en <= 1.0) && nonneg && efin;
+  const double en = try_error(N, K1, K3, K4, Y, true, first, rtol, atol, lane, ok);
   __syncwarp();
   return en;
 }
@@ -646,7 +459,7 @@ __device__ __forceinline__ bool fstep(double* work, double (&c)[NT], double* Wd,
                                       const u16* __restrict__ didx, int sround, int jround, int lane, int myt) {
   double *N = work + A_NN, *Y = work + A_Y;
   const double ha = fmin(h, dt - t);
-  bool ok;
+  bool ok = false;
   en = xattempt<DN>(work, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr, didx, sround,
                     jround, lane, myt);
   if (ok) {

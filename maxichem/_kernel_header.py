@@ -156,7 +156,6 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool = True, drift: float | 
         "PERWR": shared_doubles_recover(tab, wsh),
         "HAS_TROE": int("troe" in law),
         "HAS_EFF": int("eff" in law),
-        "HAS_REV": int("rev" in law),
         **{f"O_{name.upper()}": offset for name, offset in offsets.items()},
         "NO_SLOT": f"{NO_SLOT:#x}u",
         **RATE_LAW_FLAGS,

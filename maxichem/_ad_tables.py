@@ -114,12 +114,12 @@ def supported(tab: dict[str, Any]) -> None:
     """Raise NotImplementedError unless the derivative kernels take the network of these tables.
 
     At most 64 leading rows (with the 32-row trailing block: at most 96 species), at most 2,047 reactions (photolysis
-    branches included), no explicit reverse law.
+    branches included).
     """
-    if "rev" in tab["law"] or tab["k0"] > 64 or 2 * tab["nr"] >= 4096:
+    if tab["k0"] > 64 or 2 * tab["nr"] >= 4096:
         raise NotImplementedError(
-            "the derivative kernels take networks of at most 96 species (64 leading rows), "
-            "at most 2,047 reactions (photolysis branches included) and no explicit reverse law"
+            "the derivative kernels take networks of at most 96 species (64 leading rows) "
+            "and at most 2,047 reactions (photolysis branches included)"
         )
 
 

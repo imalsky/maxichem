@@ -2,7 +2,7 @@
 
 // one block per SM is enough: without that bound ptxas may cap the registers below what the block size allows and spill
 extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
-    // size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
+    // size-limit-ok: split into forced-inline helpers it cost 1.1 % (lit 0.654 to 0.661 us per cell-call), bits equal
     call(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
          const double* __restrict__ dta, double* __restrict__ hio, double* __restrict__ xout, int* __restrict__ doneo,
          double* __restrict__ noko, int* __restrict__ count, int B, double rtol, double atol, int max_steps,
@@ -12,18 +12,8 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
          int jround J_PARAM) {
   extern __shared__ double smem[];
   unsigned* tb32 = (unsigned*)(smem + CPB * PERC);
-  for (int i = threadIdx.x; i < TBYTES / 4; i += blockDim.x) tb32[i] = blob[i];
-  __syncthreads();
-  const u8* tb = (const u8*)tb32;
-  Tab tab;
-  tab.smap = (const u16*)(tb + O_SMAP);
-  tab.rowptr = (const u16*)(tb + O_ROWPTR);
-  tab.diag = (const u16*)(tb + O_DIAG);
-  tab.colof = tb + O_COLOF;
-  tab.rx = tb + O_RX;
-  tab.xp = tb + O_XP;
-  tab.blen = tb + O_BLEN;
-  const int lane = threadIdx.x & 31, cl = threadIdx.x % NL, grp = threadIdx.x / NL;
+  const Tab tab = load_tab(tb32, blob);
+  const int lane = (int)(threadIdx.x & 31), cl = (int)(threadIdx.x % NL), grp = (int)(threadIdx.x / NL);
   const bool w0 = cl < 32;                // the cell's first warp: trailing block, solves
   const int myt = lane < NT ? lane : -1;  // this lane's row K0 + myt of the dense trailing block
   double c[NT];                           // that row: M0, then its LU factors
@@ -35,63 +25,22 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
   double *v = M + VOFF, *part = v + NR;  // in the trailing block's slots while that block is in registers if
                                          // they fit there (VOFF = TB0), else after the other arrays
   int* nextc = (int*)(K4 + NS);
-  double* kf = scratch + (size_t)(blockIdx.x * CPB + grp) * (2 * NR + 2 + RSN);  // per cell slot: rates, the copy
+  double* kf = scratch + ((size_t)blockIdx.x * CPB + grp) * (2 * NR + 2 + RSN);  // per cell slot: rates, the copy
   double* kr = kf + NR;
   double* rsc = kf + 2 * NR + 2;  // F, u, -Jn of the last fresh evaluation (a retry at the same state)
   if (cl == 0) kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
-  int cell = blockIdx.x * CPB + grp;
+  int cell = (int)(blockIdx.x * CPB + grp);
   while (cell < B) {
     const double Tc = Ta[cell], dt = dta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
     for (int i = cl; i < NS; i += NL) N[i] = x0[(size_t)cell * NS + perm[i]];
     CSYNC(grp);
     double p = 0.0, pm = 0.0;
-    for (int i = lane; i < NS; i += 32) {
-      p += N[i] >= 0.0 ? N[i] : DNAN;
-      pm = fmax(pm, N[i]);
-    }
+    for (int i = lane; i < NS; i += 32) screen_x(N[i], p, pm);
 #if NJ
-    for (int b = lane; b < NJ; b += 32) {
-      const double q = Jin[(size_t)cell * NJ + b];
-      p += q >= 0.0 ? 0.0 * q : __longlong_as_double(0x7ff8000000000000ull);
-    }
+    screen_J(Jin, cell, lane, 32, p);
 #endif
-    const double ps = wsum(p);  // bad input (not stepped): non-finite, x < 0, no x > 0, P <= 0 or dt < 0
-    const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
-                     dt >= 0.0,
-               cold = Tc < TMIN;
-    if (fin && !cold) {  // rate coefficients; three-body ones times nd
-      const double lT = log(Tc), iT = 1.0 / Tc, lKT = log(KBOLTZ * Tc / P0BAR);
-      double* g = v;  // G / RT of each species
-      const double* cf = nasa + (Tc < NASA_SPLIT_T ? 0 : NS * 9);
-      for (int i = cl; i < NS; i += NL) {
-        const double* a = cf + 9 * i;
-        const double T2 = Tc * Tc, T3 = T2 * Tc, T4 = T3 * Tc;
-        const double hh = -a[0] * iT * iT + a[1] * lT * iT + a[2] + a[3] * Tc / 2 + a[4] * T2 / 3 + a[5] * T3 / 4 +
-                          a[6] * T4 / 5 + a[7] * iT;
-        const double ss = -a[0] * iT * iT / 2 - a[1] * iT + a[2] * lT + a[3] * Tc + a[4] * T2 / 2 + a[5] * T3 / 3 +
-                          a[6] * T4 / 4 + a[8];
-        g[i] = hh - ss;
-      }
-      if (cl == 0) g[NS] = 0.0;
-      CSYNC(grp);
-      for (int r = cl; r < NR; r += NL) {
-#if NJ
-        if (r >= NRT) {
-          kf[r] = Jin[(size_t)cell * NJ + r - NRT];
-          kr[r] = 0.0;
-          continue;
-        }
-#endif
-        const int fl = rf[r];  // law flags (law()): 4 three-body, (dmu + 4) << 3, 256 explicit reverse
-        const double k = law(rc + RCW * r, fl, Tc, lT, iT, nd);
-        const u8* x = tab.rx + 6 * r;
-        const double dg = g[x[3]] + g[x[4]] + g[x[5]] - g[x[0]] - g[x[1]] - g[x[2]];
-        const double c3 = (fl & FL_THREE_BODY) ? nd : 1.0;
-        kf[r] = k * c3;
-        kr[r] = REVERSE_RATE;
-        COLL(fl, kf[r], kr[r], nd);
-      }
-    }
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
+    if (fin && !cold) cell_rates(v, kf, kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, grp);
     CSYNC(grp);
     const double h0 = isfinite(hio[cell]) ? hio[cell] : dt;  // a non-finite h acts as dt
     double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
@@ -109,54 +58,14 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
         const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, tab, sst, sround, lane, cl, grp);
         for (int s = cl; s < NNZ; s += NL) M[s] = 0.0;
         CSYNC(grp);
-        {  // M = -Jn: lane streams of 32-bit terms (rate index, sign, x2, species a, b, end of slot); slots from jsl
-          const unsigned* jw = (const unsigned*)jt;
-          const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
-          double acc = 0.0;
-          int ne = 0;
-#pragma unroll 4
-          for (int q = 0; q < jround; q++) {
-            const unsigned word = __ldg(jw + q * NL + cl);  // kr = kf + NR
-            const double pr =
-                kf[word & J_RATE_MASK] * n[(word >> J_A) & J_SPECIES_MASK] * n[(word >> J_B) & J_SPECIES_MASK];
-            const double cf = ((word >> J_DOUBLE) & 1u) ? (((word >> J_SIGN) & 1u) ? -2.0 : 2.0)
-                                                        : (((word >> J_SIGN) & 1u) ? -1.0 : 1.0);
-            acc = fma(cf, pr, acc);
-#if NFIX
-            if ((word >> J_END) & 1u) {
-              const unsigned d = __ldg(jsl + ne);
-              if (d < NNZ)
-                M[d] = -acc;
-              else
-                Y[d - NNZ] = -acc;
-              acc = 0.0;
-              ne++;
-            }
-#else
-            if ((word >> J_END) & 1u) {
-              M[__ldg(jsl + ne)] = -acc;
-              acc = 0.0;
-              ne++;
-            }
-#endif
-          }
-        }
+        jacobian_lane(cl, M, Y, kf, n, jt, jround);
         CSYNC(grp);
 #if NFIX
-        if (cl == 0) {  // the extra pieces of long slots, in order
-          const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
-          for (int e = 0; e < NFIX; e++) M[__ldg(fx + e)] += Y[e];
-        }
+        if (cl == 0) jacobian_extras(M, Y, jt, jround);
         CSYNC(grp);
 #endif
-        for (int i = cl; i < NS; i += NL) {  // u = w = S v / nd - Jn x
-          double acc = 0.0;
-          const int s1 = tab.rowptr[i + 1];
-          for (int s = tab.rowptr[i]; s < s1; s++) acc += M[s] * N[tab.colof[s]];
-          if (i >= K0)
-            for (int j = 0; j < NT; j++) acc += M[TB0 + (i - K0) * NT + j] * N[K0 + j];
-          u[i] = u[i] + acc / ntot;
-        }
+        // u = w = S v / nd - Jn x
+        for (int i = cl; i < NS; i += NL) u[i] = u[i] + jacobian_times_x(i, M, N, tab) / ntot;
         CSYNC(grp);
         for (int i = cl; i < NS; i += NL) {
           rsc[i] = F[i];
@@ -177,14 +86,11 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
         const int oa = optr[k], ob = optr[k + 1];
         u64 op = (oa + cl < ob) ? __ldg(lu + oa + cl) : 0ull;
         const double dk = dinv[k];
-        for (int i = cl; i < NS; i += NL) {
-          const unsigned q = tab.smap[i * NS + k];
-          if (i > k && q != NO_SLOT) M[q] *= dk;
-        }
+        scale_column(k, dk, M, tab, cl, NL);
         CSYNC(grp);
-        for (int e = oa + cl; e < ob; e += NL) {
+        for (int e = oa + cl; e < ob; e += NL) {  // each lane reads its next word ahead, before the slots it updates
           const u64 nx = (e + NL < ob) ? __ldg(lu + e + NL) : 0ull;
-          M[op & LU_SLOT_MASK] -= M[(op >> LU_B) & LU_SLOT_MASK] * M[(op >> LU_C) & LU_SLOT_MASK];
+          lu_update(M, op);
           op = nx;
         }
         CSYNC(grp);
@@ -194,19 +100,7 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
 #pragma unroll
           for (int j = 0; j < NT; j++) c[j] = M[TB0 + myt * NT + j];
         }
-#pragma unroll
-        for (int k = 0; k < NT; k++) {
-          const double rp = 1.0 / __shfl_sync(FULL, c[k], k);
-          if (myt == k) dinv[K0 + k] = rp;
-          const bool act = myt > k;
-          const double l = act ? c[k] * rp : 0.0;
-          if (act) c[k] = l;
-#pragma unroll
-          for (int j = k + 1; j < NT; j++) {
-            const double uu = __shfl_sync(FULL, c[j], k);
-            if (act) c[j] -= l * uu;
-          }
-        }
+        factor_trailing(c, dinv, myt);
         if (myt >= 0) {  // the factors back into the block's slots for the second warp
 #pragma unroll
           for (int j = 0; j < NT; j++) M[TB0 + myt * NT + j] = c[j];
@@ -236,64 +130,31 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
         double* Ks = st == 1 ? K1 : (st == 2 ? K2 : (st == 3 ? K3 : K4));
         if (st > 1) {
           for (int i = cl; i < NS; i += NL)
-            Ks[i] = st == 2 ? fma(RODAS_C21 * ih, K1[i], F[i])
-                            : (st == 3 ? fma(ih, K1[i] - K2[i], F[i])
-                                       : fma(ih, fma(-RODAS_C43, K3[i], K1[i] - K2[i]), F[i]));
+            Ks[i] = st == 2
+                        ? stage2_rhs(ih, K1[i], F[i])
+                        : (st == 3 ? stage3_rhs(ih, K1[i], K2[i], F[i]) : stage4_rhs(ih, K1[i], K2[i], K3[i], F[i]));
           CSYNC(grp);
         }
         if (cl < (st == 1 ? 64 : 32)) {
-          const bool uw = st == 1 && !w0, ht = lane < NT;  // uw: this warp solves u
+          const bool uw = st == 1 && !w0;  // uw: this warp solves u
           double* yv = uw ? u : Ks;
-          double a0[RP], a1;
+          double a0[RP], a1 = 0.0;
           msolve(M, dinv, yv, tab.smap, c, lane, myt, a0, a1);
           if (uw) {
-            double sb = lane < K0 ? a0[0] : 0.0;
-#pragma unroll
-            for (int p = 1; p < RP; p++) sb += lane + 32 * p < K0 ? a0[p] : 0.0;
-            const double cc = 1.0 / (1.0 - wsum(sb + (ht ? a1 : 0.0)));
+            const double cc = sherman_morrison_factor(a0, a1, lane);
             if (lane == 0) dinv[NS] = cc;
           }
           __syncwarp();
-#pragma unroll
-          for (int p = 0; p < RP; p++)
-            if (lane + 32 * p < K0) yv[lane + 32 * p] = a0[p];
-          if (ht) yv[K0 + lane] = a1;
+          store_solved(yv, a0, a1, lane);
         }
         CSYNC(grp);
         c0 = dinv[NS];
-        if (w0) {
-          const bool ht = lane < NT;
-          double a0[RP];
-#pragma unroll
-          for (int p = 0; p < RP; p++) a0[p] = lane + 32 * p < K0 ? Ks[lane + 32 * p] : 0.0;
-          const double a1 = ht ? Ks[K0 + lane] : 0.0;
-          double sa = a0[0];
-#pragma unroll
-          for (int p = 1; p < RP; p++) sa += a0[p];
-          const double s = wsum(sa + a1) * c0;
-          __syncwarp();
-#pragma unroll
-          for (int p = 0; p < RP; p++)
-            if (lane + 32 * p < K0) Ks[lane + 32 * p] = a0[p] + s * u[lane + 32 * p];
-          if (ht) Ks[K0 + lane] = a1 + s * u[K0 + lane];
-        }
+        if (w0) sherman_morrison_update(Ks, u, c0, lane);
         CSYNC(grp);
       }
       // step control (docs/method.md); every warp of the cell reaches the same decision
-      double e2 = 0.0, em = 0.0;
-      bool nn = true;
-      for (int i = lane; i < NS; i += 32) {
-        const double y = N[i] + 2.0 * K1[i] + K3[i] + K4[i];
-        if (w0) Y[i] = y;
-        const double sc = atol + rtol * fmax(fabs(N[i]), fabs(y));
-        const double q = K4[i] / sc;
-        e2 += q * q;
-        em = fmax(em, fabs(q));
-        nn = nn && (y >= -atol);
-      }
-      const double er = sqrt(wsum(e2) / NS), emx = wmax(em);
-      const double en = (t == 0.0 && isfinite(er)) ? fmax(er, emx) : er;  // the worst species until a step is accepted
-      const bool nonneg = __all_sync(FULL, nn), efin = isfinite(en), ok = (en <= 1.0) && nonneg && efin;
+      bool ok = false;
+      const double en = try_error(N, K1, K3, K4, Y, w0, t == 0.0, rtol, atol, lane, ok);
       CSYNC(grp);
       if (ok) {
         for (int i = cl; i < NS; i += NL) N[i] = fmax(Y[i], 0.0);
@@ -307,16 +168,13 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
       pha = ha;
       it++;
     }
-    p = 0.0;
-    for (int i = lane; i < NS; i += 32) p += N[i];
-    const double s = wsum(p);
-    for (int i = cl; i < NS; i += NL) xout[(size_t)cell * NS + perm[i]] = N[i] / s;
+    write_state(N, xout + (size_t)cell * NS, perm, lane, cl, NL);
     if (cl == 0) {
       hio[cell] = h;
       doneo[cell] = (fin && t >= dt * CALL_END) ? 1 : 0;
       noko[cell] = nok;
     }
-    if (cl == 0) *nextc = gridDim.x * CPB + atomicAdd(count + COUNT_QUEUE, 1);
+    if (cl == 0) *nextc = (int)(gridDim.x * CPB + atomicAdd(count + COUNT_QUEUE, 1));
     CSYNC(grp);
     cell = *nextc;
   }

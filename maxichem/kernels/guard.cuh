@@ -7,58 +7,22 @@ constexpr int GUARD_NONFINITE = 4;
 constexpr int GUARD_UNFINISHED = 8;
 constexpr int GUARD_DRIFT = 16;
 
-// The guard's test of one cell (network species order): GUARD_COLD, GUARD_BAD_INPUT, else the bits GUARD_NONFINITE,
-// GUARD_UNFINISHED, GUARD_DRIFT (0: passed). A cell that passes has its element shares put back
-// (docs/method.md): x' = x (1 + sum_e lambda_e a_ie), with (A X A^T) lambda = e0 s1 / s0 - e1 by LDL^T; an
-// element whose pivot vanishes (absent, or tied to the others) is left out. Explicit fma: x depends on these sums,
-// and every kernel that calls this must get the same bits.
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
-__device__ int check_cell(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
-                          const double* __restrict__ dta, double* xout, int done, double nok,
-                          const double* __restrict__ atoms, double atol, int cell J_PARAM) {
-  double e0[NEL], e1[NEL], p = 0.0, mx = 0.0;  // atoms of each element in the input and the new state
-#pragma unroll
-  for (int e = 0; e < NEL; e++) {
-    e0[e] = 0.0;
-    e1[e] = 0.0;
-  }
-  bool xfin = true;
-  for (int i = 0; i < NS; i++) {
-    const double a = x0[(size_t)cell * NS + i], b = xout[(size_t)cell * NS + i];
-    p += a >= 0.0 ? a : DNAN;
-    mx = fmax(mx, a);
-    xfin = xfin && isfinite(b);
-#pragma unroll
-    for (int e = 0; e < NEL; e++) {
-      e0[e] = fma(atoms[i * NEL + e], a, e0[e]);
-      e1[e] = fma(atoms[i * NEL + e], b, e1[e]);
-    }
-  }
-#if NJ
-  for (int b = 0; b < NJ; b++) {
-    const double q = Jin[(size_t)cell * NJ + b];
-    p += q >= 0.0 ? 0.0 * q : __longlong_as_double(0x7ff8000000000000ull);
-  }
-#endif
-  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
-  if (Tc < TMIN) return GUARD_COLD;
-  if (!(isfinite(p) && mx > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dta[cell]) &&
-        dta[cell] >= 0.0))  // the call kernel's bad-input test (order-free: some x > 0, not the sum)
-    return GUARD_BAD_INPUT;
-  double s0 = 0.0, s1 = 0.0;
-#pragma unroll
-  for (int e = 0; e < NEL; e++) {
-    s0 += e0[e];
-    s1 += e1[e];
-  }
-  bool drift = false;  // share moved beyond rounding (DRIFT) and what clamping accepted negatives can add
+// Whether an element's share moved beyond rounding (DRIFT) and what clamping accepted negatives can add.
+__device__ __forceinline__ bool shares_drifted(const double (&e0)[NEL], const double (&e1)[NEL], double s0, double s1,
+                                               double nok, double atol) {
+  bool drift = false;
 #pragma unroll
   for (int e = 0; e < NEL; e++)
     drift = drift || fabs(e1[e] / s1 - e0[e] / s0) > DRIFT * e0[e] / s0 + 2.0 * atol * nok * ETOT / s0;
-  const int c = (xfin ? 0 : GUARD_NONFINITE) | (done ? 0 : GUARD_UNFINISHED) | (drift ? GUARD_DRIFT : 0);
-  if (c) return c;
-  double* q = xout + (size_t)cell * NS;
-  double m[NEL * NEL], m0[NEL], y[NEL], lam[NEL];
+  return drift;
+}
+
+// lambda of (A X A^T) lambda = e0 s1 / s0 - e1, by LDL^T; an element whose pivot vanishes (absent, or tied to the
+// others) is left out. Explicit fma, as in the rest of the correction.
+__device__ __forceinline__ void element_multipliers(const double* q, const double* __restrict__ atoms,
+                                                    const double (&e0)[NEL], const double (&e1)[NEL], double r,
+                                                    double (&lam)[NEL]) {
+  double m[NEL * NEL], m0[NEL], y[NEL];
   for (int e = 0; e < NEL * NEL; e++) m[e] = 0.0;
   for (int i = 0; i < NS; i++) {
     const double* ai = atoms + i * NEL;
@@ -68,7 +32,6 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
         if (ai[f] != 0.0) m[e * NEL + f] = fma(ai[e] * ai[f], q[i], m[e * NEL + f]);
     }
   }
-  const double r = s1 / s0;
 #pragma unroll
   for (int e = 0; e < NEL; e++) {
     m0[e] = m[e * NEL + e];
@@ -89,6 +52,51 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
     for (int f = k + 1; f < NEL; f++) b = fma(-m[k * NEL + f], lam[f], b);
     lam[k] = b / m[k * NEL + k];
   }
+}
+
+// The guard's test of one cell (network species order): GUARD_COLD, GUARD_BAD_INPUT, else the bits GUARD_NONFINITE,
+// GUARD_UNFINISHED, GUARD_DRIFT (0: passed). A cell that passes has its element shares put back
+// (docs/method.md): x' = x (1 + sum_e lambda_e a_ie). Explicit fma: x depends on these sums, and every kernel that
+// calls this must get the same bits.
+__device__ int check_cell(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
+                          const double* __restrict__ dta, double* xout, int done, double nok,
+                          const double* __restrict__ atoms, double atol, int cell J_PARAM) {
+  double e0[NEL], e1[NEL], p = 0.0, mx = 0.0;  // atoms of each element in the input and the new state
+#pragma unroll
+  for (int e = 0; e < NEL; e++) {
+    e0[e] = 0.0;
+    e1[e] = 0.0;
+  }
+  bool xfin = true;
+  for (int i = 0; i < NS; i++) {
+    const double a = x0[(size_t)cell * NS + i], b = xout[(size_t)cell * NS + i];
+    screen_x(a, p, mx);
+    xfin = xfin && isfinite(b);
+#pragma unroll
+    for (int e = 0; e < NEL; e++) {
+      e0[e] = fma(atoms[i * NEL + e], a, e0[e]);
+      e1[e] = fma(atoms[i * NEL + e], b, e1[e]);
+    }
+  }
+#if NJ
+  screen_J(Jin, cell, 0, 1, p);
+#endif
+  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
+  if (Tc < TMIN) return GUARD_COLD;
+  if (!(isfinite(p) && mx > 0.0 && forcing_fine(Tc, nd, dta[cell])))  // order-free: some x > 0, not the sum
+    return GUARD_BAD_INPUT;
+  double s0 = 0.0, s1 = 0.0;
+#pragma unroll
+  for (int e = 0; e < NEL; e++) {
+    s0 += e0[e];
+    s1 += e1[e];
+  }
+  const bool drift = shares_drifted(e0, e1, s0, s1, nok, atol);
+  const int c = (xfin ? 0 : GUARD_NONFINITE) | (done ? 0 : GUARD_UNFINISHED) | (drift ? GUARD_DRIFT : 0);
+  if (c) return c;
+  double* q = xout + (size_t)cell * NS;
+  double lam[NEL];
+  element_multipliers(q, atoms, e0, e1, s1 / s0, lam);
   double sum = 0.0;
   for (int i = 0; i < NS; i++) {
     const double* ai = atoms + i * NEL;
@@ -116,7 +124,7 @@ extern "C" __global__ void guard(const double* __restrict__ x0, const double* __
                                  const double* __restrict__ noko, const double* __restrict__ atoms,
                                  int* __restrict__ redo, int* __restrict__ list, int* __restrict__ count, int B,
                                  double atol J_PARAM) {
-  const int cell = blockIdx.x * blockDim.x + threadIdx.x;
+  const int cell = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   if (cell >= B) return;
   const int c = check_cell(x0, Ta, Pa, dta, xout, doneo[cell], noko[cell], atoms, atol, cell J_ARG);
   int r = 0;

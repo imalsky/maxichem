@@ -99,12 +99,43 @@ __device__ __forceinline__ void jdot(double* work, const double* N, const double
   __syncwarp();
 }
 
+// The error's tangent of the attempt just taken, from Kd4 and the state tangents Nd, Yd: the RMS's, or on a first try
+// (en = max(RMS, max-norm)) the selected norm's (half each at a tie; the max-norm's shared evenly among the species
+// attaining it).
+__device__ __forceinline__ double error_tangent(const double* N, const double* Nd, const double* Y, const double* Yd,
+                                                const double* K4, const double* Kd4, double en, bool first, double rtol,
+                                                double atol, int lane) {
+  double e = 0.0, e2 = 0.0, q_max = -1.0, ld = 0.0, lc = 0.0;  // q_max, ld, lc: the lane's max |q|, its tangent, ties
+  for (int i = lane; i < NS; i += 32) {
+    const double aN = fabs(N[i]), aY = fabs(Y[i]), sc = atol + rtol * fmax(aN, aY);
+    const double dN = sgn(N[i]) * Nd[i], dY = sgn(Y[i]) * Yd[i];
+    const double dsc = rtol * (aN > aY ? dN : (aN < aY ? dY : 0.5 * (dN + dY)));
+    const double q = K4[i] / sc;
+    e += q * (Kd4[i] - q * dsc) / sc;
+    if (first) {
+      e2 += q * q;
+      const double aq = fabs(q), dq = sgn(q) * (Kd4[i] - q * dsc) / sc;
+      if (aq > q_max) {
+        q_max = aq;
+        ld = dq;
+        lc = 1.0;
+      } else if (aq == q_max) {
+        ld += dq;
+        lc += 1.0;
+      }
+    }
+  }
+  if (!first) return wsum(e) / (NS * en);
+  const double er = sqrt(wsum(e2) / NS), emx = wmax(q_max);  // the attempt's RMS and max-norm, bitwise
+  const double dm = wsum(q_max == emx ? ld : 0.0) / wsum(q_max == emx ? lc : 0.0);
+  const double wr = er > emx ? 1.0 : (er < emx ? 0.0 : 0.5);
+  return wr * (wsum(e) / (NS * er)) + (1.0 - wr) * dm;
+}
+
 // Tangent of the attempt just taken (K1..K4, Y, the factors, u, c0 in place; DN: the recovery's dense factors) for the
 // state tangent Nd, the step-size tangent had and the rate tangents: Yd = the new state's tangent; returns the error's
-// tangent (adapt) or 0: the RMS's, or on a first try (en = max(RMS, max-norm)) the selected norm's (half each at a
-// tie; the max-norm's shared evenly among the species attaining it).
+// tangent (adapt) or 0.
 template <bool DN>
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
 __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], const double* Wd, double ha, double had,
                                         double c0, double en, bool first, int adapt, const double* kf, const double* kr,
                                         const double* dk, double* va, double nd, double dlnd, double rtol, double atol,
@@ -116,7 +147,7 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
   double *K1 = K, *K2 = K + NS, *K3 = K + 2 * NS, *K4 = K + 3 * NS;
   double *Kd1 = Kd, *Kd2 = Kd + NS, *Kd3 = Kd + 2 * NS, *Kd4 = Kd + 3 * NS;
   const double ih = 1.0 / ha, hh = had * ih * ih;
-  double td, tdx;
+  double td = 0.0, tdx = 0.0;
   const double ntot = rhs_dual(work, N, Nd, nullptr, svN, sv1N, va, kf, kr, dk, nd, dlnd, td, tab, sst, sround, lane);
   for (int s = 0; s < 4; s++) {
     jdot(work, N, Nd, K + s * NS, Kd + s * NS, svN, sv1N, ntot, td, kf, kr, dk, nd, dlnd, t1, t2, va, tab, sst, sround,
@@ -155,31 +186,7 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
   for (int i = lane; i < NS; i += 32) Yd[i] = Nd[i] + 2.0 * Kd1[i] + Kd3[i] + Kd4[i];
   __syncwarp();
   if (!adapt || !(en > 0.0)) return 0.0;
-  double e = 0.0, e2 = 0.0, q_max = -1.0, ld = 0.0, lc = 0.0;  // q_max, ld, lc: the lane's max |q|, its tangent, ties
-  for (int i = lane; i < NS; i += 32) {
-    const double aN = fabs(N[i]), aY = fabs(Y[i]), sc = atol + rtol * fmax(aN, aY);
-    const double dN = sgn(N[i]) * Nd[i], dY = sgn(Y[i]) * Yd[i];
-    const double dsc = rtol * (aN > aY ? dN : (aN < aY ? dY : 0.5 * (dN + dY)));
-    const double q = K4[i] / sc;
-    e += q * (Kd4[i] - q * dsc) / sc;
-    if (first) {
-      e2 += q * q;
-      const double aq = fabs(q), dq = sgn(q) * (Kd4[i] - q * dsc) / sc;
-      if (aq > q_max) {
-        q_max = aq;
-        ld = dq;
-        lc = 1.0;
-      } else if (aq == q_max) {
-        ld += dq;
-        lc += 1.0;
-      }
-    }
-  }
-  if (!first) return wsum(e) / (NS * en);
-  const double er = sqrt(wsum(e2) / NS), emx = wmax(q_max);  // the attempt's RMS and max-norm, bitwise
-  const double dm = wsum(q_max == emx ? ld : 0.0) / wsum(q_max == emx ? lc : 0.0);
-  const double wr = er > emx ? 1.0 : (er < emx ? 0.0 : 0.5);
-  return wr * (wsum(e) / (NS * er)) + (1.0 - wr) * dm;
+  return error_tangent(N, Nd, Y, Yd, K4, Kd4, en, first, rtol, atol, lane);
 }
 
 #define JVP_ARGS                                                                                                       \
@@ -205,30 +212,20 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
 // each result then tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8] and NaN
 // tangents.
 template <bool DN>
-// size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
+// size-limit-ok: one cell's state runs through every part: a further split passes 30 or more arguments per helper
 __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, double* wscr,
                                           const u16* __restrict__ didx, const double* __restrict__ atoms) {
   extern __shared__ double smem[];
   unsigned* tb32 = (unsigned*)(smem + WPB * PERWA);
-  for (int i = threadIdx.x; i < TBYTES / 4; i += blockDim.x) tb32[i] = blob[i];
-  __syncthreads();
-  const u8* tb = (const u8*)tb32;
-  Tab tab;
-  tab.smap = (const u16*)(tb + O_SMAP);
-  tab.rowptr = (const u16*)(tb + O_ROWPTR);
-  tab.diag = (const u16*)(tb + O_DIAG);
-  tab.colof = tb + O_COLOF;
-  tab.rx = tb + O_RX;
-  tab.xp = tb + O_XP;
-  tab.blen = tb + O_BLEN;
-  const int lane = threadIdx.x & 31, wib = threadIdx.x >> 5;
+  const Tab tab = load_tab(tb32, blob);
+  const int lane = (int)(threadIdx.x & 31), wib = (int)(threadIdx.x >> 5);
   const int myt = lane < NT ? lane : -1;
   double c[NT];
 #pragma unroll
   for (int j = 0; j < NT; j++) c[j] = 0.0;
   double* work = smem + wib * PERWA;
   double *N = work + A_NN, *Nd = work + A_ND, *Y = work + A_Y, *Yd = work + A_YD;
-  const size_t wid = (size_t)(blockIdx.x * WPB + wib);
+  const size_t wid = (size_t)blockIdx.x * WPB + wib;
   double* kf = scratch + wid * (5 * NR + 2 + D * (2 * NR + NS));
   double *kr = kf + NR, *va = kr + NR + 2, *cw = va + NR, *dk = cw + 2 * NR,
          *Ng = dk + 2 * NR * D;  // per direction:
@@ -238,26 +235,19 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
   double hd[DMAX], tdot[DMAX], dlnd[DMAX];  // per direction: h, t, ln nd tangents (warp-uniform)
   double pend[DMAX], phad[DMAX];            // the previous attempt's error and size tangents
   const int nc = DN ? count[COUNT_RECOMPUTED] : B;
-  int q = blockIdx.x * WPB + wib;
+  int q = (int)(blockIdx.x * WPB + wib);
   while (q < nc) {
     const int cell = DN ? list[q] : q;
     const double Tc = Ta[cell], dt = dta[cell], Pc = Pa[cell], nd = Pc / (KBOLTZ * Tc);
     double p = 0.0, pm = 0.0;
     for (int i = lane; i < NS; i += 32) {
       N[i] = x0[(size_t)cell * NS + perm[i]];
-      p += N[i] >= 0.0 ? N[i] : DNAN;
-      pm = fmax(pm, N[i]);
+      screen_x(N[i], p, pm);
     }
     for (int d = 0; d < D; d++)
       for (int i = lane; i < NS; i += 32) Ng[d * NS + i] = dx0[((size_t)d * B + cell) * NS + perm[i]];
-    for (int b = lane; b < NJ; b += 32) {
-      const double qj = Jin[(size_t)cell * NJ + b];
-      p += qj >= 0.0 ? 0.0 * qj : DNAN;
-    }
-    const double ps = wsum(p);  // bad input as the call kernel's: non-finite, x < 0, no x > 0, P <= 0 or dt < 0
-    const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
-                     dt >= 0.0,
-               cold = Tc < TMIN;
+    screen_J(Jin, cell, lane, 32, p);
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
     if (fin && !cold) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
     const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it)
@@ -282,8 +272,8 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
     int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;
     while (it < max_steps && t < dt * CALL_END) {
       const double rem = dt - t, ha = fmin(h, rem);
-      double c0, dfe, dfh, dfp, dfq;
-      bool ok;
+      double c0 = 0.0, dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
+      bool ok = false;
       const double en = xattempt<DN>(work, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr,
                                      didx, sround, jround, lane, myt);
       const double fac = factor(en, ok, prej, pen, pha, ha, dfe, dfh, dfp, dfq);
@@ -320,10 +310,7 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
       pha = ha;
       it++;
     }
-    p = 0.0;
-    for (int i = lane; i < NS; i += 32) p += N[i];
-    const double s = wsum(p);
-    for (int i = lane; i < NS; i += 32) xout[(size_t)cell * NS + perm[i]] = N[i] / s;
+    const double s = write_state(N, xout + (size_t)cell * NS, perm, lane, lane, 32);
     for (int d = 0; d < D; d++) {
       const double* ng = Ng + d * NS;
       double pd = 0.0;

@@ -78,13 +78,152 @@ __device__ __forceinline__ void dense_solve(const double* A, const double* dinv,
   __syncwarp();
 }
 
+// W = -Jn on lane cl of the Jacobian's stream (jacobian_lane), written to the dense positions of the slots.
+__device__ __forceinline__ void jacobian_lane_dense(int cl, double* Wd, double* Y, const u16* __restrict__ didx,
+                                                    const double* kf, const double* n, const u64* __restrict__ jt,
+                                                    int jround) {
+  const unsigned* jw = (const unsigned*)jt;
+  const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
+  double acc = 0.0;
+  int ne = 0;
+#pragma unroll 4
+  for (int qq = 0; qq < jround; qq++) {
+    const unsigned word = __ldg(jw + qq * NL + cl);
+    const double pq = kf[word & J_RATE_MASK] * n[(word >> J_A) & J_SPECIES_MASK] * n[(word >> J_B) & J_SPECIES_MASK];
+    acc = fma(stream_coefficient(word, J_DOUBLE, J_SIGN), pq, acc);
+    if ((word >> J_END) & 1u) {
+      const unsigned d = __ldg(jsl + ne);
+      if (d < NNZ)
+        Wd[__ldg(didx + d)] = -acc;
+      else
+        Y[d - NNZ] = -acc;
+      acc = 0.0;
+      ne++;
+    }
+  }
+}
+
+// The extra pieces of long slots, in order, on one thread.
+__device__ __forceinline__ void jacobian_extras_dense(double* Wd, const double* Y, const u16* __restrict__ didx,
+                                                      const u64* __restrict__ jt, int jround) {
+  const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
+  for (int e = 0; e < NFIX; e++) Wd[__ldg(didx + __ldg(fx + e))] += Y[e];
+}
+
+// Row i of the sum in w = S v / nd - Jn x from the dense -Jn: the sparse sums' terms, columns in order.
+__device__ __forceinline__ double dense_times_x(int i, const double* Wd, const double* N, const Tab& tab) {
+  double acc = 0.0;
+  for (int j = 0; j < NS; j++)
+    if (tab.smap[i * NS + j] != NO_SLOT) acc += Wd[i * NS + j] * N[j];
+  return acc;
+}
+
+// W = I / (gamma h) - Jn - w 1^T, from -Jn in Wd, over the entries first, first + stride, ...
+__device__ __forceinline__ void form_dense_w(double* Wd, const double* u, double igh, int first, int stride) {
+  for (int s = first; s < NS * NS; s += stride) {
+    const int i = s / NS;
+    Wd[s] = (s == i * (NS + 1) ? Wd[s] + igh : Wd[s]) - u[i];
+  }
+}
+
+// The recovery's work arrays for a cell: M the dense W, dinv 1 / its pivots, n the
+// concentrations, N the state, Y a stage state, F the right-hand side, u the Sherman-Morrison vector, K1..K4 the
+// stages, v the rates of progress, part the S v pieces, kf and kr the rate coefficients, rsc the copy kept for a retry.
+struct CellArrays {
+  double *M, *dinv, *n, *N, *Y, *F, *u, *K1, *K2, *K3, *K4, *v, *part, *kf, *kr, *rsc;
+};
+
+// The arrays of the recovery's one cell in shared memory, and its slot of the global scratch; M is the dense W.
+__device__ __forceinline__ CellArrays recover_arrays(double* smem, double* scratch, size_t slot) {
+  CellArrays a;
+  a.kf = scratch + slot * (2 * NR + 2 + (WSH ? 0 : NS * NS) + RSN);
+  a.kr = a.kf + NR;
+  a.M = WSH ? smem : a.kf + 2 * NR + 2;
+  a.rsc = a.kf + 2 * NR + 2 + (WSH ? 0 : NS * NS);  // F, u, -Jn's slots of the last fresh evaluation
+  a.dinv = smem + (WSH ? NS * NS : 0);
+  a.n = a.dinv + NS;
+  a.v = a.n + NS + 1;
+  a.N = a.v + VR;
+  a.Y = a.N + NS;
+  a.F = a.Y + NS;
+  a.u = a.F + NS;
+  a.K1 = a.u + NS;
+  a.K2 = a.K1 + NS;
+  a.K3 = a.K2 + NS;
+  a.K4 = a.K3 + NS;
+  a.part = a.K4 + NS;
+  return a;
+}
+
+// A rejected try's retry: its F, u and -Jn (every write of the Jacobian goes to a slot's dense position).
+__device__ __forceinline__ void restore_dense_try(const CellArrays& a, const u16* __restrict__ didx, int cl) {
+  for (int s = cl; s < NS * NS; s += NL) a.M[s] = 0.0;
+  for (int i = cl; i < NS; i += NL) {
+    a.F[i] = a.rsc[i];
+    a.u[i] = a.rsc[NS + i];
+  }
+  CSYNC(0);
+  for (int s = cl; s < NNZ; s += NL) a.M[__ldg(didx + s)] = a.rsc[2 * NS + s];
+}
+
+// A fresh try: F, u = w = S v / nd - Jn x and W = -Jn at N, and their copy for a retry.
+__device__ __forceinline__ void fresh_dense_try(const CellArrays& a, double nd, const Tab& tab,
+                                                const unsigned* __restrict__ sst, const u64* __restrict__ jt,
+                                                const u16* __restrict__ didx, int sround, int jround, int lane,
+                                                int cl) {
+  const double ntot = rhs(a.N, a.F, a.u, a.n, a.v, a.part, a.kf, a.kr, nd, tab, sst, sround, lane, cl, 0);
+  for (int s = cl; s < NS * NS; s += NL) a.M[s] = 0.0;
+  CSYNC(0);
+  jacobian_lane_dense(cl, a.M, a.Y, didx, a.kf, a.n, jt, jround);
+  CSYNC(0);
+#if NFIX
+  if (cl == 0) jacobian_extras_dense(a.M, a.Y, didx, jt, jround);
+  CSYNC(0);
+#endif
+  for (int i = cl; i < NS; i += NL) a.u[i] = a.u[i] + dense_times_x(i, a.M, a.N, tab) / ntot;
+  CSYNC(0);
+  for (int i = cl; i < NS; i += NL) {
+    a.rsc[i] = a.F[i];
+    a.rsc[NS + i] = a.u[i];
+  }
+  for (int s = cl; s < NNZ; s += NL) a.rsc[2 * NS + s] = a.M[__ldg(didx + s)];
+}
+
+// The factorization and Rodas3 stages (gamma = 1/2), as the call kernel's, on the first warp.
+__device__ __forceinline__ void dense_stages(const CellArrays& a, int* pr, double ih, double nd, const Tab& tab,
+                                             const unsigned* __restrict__ sst, int sround, int lane, int cl) {
+  if (cl < 32) {
+    dense_lu(a.M, a.dinv, pr, lane);
+    dense_solve(a.M, a.dinv, pr, a.K1, lane);
+    for (int i = lane; i < NS; i += 32) a.K2[i] = stage2_rhs(ih, a.K1[i], a.F[i]);
+    __syncwarp();
+    dense_solve(a.M, a.dinv, pr, a.K2, lane);
+    for (int i = lane; i < NS; i += 32) a.Y[i] = a.N[i] + 2.0 * a.K1[i];
+  }
+  CSYNC(0);
+  rhs(a.Y, a.F, nullptr, a.n, a.v, a.part, a.kf, a.kr, nd, tab, sst, sround, lane, cl, 0);
+  if (cl < 32) {
+    for (int i = lane; i < NS; i += 32) a.K3[i] = stage3_rhs(ih, a.K1[i], a.K2[i], a.F[i]);
+    __syncwarp();
+    dense_solve(a.M, a.dinv, pr, a.K3, lane);
+    for (int i = lane; i < NS; i += 32) a.Y[i] = a.N[i] + 2.0 * a.K1[i] + a.K3[i];
+  }
+  CSYNC(0);
+  rhs(a.Y, a.F, nullptr, a.n, a.v, a.part, a.kf, a.kr, nd, tab, sst, sround, lane, cl, 0);
+  if (cl < 32) {
+    for (int i = lane; i < NS; i += 32) a.K4[i] = stage4_rhs(ih, a.K1[i], a.K2[i], a.K3[i], a.F[i]);
+    __syncwarp();
+    dense_solve(a.M, a.dinv, pr, a.K4, lane);
+  }
+  CSYNC(0);
+}
+
 // Recomputes the listed cells (one cell per block of NL threads; persistent blocks over the first
 // count[COUNT_RECOMPUTED] entries of list) from their inputs with max_steps tries: the call kernel's rates, S v and
 // Jacobian streams, stages and step control, with the dense W = I / (gamma h) - Jn - w 1^T factored by dense_lu on the
 // first warp; writes the result over the call's (xout, hio, doneo, noko), sets redo to 1 (the result passes the guard's
 // test) or 2 and counts it in count[7] / count[8]. Returns at once when the list is empty.
 extern "C" __global__ void __launch_bounds__(NL, 1)
-    // size-limit-ok: inline helpers could move which operations fuse, so a split must first prove equal bits
     recover(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
             const double* __restrict__ dta, const double* __restrict__ hin, double* xout, double* hio, int* doneo,
             double* noko, int* redo, const int* __restrict__ list, int* count, double rtol, double atol, int max_steps,
@@ -96,81 +235,26 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
   if ((int)blockIdx.x >= nfl) return;
   extern __shared__ double smem[];
   unsigned* tb32 = (unsigned*)(smem + PERWR);
-  for (int i = threadIdx.x; i < TBYTES / 4; i += blockDim.x) tb32[i] = blob[i];
-  __syncthreads();
-  const u8* tb = (const u8*)tb32;
-  Tab tab;
-  tab.smap = (const u16*)(tb + O_SMAP);
-  tab.rowptr = (const u16*)(tb + O_ROWPTR);
-  tab.diag = (const u16*)(tb + O_DIAG);
-  tab.colof = tb + O_COLOF;
-  tab.rx = tb + O_RX;
-  tab.xp = tb + O_XP;
-  tab.blen = tb + O_BLEN;
-  const int cl = threadIdx.x, lane = cl & 31;
-  double* kf = scratch + (size_t)blockIdx.x * (2 * NR + 2 + (WSH ? 0 : NS * NS) + RSN);
-  double* kr = kf + NR;
-  double* Wd = WSH ? smem : kf + 2 * NR + 2;            // the dense matrix W
-  double* rsc = kf + 2 * NR + 2 + (WSH ? 0 : NS * NS);  // F, u, -Jn's slots of the last fresh evaluation
-  double *dinv = smem + (WSH ? NS * NS : 0), *n = dinv + NS, *v = n + NS + 1, *N = v + VR, *Y = N + NS, *F = Y + NS,
-         *u = F + NS, *K1 = u + NS, *K2 = K1 + NS, *K3 = K2 + NS, *K4 = K3 + NS, *part = K4 + NS;
-  int* pr = (int*)(part + NPART);
+  const Tab tab = load_tab(tb32, blob);
+  const int cl = (int)threadIdx.x, lane = cl & 31;
+  const CellArrays a = recover_arrays(smem, scratch, (size_t)blockIdx.x);
+  double* N = a.N;
+  int* pr = (int*)(a.part + NPART);
   int* nextq = pr + NS;
-  if (cl == 0) kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
-  int q = blockIdx.x;
+  if (cl == 0) a.kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
+  int q = (int)blockIdx.x;
   while (q < nfl) {
     const int cell = list[q];
     const double Tc = Ta[cell], dt = dta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
     for (int i = cl; i < NS; i += NL) N[i] = x0[(size_t)cell * NS + perm[i]];
     CSYNC(0);
     double p = 0.0, pm = 0.0;
-    for (int i = lane; i < NS; i += 32) {
-      p += N[i] >= 0.0 ? N[i] : DNAN;
-      pm = fmax(pm, N[i]);
-    }
+    for (int i = lane; i < NS; i += 32) screen_x(N[i], p, pm);
 #if NJ
-    for (int b = lane; b < NJ; b += 32) {
-      const double q = Jin[(size_t)cell * NJ + b];
-      p += q >= 0.0 ? 0.0 * q : __longlong_as_double(0x7ff8000000000000ull);
-    }
+    screen_J(Jin, cell, lane, 32, p);
 #endif
-    const double ps = wsum(p);  // bad input (not stepped): non-finite, x < 0, no x > 0, P <= 0 or dt < 0
-    const bool fin = isfinite(ps) && wmax(pm) > 0.0 && isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) &&
-                     dt >= 0.0,
-               cold = Tc < TMIN;
-    if (fin && !cold) {  // rate coefficients, as the call kernel
-      const double lT = log(Tc), iT = 1.0 / Tc, lKT = log(KBOLTZ * Tc / P0BAR);
-      double* g = v;
-      const double* cf = nasa + (Tc < NASA_SPLIT_T ? 0 : NS * 9);
-      for (int i = cl; i < NS; i += NL) {
-        const double* a = cf + 9 * i;
-        const double T2 = Tc * Tc, T3 = T2 * Tc, T4 = T3 * Tc;
-        const double hh = -a[0] * iT * iT + a[1] * lT * iT + a[2] + a[3] * Tc / 2 + a[4] * T2 / 3 + a[5] * T3 / 4 +
-                          a[6] * T4 / 5 + a[7] * iT;
-        const double ss = -a[0] * iT * iT / 2 - a[1] * iT + a[2] * lT + a[3] * Tc + a[4] * T2 / 2 + a[5] * T3 / 3 +
-                          a[6] * T4 / 4 + a[8];
-        g[i] = hh - ss;
-      }
-      if (cl == 0) g[NS] = 0.0;
-      CSYNC(0);
-      for (int r = cl; r < NR; r += NL) {
-#if NJ
-        if (r >= NRT) {
-          kf[r] = Jin[(size_t)cell * NJ + r - NRT];
-          kr[r] = 0.0;
-          continue;
-        }
-#endif
-        const int fl = rf[r];
-        const double k = law(rc + RCW * r, fl, Tc, lT, iT, nd);
-        const u8* x = tab.rx + 6 * r;
-        const double dg = g[x[3]] + g[x[4]] + g[x[5]] - g[x[0]] - g[x[1]] - g[x[2]];
-        const double c3 = (fl & FL_THREE_BODY) ? nd : 1.0;
-        kf[r] = k * c3;
-        kr[r] = REVERSE_RATE;
-        COLL(fl, kf[r], kr[r], nd);
-      }
-    }
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
+    if (fin && !cold) cell_rates(a.v, a.kf, a.kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, 0);
     CSYNC(0);
     const double h0 = isfinite(hin[cell]) ? hin[cell] : dt;  // a non-finite h acts as dt
     double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
@@ -178,113 +262,21 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
     int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;
     while (it < max_steps && t < dt * CALL_END) {
       const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
-      if (prej) {  // the rejected try's state: its F, u and -Jn (every write of the
-        for (int s = cl; s < NS * NS; s += NL) Wd[s] = 0.0;  // Jacobian goes to a slot's dense position)
-        for (int i = cl; i < NS; i += NL) {
-          F[i] = rsc[i];
-          u[i] = rsc[NS + i];
-        }
-        CSYNC(0);
-        for (int s = cl; s < NNZ; s += NL) Wd[__ldg(didx + s)] = rsc[2 * NS + s];
-      } else {
-        const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, tab, sst, sround, lane, cl, 0);
-        for (int s = cl; s < NS * NS; s += NL) Wd[s] = 0.0;
-        CSYNC(0);
-        {  // W = -Jn: the call kernel's term streams, written to the dense positions of the slots
-          const unsigned* jw = (const unsigned*)jt;
-          const u16* jsl = (const u16*)(jw + jround * NL) + cl * JSMAX;
-          double acc = 0.0;
-          int ne = 0;
-#pragma unroll 4
-          for (int qq = 0; qq < jround; qq++) {
-            const unsigned word = __ldg(jw + qq * NL + cl);
-            const double pq =
-                kf[word & J_RATE_MASK] * n[(word >> J_A) & J_SPECIES_MASK] * n[(word >> J_B) & J_SPECIES_MASK];
-            const double cf = ((word >> J_DOUBLE) & 1u) ? (((word >> J_SIGN) & 1u) ? -2.0 : 2.0)
-                                                        : (((word >> J_SIGN) & 1u) ? -1.0 : 1.0);
-            acc = fma(cf, pq, acc);
-            if ((word >> J_END) & 1u) {
-              const unsigned d = __ldg(jsl + ne);
-              if (d < NNZ)
-                Wd[__ldg(didx + d)] = -acc;
-              else
-                Y[d - NNZ] = -acc;
-              acc = 0.0;
-              ne++;
-            }
-          }
-        }
-        CSYNC(0);
-#if NFIX
-        if (cl == 0) {  // the extra pieces of long slots, in order
-          const u16* fx = (const u16*)((const unsigned*)jt + jround * NL) + NL * JSMAX;
-          for (int e = 0; e < NFIX; e++) Wd[__ldg(didx + __ldg(fx + e))] += Y[e];
-        }
-        CSYNC(0);
-#endif
-        for (int i = cl; i < NS; i += NL) {  // u = w = S v / nd - Jn x (the call kernel's sums, columns in order)
-          double acc = 0.0;
-          for (int j = 0; j < NS; j++)
-            if (tab.smap[i * NS + j] != NO_SLOT) acc += Wd[i * NS + j] * N[j];
-          u[i] = u[i] + acc / ntot;
-        }
-        CSYNC(0);
-        for (int i = cl; i < NS; i += NL) {
-          rsc[i] = F[i];
-          rsc[NS + i] = u[i];
-        }
-        for (int s = cl; s < NNZ; s += NL) rsc[2 * NS + s] = Wd[__ldg(didx + s)];
-      }
+      if (prej)
+        restore_dense_try(a, didx, cl);
+      else
+        fresh_dense_try(a, nd, tab, sst, jt, didx, sround, jround, lane, cl);
       CSYNC(0);
-      for (int s = cl; s < NS * NS; s += NL) {  // W = I / (gamma h) - Jn - w 1^T
-        const int i = s / NS;
-        Wd[s] = (s == i * (NS + 1) ? Wd[s] + igh : Wd[s]) - u[i];
-      }
-      for (int i = cl; i < NS; i += NL) K1[i] = F[i];
+      form_dense_w(a.M, a.u, igh, cl, NL);
+      for (int i = cl; i < NS; i += NL) a.K1[i] = a.F[i];
       CSYNC(0);
-      if (cl < 32) {
-        dense_lu(Wd, dinv, pr, lane);
-        // Rodas3 stages (gamma = 1/2), as the call kernel
-        dense_solve(Wd, dinv, pr, K1, lane);
-        for (int i = lane; i < NS; i += 32) K2[i] = fma(RODAS_C21 * ih, K1[i], F[i]);
-        __syncwarp();
-        dense_solve(Wd, dinv, pr, K2, lane);
-        for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i];
-      }
-      CSYNC(0);
-      rhs(Y, F, nullptr, n, v, part, kf, kr, nd, tab, sst, sround, lane, cl, 0);
-      if (cl < 32) {
-        for (int i = lane; i < NS; i += 32) K3[i] = fma(ih, K1[i] - K2[i], F[i]);
-        __syncwarp();
-        dense_solve(Wd, dinv, pr, K3, lane);
-        for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i] + K3[i];
-      }
-      CSYNC(0);
-      rhs(Y, F, nullptr, n, v, part, kf, kr, nd, tab, sst, sround, lane, cl, 0);
-      if (cl < 32) {
-        for (int i = lane; i < NS; i += 32) K4[i] = fma(ih, fma(-RODAS_C43, K3[i], K1[i] - K2[i]), F[i]);
-        __syncwarp();
-        dense_solve(Wd, dinv, pr, K4, lane);
-      }
-      CSYNC(0);
+      dense_stages(a, pr, ih, nd, tab, sst, sround, lane, cl);
       // step control (docs/method.md); every warp reaches the same decision
-      double e2 = 0.0, em = 0.0;
-      bool nn = true;
-      for (int i = lane; i < NS; i += 32) {
-        const double y = N[i] + 2.0 * K1[i] + K3[i] + K4[i];
-        if (cl < 32) Y[i] = y;
-        const double sc = atol + rtol * fmax(fabs(N[i]), fabs(y));
-        const double q4 = K4[i] / sc;
-        e2 += q4 * q4;
-        em = fmax(em, fabs(q4));
-        nn = nn && (y >= -atol);
-      }
-      const double er = sqrt(wsum(e2) / NS), emx = wmax(em);
-      const double en = (t == 0.0 && isfinite(er)) ? fmax(er, emx) : er;  // the worst species until a step is accepted
-      const bool nonneg = __all_sync(FULL, nn), efin = isfinite(en), ok = (en <= 1.0) && nonneg && efin;
+      bool ok = false;
+      const double en = try_error(N, a.K1, a.K3, a.K4, a.Y, cl < 32, t == 0.0, rtol, atol, lane, ok);
       CSYNC(0);
       if (ok) {
-        for (int i = cl; i < NS; i += NL) N[i] = fmax(Y[i], 0.0);
+        for (int i = cl; i < NS; i += NL) N[i] = fmax(a.Y[i], 0.0);
         t += ha;
         nok += 1.0;
       }
@@ -295,10 +287,7 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
       pha = ha;
       it++;
     }
-    p = 0.0;
-    for (int i = lane; i < NS; i += 32) p += N[i];
-    const double s = wsum(p);
-    for (int i = cl; i < NS; i += NL) xout[(size_t)cell * NS + perm[i]] = N[i] / s;
+    write_state(N, xout + (size_t)cell * NS, perm, lane, cl, NL);
     const int dn = (fin && t >= dt * CALL_END) ? 1 : 0;
     CSYNC(0);
     if (cl == 0) {
@@ -308,7 +297,7 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
       noko[cell] = nok;  // done: finished and passing the guard
       redo[cell] = c ? 2 : 1;
       atomicAdd(count + (c ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
-      *nextq = gridDim.x + atomicAdd(count + COUNT_RECOVERY_QUEUE, 1);
+      *nextq = (int)(gridDim.x + atomicAdd(count + COUNT_RECOVERY_QUEUE, 1));
     }
     CSYNC(0);
     q = *nextq;

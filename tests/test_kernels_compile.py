@@ -1,19 +1,10 @@
 """Every form of the kernels compiles with NVRTC, with no GPU. The real networks never reach some of these forms."""
 
-import copy
-
 import pytest
 
 from maxichem import _ad_tables, _cuda, _kernel_header, _tables
 
 ARCH = "89"  # sm_89: the RTX 6000 Ada, the card the kernels run on
-
-
-def _with_reverse_law(net):
-    """Return a copy of the network with an explicit reverse law, which the reader does not produce."""
-    copied = copy.deepcopy(net)
-    copied.reac[0]["rev"] = {"kind": 2, "A": 1e-12, "B": 0.0, "C": 500.0}
-    return copied
 
 
 def _compile(tab):
@@ -35,12 +26,6 @@ def test_call_kernels_compile_with_plain_falloff(read_network):
 
 def test_call_kernels_compile_for_a_small_network(read_network):
     assert _compile(_tables.tables(read_network("synthetic_small"), 2, True))
-
-
-def test_call_kernels_compile_with_a_reverse_law(read_network):
-    tab = _tables.tables(_with_reverse_law(read_network()), 2)
-    assert "rev" in tab["law"]
-    assert _compile(tab)
 
 
 @pytest.mark.slow

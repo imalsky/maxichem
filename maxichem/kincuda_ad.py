@@ -20,6 +20,8 @@ from ._constants import (
     DEFAULT_RTOL,
     DMAX,
     GUARD_BLOCK_THREADS,
+    KERNEL_ARGUMENTS,
+    PHOTOLYSIS_ARGUMENT,
     REC_STEPS,
     T_MIN,
 )
@@ -41,6 +43,7 @@ from .kinvulcan import VulcanNetwork
 
 __all__ = ["CAP", "DMAX", "ADSolver"]
 MAX_WARPS_PER_BLOCK = 32  # the derivative kernels' queue and shared memory hold at most this many
+ARRH_BLOCK_THREADS = 256  # the arrh kernel's block: its reduction array in vjp.cuh has this size
 
 
 class ADSolver:
@@ -54,7 +57,7 @@ class ADSolver:
     Parameters
     ----------
     net : VulcanNetwork
-        The network; at most 96 species and 2,047 reactions, no explicit reverse law.
+        The network; at most 96 species and 2,047 reactions.
     device : torch.device or str
         The CUDA device.
     cap : int
@@ -123,31 +126,29 @@ class ADSolver:
             return torch.empty(size, dtype=torch.float64, device=self.dev)
 
         self.rc0 = to_device(tab["rc"])
-        self._tabs = [
-            to_device(tab["perm"]),
-            to_device(np.frombuffer(blob, np.int32).copy()),
-            to_device(tab["rf"]),
-            to_device(tab["nasa"]),
-        ]
         self._nw = {k: self.max_blocks[k] * self.wpb[k] for k in ("jvp", "vjp")}
         self._scratch = doubles(self._nw["vjp"] * (14 * self.nr + 2))
         self._jscr = self._scratch
         self._rec = doubles(self._nw["vjp"] * 2 * self.cap * (self.ns + 6))
         self._rrec = doubles(self._nw["vjp"] * 2 * self.capr * (self.ns + 6))
-        self._wscr = doubles(max(self._nw.values()) * self.ns**2)
-        self._st = [
-            to_device(tab["sst"].ravel(), np.int32),
-            to_device(tab["jt"].ravel(), np.int64),
-            to_device(tab["lu"], np.int64),
-            to_device(tab["optr"]),
-        ]
-        self._gt = [to_device(ext["gt"].ravel(), np.int64), to_device(ext["xg"])]
-        self._rounds = [
-            ctypes.c_int(tab["sst"].shape[0]),
-            ctypes.c_int(tab["jround"]),
-            ctypes.c_int(ext["gt"].shape[0]),
-        ]
-        self._atoms, self._didx = to_device(tab["atoms"]), to_device(tab["didx"], np.int16)
+        self._tables = {
+            "perm": to_device(tab["perm"]),
+            "blob": to_device(np.frombuffer(blob, np.int32).copy()),
+            "rf": to_device(tab["rf"]),
+            "nasa": to_device(tab["nasa"]),
+            "sst": to_device(tab["sst"].ravel(), np.int32),
+            "jt": to_device(tab["jt"].ravel(), np.int64),
+            "lu": to_device(tab["lu"], np.int64),
+            "optr": to_device(tab["optr"]),
+            "gt": to_device(ext["gt"].ravel(), np.int64),
+            "xg": to_device(ext["xg"]),
+            "sround": ctypes.c_int(tab["sst"].shape[0]),
+            "jround": ctypes.c_int(tab["jround"]),
+            "ground": ctypes.c_int(ext["gt"].shape[0]),
+            "wscr": doubles(max(self._nw.values()) * self.ns**2),
+            "didx": to_device(tab["didx"], np.int16),
+            "atoms": to_device(tab["atoms"]),
+        }
         self.count = torch.zeros(len(COUNT_SLOTS), dtype=torch.int32, device=self.dev)
         self.total = torch.zeros(len(COUNT_SLOTS), dtype=torch.int64, device=self.dev)
         self.flag: torch.Tensor | None = None
@@ -209,32 +210,54 @@ class ADSolver:
         """Return a tensor argument, or a null pointer for an optional one left out."""
         return ctypes.c_void_p(0) if a is None else a
 
-    def _guard(
+    def _guard(self, values: dict[str, Any], J: torch.Tensor | None, stream: Any) -> dict[str, torch.Tensor]:
+        """Run the call kernel's guard on a kernel's result: the redo and list of the cells for the recovery's path."""
+        cells = values["x0"].shape[0]
+        flags = {name: torch.empty(cells, dtype=torch.int32, device=self.dev) for name in ("redo", "list")}
+        arguments = self._arguments("guard", {**values, **flags}) + ([J] if self.nj else [])
+        launch_kernel(
+            self._fn["guard"], -(-cells // GUARD_BLOCK_THREADS) or 1, GUARD_BLOCK_THREADS, 0, stream, arguments
+        )
+        return flags
+
+    def _call_values(
         self,
         x: torch.Tensor,
         T: torch.Tensor,
         P: torch.Tensor,
         dt: torch.Tensor,
-        xo: torch.Tensor,
-        done: torch.Tensor,
-        nok: torch.Tensor,
-        atol: float,
+        h: torch.Tensor,
+        lm: torch.Tensor | None,
+        rc: torch.Tensor,
         J: torch.Tensor | None,
-        stream: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the call kernel's guard on the result: (redo, list) of the cells to redo on the recovery's path."""
-        B = x.shape[0]
-        redo, lst = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(2))
-        launch_kernel(
-            self._fn["guard"],
-            -(-B // GUARD_BLOCK_THREADS) or 1,
-            GUARD_BLOCK_THREADS,
-            0,
-            stream,
-            [x, T, P, dt, xo, done, nok, self._atoms, redo, lst, self.count, ctypes.c_int(B), ctypes.c_double(atol)]
-            + ([J] if self.nj else []),
-        )
-        return redo, lst
+        rtol: float,
+        atol: float,
+        max_steps: int,
+        adapt: bool,
+    ) -> dict[str, Any]:
+        """Return the arguments both derivative kernels take, by parameter name."""
+        return {
+            **self._tables,
+            "x0": x,
+            "Ta": T,
+            "Pa": P,
+            "dta": dt,
+            "hin": h,
+            "lm": self._ptr(lm),
+            "rc": rc,
+            "count": self.count,
+            "B": ctypes.c_int(x.shape[0]),
+            "rtol": ctypes.c_double(rtol),
+            "atol": ctypes.c_double(atol),
+            "max_steps": ctypes.c_int(max_steps),
+            "adapt": ctypes.c_int(int(adapt)),
+            PHOTOLYSIS_ARGUMENT: self._ptr(J),
+        }
+
+    @staticmethod
+    def _arguments(kernel: str, values: dict[str, Any]) -> list[Any]:
+        """Return a kernel's arguments, in its signature's order, from the values by parameter name."""
+        return [values[name] for name in KERNEL_ARGUMENTS[kernel]]
 
     def _finish(self, redo: torch.Tensor) -> None:
         """Add the counts to self.total and keep the per-cell flag, on the device."""
@@ -356,34 +379,27 @@ class ADSolver:
         self.count.zero_()
         stream = torch.cuda.current_stream(self.dev).cuda_stream
 
-        inputs = [x, T, P, dt, h, self._ptr(lm), rc, *tan, self._ptr(dlm), self._ptr(drc), ctypes.c_int(D)]
-        outputs = [
-            xo,
-            ho,
-            done,
-            nok,
-            dxo,
-            dho,
-            self.count,
-            ctypes.c_int(B),
-            ctypes.c_double(rtol),
-            ctypes.c_double(atol),
-        ]
-        tables = [ctypes.c_int(int(adapt)), *self._tabs, self._jscr, *self._st, *self._rounds[:2]]
-
-        def args(ms: int) -> list[Any]:
-            return [*inputs, *outputs, ctypes.c_int(ms), *tables, self._ptr(J), self._ptr(dJ)]
-
-        launch_kernel(self._fn["jvp"], nb, 32 * self.wpb["jvp"], self.smem["jvp"], stream, args(max_steps))
-        redo, lst = self._guard(x, T, P, dt, xo, done, nok, atol, J, stream)
-        launch_kernel(
-            self._fn["jvp_rec"],
-            nb,
-            32 * self.wpb["jvp"],
-            self.smem["jvp"],
-            stream,
-            [*args(REC_STEPS * max_steps), redo, lst, self._wscr, self._didx, self._atoms],
-        )
+        values = {
+            **self._call_values(x, T, P, dt, h, lm, rc, J, rtol, atol, max_steps, adapt),
+            **dict(zip(("dx0", "dTa", "dPa", "ddta", "dhin"), tan, strict=True)),
+            "dlm": self._ptr(dlm),
+            "drc": self._ptr(drc),
+            "D": ctypes.c_int(D),
+            "xout": xo,
+            "hout": ho,
+            "doneo": done,
+            "noko": nok,
+            "dxout": dxo,
+            "dhout": dho,
+            "scratch": self._jscr,
+            "dJin": self._ptr(dJ),
+        }
+        block = 32 * self.wpb["jvp"]
+        launch_kernel(self._fn["jvp"], nb, block, self.smem["jvp"], stream, self._arguments("jvp", values))
+        flags = self._guard(values, J, stream)
+        values |= {**flags, "max_steps": ctypes.c_int(REC_STEPS * max_steps)}
+        launch_kernel(self._fn["jvp_rec"], nb, block, self.smem["jvp"], stream, self._arguments("jvp_rec", values))
+        redo = flags["redo"]
         self._finish(redo)
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
@@ -434,27 +450,32 @@ class ADSolver:
         self.count.zero_()
         stream = torch.cuda.current_stream(self.dev).cuda_stream
 
-        inputs = [x, T, P, dt, h, self._ptr(lm), rc, gx, self._ptr(gh), xo, ho, done, nok]
-        outputs = [g["x"], g["T"], g["P"], g["dt"], g["h"], g["lm"], self.count]
-        settings = [ctypes.c_int(B), ctypes.c_double(rtol), ctypes.c_double(atol)]
-        tables = [ctypes.c_int(int(adapt)), *self._tabs, self._scratch]
-
-        def args(ms: int, rec: torch.Tensor) -> list[Any]:
-            streams = [rec, *self._st, *self._gt, *self._rounds, self._ptr(J), self._ptr(g.get("J")), g_ln_a]
-            return [*inputs, *outputs, *settings, ctypes.c_int(ms), *tables, *streams]
-
-        launch_kernel(self._fn["vjp"], nb, 32 * self.wpb["vjp"], self.smem["vjp"], stream, args(max_steps, self._rec))
-        redo, lst = self._guard(x, T, P, dt, xo, done, nok, atol, J, stream)
-        launch_kernel(
-            self._fn["vjp_rec"],
-            nb,
-            32 * self.wpb["vjp"],
-            self.smem["vjp"],
-            stream,
-            [*args(REC_STEPS * max_steps, self._rrec), redo, lst, self._wscr, self._didx, self._atoms],
-        )
-        launch_kernel(
-            self._fn["arrh"], self.nr, 256, 0, stream, [g_ln_a, T, P, rc, self._tabs[2], g["rc"], ctypes.c_int(B)]
-        )
+        values = {
+            **self._call_values(x, T, P, dt, h, lm, rc, J, rtol, atol, max_steps, adapt),
+            "gx": gx,
+            "gh": self._ptr(gh),
+            "xout": xo,
+            "hout": ho,
+            "doneo": done,
+            "noko": nok,
+            "gx0": g["x"],
+            "gT": g["T"],
+            "gP": g["P"],
+            "gdt": g["dt"],
+            "ghin": g["h"],
+            "glm": g["lm"],
+            "grc": g["rc"],
+            "scratch": self._scratch,
+            "rec": self._rec,
+            "gJ": self._ptr(g.get("J")),
+            "gA": g_ln_a,
+        }
+        block = 32 * self.wpb["vjp"]
+        launch_kernel(self._fn["vjp"], nb, block, self.smem["vjp"], stream, self._arguments("vjp", values))
+        flags = self._guard(values, J, stream)
+        values |= {**flags, "max_steps": ctypes.c_int(REC_STEPS * max_steps), "rec": self._rrec}
+        launch_kernel(self._fn["vjp_rec"], nb, block, self.smem["vjp"], stream, self._arguments("vjp_rec", values))
+        launch_kernel(self._fn["arrh"], self.nr, ARRH_BLOCK_THREADS, 0, stream, self._arguments("arrh", values))
+        redo = flags["redo"]
         self._finish(redo)
         return xo, ho, done.bool(), nok, g

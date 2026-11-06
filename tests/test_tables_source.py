@@ -51,17 +51,17 @@ def test_rate_law_table_takes_the_network_forms(read_network):
 
 
 def test_header_selects_the_rate_law_forms(read_network):
-    net = read_network()
-    reverse = copy.deepcopy(net)
-    reverse.reac[0]["rev"] = {"kind": 2, "A": 1e-12, "B": 0.0, "C": 500.0}
-    for network, troe, eff, rev in (
-        (net, 1, 1, 0),
-        (read_network("synthetic_falloff"), 0, 0, 0),
-        (reverse, 1, 1, 1),
-    ):
+    for network, troe, eff in ((read_network(), 1, 1), (read_network("synthetic_falloff"), 0, 0)):
         header = _kernel_header.call_header(_tables.tables(network, 2), 1)
-        for name, value in (("HAS_TROE", troe), ("HAS_EFF", eff), ("HAS_REV", rev)):
+        for name, value in (("HAS_TROE", troe), ("HAS_EFF", eff)):
             assert f"#define {name} {value}\n" in header
+
+
+def test_explicit_reverse_law_is_refused(read_network):
+    net = copy.deepcopy(read_network())
+    net.reac[0]["rev"] = {"kind": 2, "A": 1e-12, "B": 0.0, "C": 500.0}
+    with pytest.raises(ValueError, match="reverse"):
+        _tables.tables(net, 2)
 
 
 @pytest.mark.parametrize("kernel", sorted(_constants.KERNEL_ARGUMENTS))
@@ -70,7 +70,12 @@ def test_argument_table_matches_the_kernel_signature(kernel):
     text = "".join(sources.values())
     signature = re.search(rf"(?:\s|\b){kernel}\(([^)]*)\)\s*{{", text)
     assert signature is not None
-    names = [re.findall(r"\w+", parameter)[-1] for parameter in signature.group(1).replace(" J_PARAM", "").split(",")]
+    parameters = signature.group(1).replace(" J_PARAM", "")
+    for macro in ("JVP_ARGS", "VJP_ARGS"):
+        definition = re.search(rf"#define {macro}\s+((?:.*\\\n)*.*)", text)
+        assert definition is not None
+        parameters = parameters.replace(macro, definition.group(1).replace("\\\n", " "))
+    names = [re.findall(r"\w+", parameter)[-1] for parameter in parameters.split(",")]
     assert tuple(names) == _constants.KERNEL_ARGUMENTS[kernel]
 
 

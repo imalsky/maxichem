@@ -4,7 +4,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ._constants import ATOL, COUNTS, EXPORT_FORMAT, KERNEL_ARGUMENTS, PHOTOLYSIS_ARGUMENT, REC_STEPS, T_MIN
+from ._constants import (
+    ATOL,
+    COUNTS,
+    EXPORT_FORMAT,
+    KERNEL_ARGUMENTS,
+    PHOTOLYSIS_ARGUMENT,
+    REC_STEPS,
+    SOLVER_KERNEL_NAMES,
+    T_MIN,
+)
 from ._cuda import SOLVER_KERNELS, compile_cubin
 from ._kernel_header import call_header, kernel_sources
 
@@ -54,8 +63,8 @@ def write_export(solver: Any, folder: str | Path) -> None:
         "elements": solver._names[1],
         "tables": {},
         "arguments": {
-            kernel: [*names, *([PHOTOLYSIS_ARGUMENT] if solver.nj else [])]
-            for kernel, names in KERNEL_ARGUMENTS.items()
+            kernel: [*KERNEL_ARGUMENTS[kernel], *([PHOTOLYSIS_ARGUMENT] if solver.nj else [])]
+            for kernel in SOLVER_KERNEL_NAMES
         },
     }
     for name, t in solver._tables.items():
