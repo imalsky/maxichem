@@ -23,3 +23,6 @@ Tasks Isaac put off and wants to return to, with the date deferred.
     isaac/maxichem-coupling (the same fix plus the fused tracer transport).
   - Once #334 is in chengcli/snapy main: rebase isaac/maxichem-coupling onto the new main (the fix commit drops out),
     delete isaac/recon-many-variables on the fork, and keep working on the one branch.
+- 2026-11-05. Rerun the sphere work with the corrected heating formula (notes.md, 2026-11-05 18:53), after the code cleanup.
+  - The 2-day runs at 100, 120 and 140 layers from both starts, then the lid comparison on 0.1-1 bar and a lid choice.
+  - The 10-day runs with and without chemistry and their figures, then the radiation-step and sponge tests as needed.

@@ -1184,6 +1184,39 @@ Data: experiments/2026-11-05_chainfix (checks/, speed.jsonl), experiments/2026-1
     (hourly, 300 s, lid-temperature fix, both) within about 3 model hours, T as low as 27 K before the stop; the
     lid-temperature fix also stops 120 layers at cycle 184. The next step depends on the lid decision (open).
 
+### 2026-11-05 18:53 to 19:44: the sphere drivers' heating formula was wrong; runs stopped
+Data: experiments/2026-11-05_gcm10d/research (column_night.py, top_budget.py, re_start.py, flow_exp5.py, runs/re*, runs/pd*).
+- The bug, in the experiment drivers on the cubed sphere: heat = -(A_top F_top - A_bot F_bot) / V with the column's
+  plane-parallel fluxes. A grows with r, so a flux constant in height gets a false divergence of 2 F / r. A parallel beam in
+  vacuum has none; a radial-only form leaves out what the side faces carry. The term is per volume, so per mass it grows as
+  1 / rho. It cools the night side and heats the day side, most near the lid. Now heat = -(F_top - F_bot) / dz. Not a snapy,
+  pyharp or maxichem bug. Box drivers are not affected (A constant). Energy closure and the check of global absorbed power
+  passed because the old form is conservative, so they could not catch it.
+- Supersedes: every sphere result above carries the term, including the 10-day runs and their figures and the lid, sponge,
+  radiation-step and time-step tables of the previous entry. Its size away from the top is not measured.
+- How it was found. 140 layers crashed within about 3 model hours from every start. The cold spot is the top cell over the
+  uniform night side, at rest. Budget at 140 layers with the old form (rho about 3e-6 kg/m3): real longwave +0.024 K/s
+  (heating; pyharp lies between exact grey solutions with D = 2 and 1.66), area term -0.08 K/s; their sum, -0.056 to
+  -0.061 K/s, against -0.052 K/s observed beyond the adiabat. Not the cause: the top level's temperature (T_n against
+  2 T_n - T_n-1: T_min 133.0 K against 133.7 K at 7,000 s, and T_n stops 120 layers at cycle 184) or the start (radiative
+  equilibrium only moves the stop from cycle 151 to 191).
+- One Cartesian column, same gas, longwave only, against a hydrostatic Lagrangian column: T at the lid after 12,600 s is
+  1,073 K (implicit, 70 s and 17.5 s) and 1,076 K (explicit, 4 s), truth 1,077 K; P 0.129-0.131 mbar, truth 0.135. At rest
+  without radiation it stays at 1,316 K. So snapy's lid and implicit solve are right; the contraction under the lid is real
+  and small.
+- C48 with the corrected form, radiation every 300 s: at 10,500 s, 140 layers from equilibrium has T_min 1,092 K (old form
+  281 K; single-column truth 1,095 K). Stopped at Isaac's request at 19:34 before day 1, with no crash in any of the six:
+  T_min / T_max 1,005 / 1,755 K at 28,000 s (140 layers, equilibrium start), 971 / 1,718 K (140, 1,500 K start), 1,025 /
+  1,771 K and 1,004 / 1,732 K at 31,500 s (120), 1,037 / 1,797 K and 1,024 / 1,753 K at 35,000 s (100). Old against
+  corrected form at equal time, equilibrium start: 100 layers T 1,019-1,803 against 1,037-1,797 K; 120 layers 867-1,777
+  against 1,025-1,771 K. No day-1 dumps of the corrected runs, so no lid comparison yet.
+- Equilibrium column (Newton on level temperatures, the same longwave and shortwave calls, F / 4 as F / 2 at mu0 = 0.5):
+  T 1,316-1,590 K, lid 15 / 2.0 / 0.26 mbar at 100 / 120 / 140 layers. On it the two top-level choices change the net flux
+  at the top by 80 / 1.6 / 0.03 W m-2, out of 2.5e5 absorbed.
+- gcm10d.py and gcm_chem.py now use the corrected form (experiment files). The reruns are in todo.md.
+- The share walk fixed in the previous entry: largest change 2.56e-6 over the chain, -2.53e-6 at call 2,000 (sulfur, one
+  cell). The 2.6e-6 above and the 2.5e-6 in the code's description are these two numbers.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
