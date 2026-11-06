@@ -2,7 +2,8 @@
 case.
 
 Reference = the call computed by batched fp64 Rodas3 in torch with the kernel's numerics (rates from T and P every call,
-exact Jacobian, LU without row exchanges, rtol 1e-3, atol kincuda.ATOL, the step control of maxichem/kincuda.py), stored
+exact Jacobian, LU without row exchanges, rtol 1e-3, atol kincuda.ATOL, the step control of maxichem/kincuda.py, the
+element-share correction of the guard on finished cells), stored
 for exactly these inputs (tests/libref.py, paths.LIBREF; a check of the inputs' digest refuses others). Each solver
 advances its own state from the same inputs.
 (a) Parity. Pass: floored difference on the 12 scored gases (floors 1e-10 H2O CO CO2 CH4 NH3 HCN C2H2, 1e-8 H OH O,
@@ -16,7 +17,8 @@ advances its own state from the same inputs.
     - yardstick cold calls: 4,096 recorded starts at their T, P, dt 1 and 500 s, starting step 1e-10 s;
     - scrambled starts: the same kind of starts, each species times 10^(sigma N(0, 1)), sigma 0 / 1 / 2 dex, at
       dt 0.01 / 1 / 50 / 500 s;
-    - a 2,000-call chain: decision panel P's 256 paths x 4 offsets (1,024 cells), T, P and dt of the recorded forcing
+    - a 2,000-call chain (every element's share within 1e-10 of its start): decision panel P's 256 paths x 4 offsets
+      (1,024 cells), T, P and dt of the recorded forcing
       every call (mixing events not applied), step sizes carried from call to call;
     - photolysis (CudaSolver photo=True): the cold starts and the sigma-1 scrambled starts at dt 1 and 500 s with the
       J of 1-D-model layers stored in the reference (the reference adds the branches by its own parser), the cold
@@ -223,6 +225,9 @@ def main():
     hb = full(B, 1e-10)
     R = tensors(LR.entry("chain", sig, xb, hb, Tc, Pc, dc, path=REF[0]))
     t, tb = Tally(frac=1e-5, cap=1e-5), 0.0
+    atoms = tt(np.asarray(net.atoms, np.float64))
+    el0 = xb @ atoms
+    share0, share = el0 / el0.sum(1, keepdim=True), 0.0
     for k in range(NC):
         torch.cuda.synchronize()
         c0 = time.perf_counter()
@@ -231,10 +236,14 @@ def main():
         tb += time.perf_counter() - c0
         t.add(gi, {q: v[k] for q, v in R.items()}, rb, kc)
         xb, hb = rb[:2]
+        el = xb @ atoms
+        rel = (el / el.sum(1, keepdim=True) - share0).abs() / share0.clamp_min(1e-300)
+        share = max(share, float(rel.max()))
     t.verdict(
         f"panel P chain, {NC} calls x {B} cells (the kernel on its own state; ms per call kernel "
         f"{tb / NC * 1e3:.2f}, GPU may be shared)"
     )
+    verdict("chain: element shares", share < 1e-10, f"largest relative change of a share over the chain {share:.2e}")
 
     # photolysis
     kp = KC.CudaSolver(net, dev, photo=True)
@@ -293,11 +302,19 @@ def main():
     Jc = J[:Bc]  # rows i % L of the layers, as the reference
     R = tensors(LR.entry("photo/chain", sig, xb, hb, Tc, Pc, dc, Jc, path=REF[0]))
     t = Tally()
+    el0 = xb @ atoms
+    share0, share = el0 / el0.sum(1, keepdim=True), 0.0
     for k in range(NC):
         rb = kp(xb, tt(Tc[k]), tt(Pc[k]), tt(dc[k]), hb, J=Jc)
         t.add(gi, {q: v[k] for q, v in R.items()}, rb, kp)
         xb, hb = rb[:2]
+        el = xb @ atoms
+        rel = (el / el.sum(1, keepdim=True) - share0).abs() / share0.clamp_min(1e-300)
+        share = max(share, float(rel.max()))
     t.verdict(f"photolysis: lit chain, {NC} calls x {Bc} cells")
+    verdict(
+        "lit chain: element shares", share < 1e-10, f"largest relative change of a share over the chain {share:.2e}"
+    )
     xs = x0[:64].clone()  # bad photolysis rates: counted, not stepped (x normalized)
     Jb = J[:64].clone()
     Jb[3, 0], Jb[5, 1], Jb[9, 2] = -1.0, float("nan"), float("inf")

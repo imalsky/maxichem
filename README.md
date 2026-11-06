@@ -108,7 +108,9 @@ counts = solver.check()                             # guard counts; raises if a 
 - T, P and J stay fixed within a call. Cells never couple. The results do not depend on the batch size or the order of
   the cells, so domain decomposition does not change them.
 - GCMs advect mass mixing ratios. Convert to mole fractions before the call and back after it. The chemistry conserves
-  elements and mass. Keep `h` per cell between calls and in restart files.
+  elements and mass: a call that passes the guard puts every element's share back to its input value (except shares
+  near atol, and elements tied together), so rounding does not build up over a long run. Keep `h` per cell between
+  calls and in restart files.
 - A cell below 300 K, or with a non-finite x, T, P or dt, a negative mole fraction (clamp at 0 before the call), no
   mole fraction above 0, P <= 0, dt < 0, or a negative or non-finite J, is not stepped (its x comes back divided by
   its sum, non-finite if the sum is 0, and done is 0). It is counted, and `check()` raises for cold cells. Inputs of the wrong
@@ -239,8 +241,8 @@ reference for these derivatives on the current networks.
 The checks and benches read stored references and truth data that are not part of this repository. They are found
 under `CHEM_DATA`:
 
-    benches/kincuda/libref7.npz        outputs of the torch reference solver on the check's inputs (NCHO_photo)
-    benches/kincuda/libref8_SNCHO25.npz  the same for the sulfur network SNCHO_photo_network_2025
+    benches/kincuda/libref8.npz        outputs of the torch reference solver on the check's inputs (NCHO_photo)
+    benches/kincuda/libref9_SNCHO25.npz  the same for the sulfur network SNCHO_photo_network_2025
     benches/kincuda/jref_SNCHO25.npz   J of a 1-D WASP-39b model on that network (the derivative check's sulfur J)
     benches/yardstick/design/          recorded starts used as check inputs
     benches/designs/decision/P/        test panel P (paths, starts, forcing)

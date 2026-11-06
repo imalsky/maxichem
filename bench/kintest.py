@@ -594,7 +594,8 @@ def line(name, s, R, truth):
         )
     print(
         head + f" | calls {int(calls):,}: unfinished {int(R['unfinished'][s].sum())} non-finite "
-        f"{int(R['nonfinite'][s].sum())} negative {int(R['negative'][s].sum())} | drift (unmixed) {dr} | "
+        f"{int(R['nonfinite'][s].sum())} negative {int(R['negative'][s].sum())} | "
+        f"element drift after the correction (unmixed) {dr} | "
         f"steps per call {R['steps'][s].sum() / max(calls, 1):.3f}"
     )
 

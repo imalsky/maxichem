@@ -67,14 +67,23 @@ listed. Nothing is read back to the host during a call: the counts stay on the d
 read them). Each cell's arithmetic depends only on its inputs, so results are bitwise reproducible on one GPU whatever
 the batch order. The element test checks the linear solves: E^T W = E^T / (gamma h) for the element matrix E (E^T S =
 0), so every stage moves the element budget by gamma h E^T (residual of its solve); a factor without row exchanges that
-has lost accuracy shows up there. Cells with non-finite inputs are counted, not recomputed (they come back non-finite);
+has lost accuracy shows up there. A cell that passes has that rounding taken out: with E_i the atoms of species i and
+e0, e1 the element totals of the input and the result, x_i' = x_i (1 + lambda . E_i), with (E^T X E) lambda = e0 (sum
+e1 / sum e0) - e1 (the smallest relative change that restores every element's share; an element whose pivot vanishes
+is left out, and no species changes by more than GMAX = 1e-3, relative: elements tied together or shares near atol
+are then not fully restored), then renormalized. Without it the shares walk over a long chain: on the 2025
+network, cells at 2,500-2,900 K lost 2.5e-6 of their sulfur share over 2,000 calls; with it the shares hold to 2e-13.
+The correction does not enter the step control and not the derivative kernels' tangents and cotangents: conservation
+makes its sensitivity zero, except near atol, where clamping breaks conservation. Cells with non-finite inputs are
+counted, not recomputed (they come back non-finite);
 cells below 300 K are not stepped and are counted, and check() raises for them.
 
 The element-drift allowance is per network: the rounding drift of the element shares depends on the network's
 chemistry, not only on the factorization (a network can drift the same on the recover kernel's pivoted path). A
 network takes drift = max(DRIFT, 10 r), with r its rounding drift: the largest relative change of an element's share
-beyond the clamping term over the parity stress cases (recorded starts and their scrambles to 2 dex at dt up to 500 s)
-with the guard's drift test off. DRIFT is NCHO's (r 2e-9).
+beyond the clamping term over the parity stress cases (recorded starts and their scrambles to 2 dex at dt up to 500 s).
+The returned x no longer shows it (a cell that passes is corrected): r is the largest drift at which the guard still
+flags a cell. DRIFT is NCHO's (r 2e-9).
 """
 
 import ctypes
@@ -442,6 +451,7 @@ _SRC = r"""
 // widest forward and reverse side of round q of NL reactions
 $masks
 #define FULL 0xffffffffu
+#define GMAX 1e-3             // the element-share correction changes a species by at most this, relative
 #define DNAN __longlong_as_double(0x7ff8000000000000ll)   // poisons the bad-input sum; a failed cell's derivatives
 #define CSYNC(g) asm volatile("bar.sync %0, %1;" :: "r"((g) + 1), "r"(NL) : "memory")   // the cell's threads
 typedef unsigned short u16;
@@ -896,9 +906,12 @@ $jchk    const double ps = wsum(p);   // bad input (not stepped): non-finite, x 
 }
 
 // The guard's test of one cell (network species order): 1 T < TMIN, 2 bad input, else the bits 4 non-finite
-// state, 8 unfinished call, 16 element drift (0: passed).
+// state, 8 unfinished call, 16 element drift (0: passed). A cell that passes has its element shares put back
+// (module docstring): x' = x (1 + sum_e lambda_e a_ie), with (A X A^T) lambda = e0 s1 / s0 - e1 by LDL^T; an
+// element whose pivot vanishes (absent, or tied to the others) is left out. Explicit fma: x depends on these sums,
+// and every kernel that calls this must get the same bits.
 __device__ int check_cell(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
-                          const double* __restrict__ dta, const double* xout, int done, double nok,
+                          const double* __restrict__ dta, double* xout, int done, double nok,
                           const double* __restrict__ atoms, double atol, int cell$jarg)
 {
   double e0[NEL], e1[NEL], p = 0.0, mx = 0.0;   // atoms of each element in the input and the new state
@@ -911,7 +924,10 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
     mx = fmax(mx, a);
     xfin = xfin && isfinite(b);
     #pragma unroll
-    for (int e = 0; e < NEL; e++) { e0[e] += atoms[i * NEL + e] * a; e1[e] += atoms[i * NEL + e] * b; }
+    for (int e = 0; e < NEL; e++) {
+      e0[e] = fma(atoms[i * NEL + e], a, e0[e]);
+      e1[e] = fma(atoms[i * NEL + e], b, e1[e]);
+    }
   }
 ${jchk1}  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
   if (Tc < TMIN) return 1;
@@ -925,14 +941,58 @@ ${jchk1}  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
   #pragma unroll
   for (int e = 0; e < NEL; e++)
     drift = drift || fabs(e1[e] / s1 - e0[e] / s0) > DRIFT * e0[e] / s0 + 2.0 * atol * nok * ETOT / s0;
-  return (xfin ? 0 : 4) | (done ? 0 : 8) | (drift ? 16 : 0);
+  const int c = (xfin ? 0 : 4) | (done ? 0 : 8) | (drift ? 16 : 0);
+  if (c) return c;
+  double* q = xout + (size_t)cell * NS;
+  double m[NEL * NEL], m0[NEL], y[NEL], lam[NEL];
+  for (int e = 0; e < NEL * NEL; e++) m[e] = 0.0;
+  for (int i = 0; i < NS; i++) {
+    const double* ai = atoms + i * NEL;
+    for (int e = 0; e < NEL; e++) {
+      if (ai[e] == 0.0) continue;
+      for (int f = e; f < NEL; f++)
+        if (ai[f] != 0.0) m[e * NEL + f] = fma(ai[e] * ai[f], q[i], m[e * NEL + f]);
+    }
+  }
+  const double r = s1 / s0;
+  #pragma unroll
+  for (int e = 0; e < NEL; e++) { m0[e] = m[e * NEL + e]; y[e] = fma(e0[e], r, -e1[e]); }
+  for (int k = 0; k < NEL; k++) {
+    if (!(m[k * NEL + k] > 1e-10 * m0[k])) continue;
+    for (int j = k + 1; j < NEL; j++) {
+      const double l = m[k * NEL + j] / m[k * NEL + k];
+      for (int f = j; f < NEL; f++) m[j * NEL + f] = fma(-l, m[k * NEL + f], m[j * NEL + f]);
+      y[j] = fma(-l, y[k], y[j]);
+    }
+  }
+  for (int k = NEL - 1; k >= 0; k--) {
+    lam[k] = 0.0;
+    if (!(m[k * NEL + k] > 1e-10 * m0[k])) continue;
+    double b = y[k];
+    for (int f = k + 1; f < NEL; f++) b = fma(-m[k * NEL + f], lam[f], b);
+    lam[k] = b / m[k * NEL + k];
+  }
+  double sum = 0.0;
+  for (int i = 0; i < NS; i++) {
+    const double* ai = atoms + i * NEL;
+    double g = 1.0;
+    #pragma unroll
+    for (int e = 0; e < NEL; e++) if (ai[e] != 0.0) g = fma(lam[e], ai[e], g);
+    g = fmin(fmax(g, 1.0 - GMAX), 1.0 + GMAX);
+    sum = fma(q[i], g, sum);
+    q[i] *= g;
+  }
+  if (!(isfinite(sum) && sum > 0.0)) return 4;
+  const double is = 1.0 / sum;
+  for (int i = 0; i < NS; i++) q[i] *= is;
+  return 0;
 }
 
 // Checks of each cell after the call (one thread per cell); counts in count[1] to count[6]: bad input, T < TMIN,
 // else: non-finite state, unfinished, element drift, recompute. A cell to recompute gets redo = 1 and is appended to
 // list (the first count[6] entries; their order is not deterministic, the cells' results do not depend on it).
 extern "C" __global__ void guard(const double* __restrict__ x0, const double* __restrict__ Ta,
-    const double* __restrict__ Pa, const double* __restrict__ dta, const double* __restrict__ xout,
+    const double* __restrict__ Pa, const double* __restrict__ dta, double* __restrict__ xout,
     const int* __restrict__ doneo, const double* __restrict__ noko, const double* __restrict__ atoms,
     int* __restrict__ redo, int* __restrict__ list, int* __restrict__ count, int B, double atol$jarg)
 {

@@ -1143,6 +1143,47 @@ Data and figures: experiments/2026-11-05_gcm10d (figures/, runs/compare_10d.json
   reproduced bit for bit. An independent review found no logic error.
 - VULCAN-JAX: the HNO3 NASA-9 fix is pushed (normal tier 324 passed, 0 failed; CI green).
 
+### 2026-11-05 14:50 to 18:53: the 2025 chain failure fixed; sponge, radiation step, time step, lid
+Data: experiments/2026-11-05_chainfix (checks/, speed.jsonl), experiments/2026-11-05_gcm10d/research.
+- The one known parity failure (2,000-call chain on SNCHO_photo_network_2025, worst 2.1e-6 dex, H2S, COS and S2 in 2 cells
+  at 2,500-2,900 K) came from element shares walking through rounding, up to 2.6e-6 relative over the chain, on different
+  paths in the kernel and in the reference. Numerics change: a cell that passes the guard is now corrected,
+  x' = x (1 + lambda . a_i), with (A^T X A) lambda = e0 (s1 / s0) - e1, by LDL^T without pivoting. An element whose pivot
+  falls below 1e-10 of its diagonal is left out; no species changes by more than GMAX = 1e-3, relative; the row is then
+  renormalized. Shares near atol and elements tied together are not fully restored. The step control and the derivative
+  kernels' tangents and cotangents ignore it. A first version with one factor per element was rejected on review (noise
+  moved through CO into C); this form replaced it.
+- New references, made by the generator with the same correction: libref8.npz, libref9_SNCHO25.npz. The drift allowance r
+  is now the largest drift at which the guard still flags a cell, since the returned x no longer shows it; kintest labels
+  its drift column accordingly.
+- Checks on the final code: kintest quick 0 misses and 0 large on all paths and stored states (worst 0.014 dex), no path's
+  worst error changed by more than 0.01 dex. Parity 34 of 34 on NCHO_photo and on the 2025 network (a share test on the
+  lit chain is new): chain worst 6.9e-10 and 2.9e-8 dex, lit chain 1.6e-9 and 2.8e-9 dex, shares 2.2e-13 and 2.1e-13 over
+  the chain, 5.7e-14 and 6.9e-14 over the lit chain. Derivatives 104 of 104 on NCHO_photo, SNCHO_photo_network_2025 and
+  CHO_photo. C++ export bitwise on both networks. Two independent reviews; the second's points (the limit, fewer
+  operations, the docs, the lit test) are in. The planned outside review is still missing.
+- This commit changes results: on the saved cases x moves by at most 6.2e-13 relative (2025 lit), h, step counts, done
+  and guard counts stay bitwise. The earlier same-bits statements hold up to the previous commit only.
+- Cost, idle GPU, two interleaved pairs of the previous commit and this one, us per cell-call: NCHO dark 0.359 to 0.362
+  (+1.0 %), lit 0.659 to 0.662 (+0.5 %); 2025 dark 0.682 to 0.687 (+0.7 %), lit 0.987 to 0.992 (+0.5 %).
+- Flow studies, C48 hot Jupiter, flow only, no chemistry unless stated, against the explicit run or the finer run. T rms
+  by band 0-0.02 / 0.02-0.1 / 0.1-1 bar. Two runs from the same state differ by 6e-7 K at day 1 and up to 6e-5 K at day
+  2, the floor for all of these. Heating placement is in the entry above.
+  - Sponge (top-sponge-lyr), day 1 against none: tau 1e4 s over 600 km: |u| max 3,945 to 2,874 m/s, T 50 / 57 / 15 K;
+    tau 3,600 s over 1,200 km: |u| max 2,092 m/s, T 71 / 76 / 30 K. A sponge changes the circulation well below itself;
+    none is used.
+  - Radiation step against 150 s: day 1, hourly 3.4 / 2.6 / 1.0 K and 600 s 0.5 / 0.5 / 0.15 K; day 2, hourly 26 / 27 / 6.4
+    K and 600 s 12 / 7.6 / 1.8 K. Hourly radiation is inaccurate, not unstable, at 100 layers.
+  - Time step, day 1, 70 s against 35 s (flow and chemistry both): T 2.1 / 1.4 / 0.33 K. Against explicit: 70 s 3.4 / 2.6 /
+    0.61 K, 35 s 1.5 / 1.3 / 0.30 K: the error halves with the step. Composition, nine species: median at most 0.0009
+    dex, 99th percentile at most 0.08, largest 1.08.
+  - Lid, day 2, radiation every 300 s, from rest: 100 layers (top 8.4 mbar) against 120 (top 1.1 mbar), on the 100 shared
+    layers: T 103 / 64 / 24 K, 4.2 K below 1 bar; zonal wind 1,152 / 592 / 129 / 13 m/s; equatorial wind 0-0.02 bar -108
+    against 807 m/s. The lid changes the flow at all pressures above 1 bar. The high-lid run reaches
+    283 K, below the chemistry's 300 K limit (273 K with hourly radiation). 140 layers fails in all 4 variants
+    (hourly, 300 s, lid-temperature fix, both) within about 3 model hours, T as low as 27 K before the stop; the
+    lid-temperature fix also stops 120 layers at cycle 184. The next step depends on the lid decision (open).
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
