@@ -66,9 +66,13 @@ negative states, the largest change of an element ratio (to H) on paths without 
   truth at hold ends) and QLc at dt 500 s; panel P's 256 paths cycled at dt 25, 50 and 500 s for 10,000 calls each (no truth: stability
   counters only; starts mapped by species name). The paths are as long as the truth set holds: QC family 1,000 of 10,000 calls; QH family
   128 of the 1,664 paths, 1,000 holds; QL 3,500 holds; QLc 3,000 calls.
-- **full.** Every box. Then a 25-s clock of 3,456,000 ticks (1000 days): QL at dt 25 s (every tick) and 500 s (every 20th), QLc (every 20th),
-  the QH family at dt 50 s (every 2nd), the QC family and the QH family at 1500-s holds as in quick, panel P at dt 25, 50 and 500 s (every
-  1st, 2nd, 20th) for 1000 days. After 1,000 ticks it prints an estimate, and stops above 5 h unless `--force`.
+- **full.** Every box. Then a clock of 691,200 ticks: QL at dt 25 s (every tick) and 500 s (every 20th), QLc (every 20th), the QH family at dt 50 s
+  (every 2nd), the QC family and the QH family at 1500-s holds as in quick: every VULCAN path, as long as the truth set holds it. Panel P at dt 25 s for 200
+  days and dt 50 s for 400 days (both every tick, 69 cycles of its forcing), and at dt 500 s for 1000 days (every 2nd tick, 17 cycles). 90 min is the limit on any
+  test or check run: at tick 12,000 it prints an estimate from the last 1,000 ticks' rate and stops above 1.5 h, and it stops whenever the run reaches 1.5 h. A run takes 54 min.
+
+  A chain is sequential, one launch per tick, and a tick costs about what its slowest cell costs: 3.4 ms of kernels at 256 cells, 1.9 ms at 64. So the blocks
+  share launches, and the clock's length sets the time. A block's stride is only its place on that schedule.
 
 `--ref` pairs a run with a saved run of the same tier and the same truth (digests of the scored truth and forcing): per path the change of
 the worst error and the largest state change, counts above 0.01 and 0.03 dex, steps per call, unfinished calls and latency.

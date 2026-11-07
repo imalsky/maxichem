@@ -3,7 +3,7 @@
 The tiers and what they score are in docs/testing.md. Exit status 1 when a path or box has a miss, a call is unfinished
 or leaves a non-finite or negative state, or a cell still fails after the recovery.
 
-    python bench/kintest.py quick|full [--save out.npz] [--ref ref.npz] [--force]
+    python bench/kintest.py quick|full [--save out.npz] [--ref ref.npz]
 
 --save writes per-path summaries, the 12 gases of every cell at intervals and at the end, the per-box results, timings
 and the run's commit and settings (it refuses to overwrite). --ref compares with a saved run of the same tier and the
@@ -30,7 +30,8 @@ MISS, LARGE = 0.1, 1.0
 DAY = 86400.0
 READ = 1000  # ticks between read-backs of the counters
 CHUNK = 65536  # most boxes per chunk
-CAP_H = 5.0  # full: stop above this estimate (hours) unless --force
+CAP_H = 1.5  # full: stop above this estimate (hours): no test or check run may take longer
+ESTIMATE_TICK = 12 * READ  # full: make the estimate here: the QC family and the holds, the dearest ticks, are over
 START_STEP = 1e-10  # s: the first call's h
 QUICK_BOXES = 32768  # the boxes of the quick tier
 META = ("id", "panel", "kind", "stratum", "start", "comp")
@@ -334,8 +335,8 @@ def make_blocks(tier, species, gas_columns):
         Block("QC family, per call", qc, 1, n_qc),
         Block("QH family, 1500-s holds", qh, 1, n_qh, dt=HOLD),
         *[
-            Block(f"P, dt {d:g} s", panel, stride, int(1000 * DAY / d), dt=d, cycle_rows=n_panel)
-            for d, stride in ((25.0, 1), (50.0, 2), (500.0, 20))
+            Block(f"P, dt {d:g} s", panel, stride, int(days * DAY / d), dt=d, cycle_rows=n_panel)
+            for d, stride, days in ((25.0, 1, 200), (50.0, 1, 400), (500.0, 2, 1000))
         ],
     ]
 
@@ -410,16 +411,16 @@ def assemble(blocks, net, device):
     )
 
 
-def _stop_if_too_long(total, loop, ticks, force):
-    """Print the full tier's estimate after the first READ ticks; stop above CAP_H hours unless forced."""
-    estimate = total + (ticks - READ) * loop / READ
+def _stop_if_too_long(ticks_left, so_far, read_s):
+    """Print the full tier's estimate, from the cost of the last READ ticks; stop above CAP_H hours."""
+    estimate = so_far + ticks_left * read_s / READ
     print(
-        f"estimate: {estimate / 3600:.2f} h in all ({total / 60:.1f} min so far, then {ticks - READ:,} "
-        f"ticks x {1e3 * loop / READ:.2f} ms per tick of ticks 1-{READ:,})",
+        f"estimate: {estimate / 3600:.2f} h in all ({so_far / 60:.1f} min so far, then {ticks_left:,} ticks x "
+        f"{1e3 * read_s / READ:.2f} ms, the last {READ:,} ticks' rate)",
         flush=True,
     )
-    if estimate > CAP_H * 3600 and not force:
-        print(f"stopped: the estimate exceeds {CAP_H:g} h (--force runs it anyway)", flush=True)
+    if estimate > CAP_H * 3600:
+        print(f"stopped: the estimate exceeds {CAP_H:g} h", flush=True)
         sys.exit(2)
 
 
@@ -459,11 +460,10 @@ def _advance(state, solver, cells, forcing):
     state.drift[cells] = torch.maximum(state.drift[cells], change)
 
 
-def run(blocks, state, solver, gases, full, force, started):
+def run(blocks, state, solver, gases, full, started):
     """Run the tick loop of a tier; return timings, snapshots and the guard's counts.
 
-    full: the full tier, which reads back less often and can stop at its estimate (force: run on); started: the run's
-    start time.
+    full: the full tier, which reads back less often and can stop at its estimate; started: the run's start time.
     """
     device, ticks = solver.dev, state.ticks
     snapshot_every = 10 * READ if full else READ
@@ -497,12 +497,15 @@ def run(blocks, state, solver, gases, full, force, started):
                     f"recomputed by the guard {counts_since(solver, start)['recomputed']}",
                     flush=True,
                 )
+            if full and tick + 1 == ESTIMATE_TICK:
+                _stop_if_too_long(ticks - tick - 1, now - started, now - last_read)
+            if full and now - started > CAP_H * 3600:  # a stuck cell or another job on the GPU, after the estimate
+                print(f"stopped at tick {tick + 1:,}: the run has taken {CAP_H:g} h", flush=True)
+                sys.exit(2)
             last_read = now
             if (tick + 1) % snapshot_every == 0:
                 snapshots.append(gases.snapshot(state.x)), snapshot_ticks.append(tick + 1)
             active = [b for b in active if (b.end - 1) * b.stride > tick]
-            if full and tick + 1 == READ:
-                _stop_if_too_long(now - started, now - loop_start, ticks, force)
     torch.cuda.synchronize()
     guard = counts_since(solver, start)
     return {
@@ -703,7 +706,6 @@ def main():
     ap.add_argument("tier", choices=("quick", "full"))
     ap.add_argument("--save", help="write this npz (refuses to overwrite)")
     ap.add_argument("--ref", help="compare with this saved run of the same tier")
-    ap.add_argument("--force", action="store_true", help="full: run even if the estimate exceeds 5 h")
     a = ap.parse_args()
     if a.save and Path(a.save).exists():
         sys.exit(f"{a.save} exists; not overwriting")
@@ -733,7 +735,7 @@ def main():
         f"set up in {time.time() - started:.0f} s",
         flush=True,
     )
-    loop_results = run(blocks, state, solver, gases, not quick, a.force, started)
+    loop_results = run(blocks, state, solver, gases, not quick, started)
     solver.check()  # raises if any cell was below 300 K
     results = path_results(blocks, state)
     report(blocks, results, loop_results, state)

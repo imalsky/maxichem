@@ -48,8 +48,8 @@ gitignored); it holds the truth sets, benches, the checks' references and the ca
   job there.
 - Runs of up to about 1 h need no approval. Estimate anything longer (sequential calls x measured ms per call) and ask.
 - Tests are quick by default: minutes, enough to tell whether a change goes the right way. Long-run checks default to
-  about 100 simulated days, and 1,000 days only at a final sign-off. A big test runs only at a decision point and takes
-  at most 4-5 h; if it would take longer, shrink or batch it.
+  about 100 simulated days. A big test runs only at a decision point. No test,
+  tier or check takes more than 90 minutes of wall time: if one would, parallelise, shrink or split it.
 - Put a long job's log in the experiment folder.
 
 ## Decisions
