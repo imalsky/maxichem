@@ -1,7 +1,7 @@
 # maxichem
 
-Generic rules (code, docs, records, git, reviews, jobs) are in the global CLAUDE.md and ~/.claude/rules/. This file holds
-only what is unique to this project.
+Generic rules (code, docs, records, git, reviews, jobs) are in the global CLAUDE.md. This file holds only what is unique to this
+project.
 
 ## Goal
 A fast chemistry solver for the pyharp/snapy GCM. It needs to cost on the order of a microsecond per cell, amortized
@@ -40,7 +40,7 @@ repository), `../reference` (the torch reference generator) and `../snapy` (the 
 `VULCAN_THERMO` is VULCAN-JAX's `src/vulcan3/thermo` folder (the networks and `NASA9/`; no default). The two default
 networks are its newest NCHO and newest sulfur network: `NCHO_photo_network.txt` (69 species, photolysis) and, whenever
 sulfur is asked for, `SNCHO_photo_network_2025.txt` (91 species; Isaac, 2026-11-04). The older
-`SNCHO_photo_network.txt` is not a default. `CHEM_DATA` is the data root (default `data/` in the checkout,
+`SNCHO_photo_network.txt` is not a default. Results on the older file are superseded. If upstream adds a newer network, ask before switching. `CHEM_DATA` is the data root (default `data/` in the checkout,
 gitignored); it holds the truth sets, benches, the checks' references and the caches. `maxichem/paths.py` reads both.
 
 ## Running jobs
@@ -77,6 +77,12 @@ dex bound for fp32 or cheaper schemes, C64x100 with 69 tracers for speed numbers
 with a single passive-tracer convergence check, element totals and guard counts; the main path is fused CUDA called
 from snapy's C++ loop (a Python driver only for tests); J from kintera. Development build: `../.venv-snapdev` (snapy built
 from source with `../.cuda`); the shared `../.venv` keeps the released snapy wheel.
+Rules for any coupling, C++ included: a driver that writes `scalar_s` or `hydro_u` after `Mesh.forward`'s stages calls
+`exchange_ghost_zones` before the next step, as kScalar for scalars, and re-applies the walls. A frozen source is added as
+`dt*wght2(stage)`. On the sphere, heat = -(F_top - F_bot) / dz with plane-parallel fluxes; the area-weighted form gives a false
+2F/r. The fused implicit-transfer kernel takes the donor limit of e3100503 when that merges. atol 1e-25 stays the default and is a
+setting: the snapy chemistry hook reads atol and rtol from the YAML deck. Every sphere result before the heating fix carries that
+bug, so decide the lid from the rerun in todo.md, not the old numbers.
 
 ## Science and engineering rules
 - Speed target: under about 1 us per cell-call in the GCM. Simple code beats small speed gains: a GPU-specific
