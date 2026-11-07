@@ -5,8 +5,9 @@ or leaves a non-finite or negative state, or a cell still fails after the recove
 
     python bench/kintest.py quick|full [--save out.npz] [--ref ref.npz] [--force]
 
---save writes per-path summaries, the 12 gases of every cell at intervals and at the end, the per-box results and
-timings (it refuses to overwrite). --ref compares with a saved run of the same tier and the same truth.
+--save writes per-path summaries, the 12 gases of every cell at intervals and at the end, the per-box results, timings
+and the run's commit and settings (it refuses to overwrite). --ref compares with a saved run of the same tier and the
+same truth.
 """
 
 import argparse
@@ -14,556 +15,624 @@ import hashlib
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
-from kintest_truth import FLOOR, HOLD, check_jobs, load_p, load_paths
+from kintest_truth import FLOOR, HOLD, TINY, check_jobs, load_p, load_paths
+from run_record import run_record
 
 from maxichem import kincuda, kinvulcan, paths
+from maxichem._checks import GASES
 
-GASES = ["H2O", "CO", "CO2", "CH4", "NH3", "HCN", "C2H2", "H", "OH", "O", "H2", "N2"]
 MISS, LARGE = 0.1, 1.0
 DAY = 86400.0
 READ = 1000  # ticks between read-backs of the counters
 CHUNK = 65536  # most boxes per chunk
 CAP_H = 5.0  # full: stop above this estimate (hours) unless --force
+START_STEP = 1e-10  # s: the first call's h
+QUICK_BOXES = 32768  # the boxes of the quick tier
 META = ("id", "panel", "kind", "stratum", "start", "comp")
-KEYS_FB = (
-    "bad_input",
-    "nonfinite",
-    "unfinished",
-    "drift",
-    "recomputed",
-    "recovered",
-    "still_failed",
-)  # CudaSolver.fallback
+BOX_KEYS = ("box", "X", "T", "P", "J", "lit", "kind")
+GUARD_KEYS = ("bad_input", "nonfinite", "unfinished", "drift", "recomputed", "recovered", "still_failed")
 NEVER = 1 << 62
+
+
+@dataclass(frozen=True)
+class ScoredGases:
+    """The scored gases in a state: their columns, on the host and the device, and their log10 floors on the device."""
+
+    columns: list[int]
+    index: torch.Tensor
+    floor: torch.Tensor
+
+    def floored_log(self, fractions):
+        """Return the floored log10 of mole fractions of these gases alone: [cells, gases]."""
+        return torch.log10(fractions.clamp(min=TINY)).maximum(self.floor)
+
+    def snapshot(self, x):
+        """Return the floored log10 of these gases in a whole state, as float32 on the host."""
+        return self.floored_log(x[:, self.index]).float().cpu().numpy()
+
+
+class ErrorTally:
+    """Per cell, over the states scored so far: the worst floored error, its call and gas, and the counts."""
+
+    def __init__(self, cells, device):
+        self.worst = torch.zeros(cells, dtype=torch.float64, device=device)
+        self.worst_call = torch.full((cells,), -1, device=device)
+        self.worst_gas = torch.full((cells,), -1, device=device)
+        self.counts = torch.zeros(cells, 3, dtype=torch.float64, device=device)  # stored states, misses, large misses
+
+    def add(self, x, cells, truth, call, gases):
+        """Score the states x[cells] after this call against truth rows; bad truth counts as a failure."""
+        log_x = gases.floored_log(x[cells][:, gases.index])
+        worst, gas = (log_x - truth).abs().max(1)
+        worst = torch.where(torch.isfinite(log_x).all(1) & torch.isfinite(truth).all(1), worst, torch.inf)
+        before = self.worst[cells]
+        up = worst > before
+        self.worst[cells] = torch.where(up, worst, before)
+        self.worst_call[cells] = torch.where(up, call, self.worst_call[cells])
+        self.worst_gas[cells] = torch.where(up, gas, self.worst_gas[cells])
+        hits = torch.stack((torch.ones_like(worst), (worst > MISS).double(), (worst > LARGE).double()), 1)
+        self.counts.index_add_(0, cells, hits)
+
+    def numpy(self):
+        """Return the worst error, its call and gas, as host arrays."""
+        return tuple(a.cpu().numpy() for a in (self.worst, self.worst_call, self.worst_gas))
 
 
 class Block:
     """One panel on one schedule.
 
-    One panel on one schedule: call j runs on tick j * stride and uses forcing row (j // rep) % cyc of each path (rep
-    calls per 1500-s hold; cyc = the row count of a cycled panel); a path takes part in calls s0 <= j < e; a mix keyed
-    to row r comes before call rep * r, a stored state of row r is the state after call rep * r + rep - 1.
+    Call j runs on tick j * stride and uses forcing row (j // calls_per_row) % cycle_rows of each path (calls_per_row
+    calls per 1500-s hold; cycle_rows = the row count of a cycled panel); a path takes part in calls first_call <= j <
+    end_call; a mix keyed to row r comes before call calls_per_row * r, a stored state of row r is the state after call
+    calls_per_row * r + calls_per_row - 1.
     """
 
-    def __init__(self, name, cells, stride, ncall, rep=1, dt=None, cyc=None):
-        self.name, self.cells, self.stride, self.ncall, self.rep, self.dt = name, cells, stride, ncall, rep, dt
-        self.cyc = cyc or NEVER
-        self.n = len(cells)
+    def __init__(self, name, cells, stride, calls, calls_per_row=1, dt=None, cycle_rows=None):
+        self.name, self.cells, self.stride, self.calls, self.dt = name, cells, stride, calls, dt
+        self.calls_per_row = calls_per_row
+        self.cycle_rows = cycle_rows or NEVER
+        self.n_paths = len(cells)
         self.truth = cells[0]["truth"] is not None
         lengths = np.array([len(c["T"]) for c in cells])
-        assert cyc is None or (cyc == lengths).all()
-        self.s0 = np.array([rep * c["s0"] for c in cells])
-        self.e = np.full(self.n, ncall) if cyc else np.minimum(rep * lengths, ncall)
-        self.nrow = lengths if cyc else np.minimum(lengths, -(-ncall // rep))  # forcing rows used per path
-        self.end = int(self.e.max())
-        self.ev = np.unique(np.concatenate([self.s0, self.e]))
-        self.next, self.nlive = -1, 0
+        assert cycle_rows is None or (cycle_rows == lengths).all()
+        self.first_call = np.array([calls_per_row * c["first_row"] for c in cells])
+        self.end_call = np.full(self.n_paths, calls) if cycle_rows else np.minimum(calls_per_row * lengths, calls)
+        self.rows_used = lengths if cycle_rows else np.minimum(lengths, -(-calls // calls_per_row))
+        self.end = int(self.end_call.max())
+        self.events = np.unique(np.concatenate([self.first_call, self.end_call]))
+        self.next_event, self.n_live = -1, 0
 
-    def setup(self, c0, off, dev):
-        """Global cell numbers c0.., forcing offsets off; mixes by row and stored truth by call on the GPU."""
-        self.c0, self.off = c0, off
-        mr, mc, mf, my, sk, sc, st = [], [], [], [], [], [], []
-        self.mixed = np.zeros(self.n, bool)
-        for i, c in enumerate(self.cells):
-            for r, f, y in c["mix"]:
-                if self.cyc < NEVER or self.rep * r < self.e[i]:
-                    mr.append(r), mc.append(c0 + i), mf.append(f), my.append(y)
+    def setup(self, first_cell, forcing_start, device):
+        """Set the global cell numbers and forcing offsets; put the mixes by row and stored truth by call on the GPU."""
+        self.first_cell, self.forcing_start = first_cell, forcing_start
+        mix_row, mix_cell, mix_fraction, mix_gas = [], [], [], []
+        stored_call, stored_cell, stored_truth = [], [], []
+        self.mixed = np.zeros(self.n_paths, bool)
+        for i, path in enumerate(self.cells):
+            for row, fraction, gas in path["mix"]:
+                if self.cycle_rows < NEVER or self.calls_per_row * row < self.end_call[i]:
+                    mix_row.append(row), mix_cell.append(first_cell + i), mix_fraction.append(fraction)
+                    mix_gas.append(gas)
                     self.mixed[i] = True
             if self.truth:
-                k = self.rep * c["rows"] + self.rep - 1
-                keep = k < self.e[i]
-                sk.append(k[keep]), sc.append(np.full(int(keep.sum()), c0 + i)), st.append(c["truth"][keep])
-        nr = int(self.nrow.max())
-        mr = np.asarray(mr, np.int64)
-        o = np.argsort(mr, kind="stable")
-        self.mb = np.searchsorted(mr[o], np.arange(nr + 1))
-        self.mc = torch.as_tensor(np.asarray(mc, np.int64)[o], device=dev)
-        self.mf = torch.as_tensor(np.asarray(mf, np.float64)[o], device=dev)[:, None]
-        self.my = torch.as_tensor(np.asarray(my, np.float64).reshape(-1, len(self.cells[0]["x0"]))[o], device=dev)
+                calls = self.calls_per_row * path["rows"] + self.calls_per_row - 1
+                keep = calls < self.end_call[i]
+                stored_call.append(calls[keep])
+                stored_cell.append(np.full(int(keep.sum()), first_cell + i))
+                stored_truth.append(path["truth"][keep])
+        mix_row = np.asarray(mix_row, np.int64)
+        order = np.argsort(mix_row, kind="stable")
+        self.mix_start = np.searchsorted(mix_row[order], np.arange(int(self.rows_used.max()) + 1))
+        self.mix_cell = torch.as_tensor(np.asarray(mix_cell, np.int64)[order], device=device)
+        self.mix_fraction = torch.as_tensor(np.asarray(mix_fraction, np.float64)[order], device=device)[:, None]
+        species = len(self.cells[0]["x0"])
+        self.mix_gas = torch.as_tensor(np.asarray(mix_gas, np.float64).reshape(-1, species)[order], device=device)
         if self.truth:
-            sk = np.concatenate(sk)
-            o = np.argsort(sk, kind="stable")
-            self.sb = np.searchsorted(sk[o], np.arange(self.ncall + 1))
-            self.sc = torch.as_tensor(np.concatenate(sc)[o], device=dev)
-            self.st = torch.as_tensor(np.concatenate(st)[o], device=dev)
+            stored_call = np.concatenate(stored_call)
+            order = np.argsort(stored_call, kind="stable")
+            self.stored_start = np.searchsorted(stored_call[order], np.arange(self.calls + 1))
+            self.stored_cell = torch.as_tensor(np.concatenate(stored_cell)[order], device=device)
+            self.stored_truth = torch.as_tensor(np.concatenate(stored_truth)[order], device=device)
 
-    def live(self, j, dev):
+    def live(self, j, device):
         """Refresh the scheduled cells (global numbers, forcing offsets) when a path starts or ends at call j."""
-        if j < self.next:
+        if j < self.next_event:
             return
-        on = np.flatnonzero((self.s0 <= j) & (j < self.e))
-        self.gidx = torch.as_tensor(self.c0 + on, device=dev)
-        self.goff = torch.as_tensor(self.off[on], device=dev)
-        self.nlive = len(on)
-        later = self.ev[self.ev > j]
-        self.next = int(later[0]) if len(later) else NEVER
+        on = np.flatnonzero((self.first_call <= j) & (j < self.end_call))
+        self.live_cells = torch.as_tensor(self.first_cell + on, device=device)
+        self.live_forcing = torch.as_tensor(self.forcing_start[on], device=device)
+        self.n_live = len(on)
+        later = self.events[self.events > j]
+        self.next_event = int(later[0]) if len(later) else NEVER
 
-    def mix(self, row, x_state):
+    def mix(self, row, x):
         """Apply the mixes keyed to this forcing row, before the row's first call."""
-        a, z = self.mb[row], self.mb[row + 1]
-        if z > a:
-            c, f = self.mc[a:z], self.mf[a:z]
-            x_state[c] = (1.0 - f) * x_state[c] + f * self.my[a:z]
+        start, stop = self.mix_start[row], self.mix_start[row + 1]
+        if stop > start:
+            cells, fraction = self.mix_cell[start:stop], self.mix_fraction[start:stop]
+            x[cells] = (1.0 - fraction) * x[cells] + fraction * self.mix_gas[start:stop]
 
 
-def score(x, c, truth, j, best, cnt, gi, fl):
-    """Score the states x[c] against truth rows.
-
-    Score the states x[c] against truth rows: per cell the worst error with its call j and gas (best), and the counts
-    of stored states, misses and large misses (cnt).
-    """
-    lx = torch.log10(x[c][:, gi].clamp(min=1e-300)).maximum(fl)
-    e = (lx - truth).abs()
-    ep, g = e.max(1)
-    ep = torch.where(torch.isfinite(lx).all(1) & torch.isfinite(truth).all(1), ep, torch.inf)  # bad truth: a failure
-    w = best[0][c]
-    up = ep > w
-    best[0][c] = torch.where(up, ep, w)
-    best[1][c] = torch.where(up, j, best[1][c])
-    best[2][c] = torch.where(up, g, best[2][c])
-    cnt.index_add_(0, c, torch.stack((torch.ones_like(ep), (ep > MISS).double(), (ep > LARGE).double()), 1))
+def counts_since(solver, start):
+    """Return the guard's counts since start, an earlier copy of solver.total (one small copy from the device)."""
+    return dict(zip(kincuda.COUNTS, (solver.total - start)[1:-1].tolist(), strict=True))
 
 
-def add_fb(fb, solver):
-    """Add the guard's counts of the last call to fb."""
-    for k, v in solver.fallback.items():
-        fb[k] = fb.get(k, 0) + v
-
-
-def _complete_box_set(sp):
+def _complete_box_set(species):
     """Read the boxes' manifest and refuse a set that is not complete: (manifest, shards, first shard)."""
-    man = json.loads((paths.BOXES / "manifest.json").read_text())
-    shards = [paths.BOXES / f for f in man.get("shards", [])]
-    bad = {k: len(man.get(k, [])) for k in ("errors", "bad_states", "drift_over_1e-6")}
+    manifest = json.loads((paths.boxes() / "manifest.json").read_text())
+    shards = [paths.boxes() / f for f in manifest.get("shards", [])]
+    bad = {k: len(manifest.get(k, [])) for k in ("errors", "bad_states", "drift_over_1e-6")}
     ids = np.concatenate([np.load(f)["box"] for f in shards]) if shards else np.zeros(0, int)
-    cover = np.zeros(man["boxes"], int)
-    np.add.at(cover, np.concatenate([ids, np.asarray(man.get("quarantine", []), int)]), 1)
-    if man.get("pending", 1) or any(bad.values()) or len(ids) != man["accepted"] or (cover != 1).any():
+    cover = np.zeros(manifest["boxes"], int)
+    np.add.at(cover, np.concatenate([ids, np.asarray(manifest.get("quarantine", []), int)]), 1)
+    if manifest.get("pending", 1) or any(bad.values()) or len(ids) != manifest["accepted"] or (cover != 1).any():
         raise SystemExit(
-            f"{paths.BOXES}: not complete (manifest: {man.get('pending')} boxes not run, {bad}, "
-            f"{man['accepted']} accepted; shards hold {len(ids)} boxes, design boxes not held exactly once "
+            f"{paths.boxes()}: not complete (manifest: {manifest.get('pending')} boxes not run, {bad}, "
+            f"{manifest['accepted']} accepted; shards hold {len(ids)} boxes, design boxes not held exactly once "
             f"(accepted or quarantined) {int((cover != 1).sum())})"
         )
-    print(f"boxes: {man['accepted']:,} of {man['boxes']:,} accepted, {len(man['quarantine'])} quarantined (left out)")
-    z0 = np.load(shards[0])
+    print(
+        f"boxes: {manifest['accepted']:,} of {manifest['boxes']:,} accepted, "
+        f"{len(manifest['quarantine'])} quarantined (left out)"
+    )
+    first = np.load(shards[0])
     for f in shards:
         z = np.load(f)
         if (
-            [str(q) for q in z["species"]] != sp
-            or not np.array_equal(z["stops"], z0["stops"])
-            or not np.array_equal(z["lines"], z0["lines"])
+            [str(q) for q in z["species"]] != species
+            or not np.array_equal(z["stops"], first["stops"])
+            or not np.array_equal(z["lines"], first["lines"])
         ):
             raise SystemExit(f"{f}: species, stops or photolysis lines differ from the paths' and the other shards'")
-    return man, shards, z0
+    return manifest, shards, first
 
 
-def boxes(solver, net, sp, gh, gi, fl, cap, dev):
-    """Run the VULCAN truth boxes.
-
-    The VULCAN truth boxes (paths.BOXES, made by the truth generator's sobol.py: constant T, P and photolysis rates,
-    stored at fixed stops from 0 to 1e8 s): the first cap boxes (None: all), each from its stored start in chained
-    calls whose lengths are the stop intervals, every stored state scored (gh: the scored gases' columns, gi: the
-    same on the device). Refuses a set whose manifest lists boxes not run, failed runs, bad states or element drift, or
-    whose shards do not hold the accepted count; reports the quarantined boxes (a step forced at the generator's dt_min,
-    left out). b_set: a digest of the scored truth and inputs. Returns the per-box results (b_*).
-    """
-    man, shards, z0 = _complete_box_set(sp)
-    stops, lines = z0["stops"], [str(q) for q in z0["lines"]]
-    col = [lines.index(f"{q['absorber']},{q['branch']}") for q in net.photo]
-    keys = ("box", "X", "T", "P", "J", "lit", "kind")
-    bset = {k: [] for k in keys}
-    n = 0
+def _load_boxes(shards, cap):
+    """Return the first cap boxes (None: all) of the shards, by field."""
+    box_set = {k: [] for k in BOX_KEYS}
+    loaded = 0
     for f in shards:
-        if cap is not None and n >= cap:
+        if cap is not None and loaded >= cap:
             break
         z = np.load(f)
-        for k in keys:
-            bset[k].append(z[k])
-        n += len(z["box"])
-    bset = {k: np.concatenate(v)[:cap] for k, v in bset.items()}
-    n_boxes, nc = len(bset["box"]), len(stops) - 1
-    bres = {
-        "b_box": bset["box"],
-        "b_calls": np.full(n_boxes, nc),
-        "b_worst": np.zeros(n_boxes),
-        "b_kworst": np.full(n_boxes, -1),
-        "b_gworst": np.full(n_boxes, -1),
-        "b_saved": np.zeros(n_boxes),
-        "b_nmiss": np.zeros(n_boxes),
-        "b_nlarge": np.zeros(n_boxes),
-        "b_unfinished": np.zeros(n_boxes),
-        "b_nonfinite": np.zeros(n_boxes),
-        "b_steps": np.zeros(n_boxes),
-        "b_lx": np.zeros((n_boxes, 12), np.float32),
+        for k in BOX_KEYS:
+            box_set[k].append(z[k])
+        loaded += len(z["box"])
+    return {k: np.concatenate(v)[:cap] for k, v in box_set.items()}
+
+
+def boxes(solver, net, species, gases, cap):
+    """Run the VULCAN truth boxes.
+
+    The boxes (paths.boxes(), made by the truth generator's sobol.py: constant T, P and photolysis rates,
+    stored at fixed stops from 0 to 1e8 s): the first cap boxes (None: all), each from its stored start in chained
+    calls whose lengths are the stop intervals, every stored state scored. Refuses a set whose manifest lists boxes not
+    run, failed runs, bad states or element drift, or whose shards do not hold the accepted count; reports the
+    quarantined boxes (a step forced at the generator's dt_min, left out). b_set: a digest of the scored truth and
+    inputs. Returns the per-box results (b_*).
+    """
+    device = solver.dev
+    manifest, shards, first = _complete_box_set(species)
+    stops, lines = first["stops"], [str(q) for q in first["lines"]]
+    branch_column = [lines.index(f"{q['absorber']},{q['branch']}") for q in net.photo]
+    box_set = _load_boxes(shards, cap)
+    n_boxes, calls = len(box_set["box"]), len(stops) - 1
+    results = {"b_box": box_set["box"], "b_calls": np.full(n_boxes, calls)}
+    results |= {
+        f"b_{k}": np.zeros(n_boxes) for k in ("worst", "saved", "nmiss", "nlarge", "unfinished", "nonfinite", "steps")
     }
-    fb = {}
-    t0 = time.time()
+    results |= {"b_kworst": np.full(n_boxes, -1), "b_gworst": np.full(n_boxes, -1)}
+    results["b_lx"] = np.zeros((n_boxes, len(GASES)), np.float32)
+    start = solver.total.clone()
+    started = time.time()
 
-    def tt(a):
-        return torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float64, device=dev)
+    def tensor(a):
+        return torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float64, device=device)
 
-    for p0 in range(0, n_boxes, CHUNK):
-        sl = slice(p0, min(n_boxes, p0 + CHUNK))
-        m = sl.stop - p0
-        x, T, P, J = tt(bset["X"][sl, 0]), tt(bset["T"][sl]), tt(bset["P"][sl]), tt(bset["J"][sl][:, col])
-        h = torch.full_like(T, 1e-10)
-        acc = torch.zeros(m, 3, dtype=torch.float64, device=dev)  # unfinished, non-finite, steps
-        cnt = torch.zeros(m, 3, dtype=torch.float64, device=dev)  # saved states, misses, large misses
-        best = (
-            torch.zeros(m, dtype=torch.float64, device=dev),
-            torch.full((m,), -1, device=dev),
-            torch.full((m,), -1, device=dev),
-        )
-        c = torch.arange(m, device=dev)
-        for k in range(1, nc + 1):
-            x, h, done, nok = solver(x, T, P, torch.full_like(T, stops[k] - stops[k - 1]), h, J=J)
-            add_fb(fb, solver)
+    for first_box in range(0, n_boxes, CHUNK):
+        chunk = slice(first_box, min(n_boxes, first_box + CHUNK))
+        x, T, P = tensor(box_set["X"][chunk, 0]), tensor(box_set["T"][chunk]), tensor(box_set["P"][chunk])
+        J = tensor(box_set["J"][chunk][:, branch_column])
+        h = torch.full_like(T, START_STEP)
+        outcome = torch.zeros(len(T), 3, dtype=torch.float64, device=device)  # unfinished, non-finite, steps
+        tally = ErrorTally(len(T), device)
+        cells = torch.arange(len(T), device=device)
+        for k in range(1, calls + 1):
+            x, h, done, steps = solver(x, T, P, torch.full_like(T, stops[k] - stops[k - 1]), h, J=J)
             bad = torch.logical_not(torch.isfinite(x).all(1))
-            acc += torch.stack((torch.logical_not(done).double(), bad.double(), nok), 1)
-            xt = tt(bset["X"][sl, k][:, gh])
-            truth = torch.where(torch.isfinite(xt), torch.log10(xt.clamp(min=1e-300)).maximum(fl), torch.nan)
-            score(x, c, truth, k, best, cnt, gi, fl)
-        bres["b_worst"][sl], bres["b_kworst"][sl], bres["b_gworst"][sl] = (q.cpu().numpy() for q in best)
-        bres["b_saved"][sl], bres["b_nmiss"][sl], bres["b_nlarge"][sl] = cnt.cpu().numpy().T
-        bres["b_unfinished"][sl], bres["b_nonfinite"][sl], bres["b_steps"][sl] = acc.cpu().numpy().T
-        bres["b_lx"][sl] = torch.log10(x[:, gi].clamp(min=1e-300)).maximum(fl).float().cpu().numpy()
+            outcome += torch.stack((torch.logical_not(done).double(), bad.double(), steps), 1)
+            stored = tensor(box_set["X"][chunk, k][:, gases.columns])
+            truth = torch.where(torch.isfinite(stored), gases.floored_log(stored), torch.nan)
+            tally.add(x, cells, truth, k, gases)
+        results["b_worst"][chunk], results["b_kworst"][chunk], results["b_gworst"][chunk] = tally.numpy()
+        results["b_saved"][chunk], results["b_nmiss"][chunk], results["b_nlarge"][chunk] = tally.counts.cpu().numpy().T
+        results["b_unfinished"][chunk], results["b_nonfinite"][chunk], results["b_steps"][chunk] = (
+            outcome.cpu().numpy().T
+        )
+        results["b_lx"][chunk] = gases.snapshot(x)
     torch.cuda.synchronize()
-    bres["b_s"], bres["b_cellcalls"] = time.time() - t0, n_boxes * nc
-    h = hashlib.sha256(json.dumps(man["stamp"], sort_keys=True).encode())
-    for a in [bset[k] for k in keys] + [stops, np.array(lines), np.array(sp)]:
-        h.update(np.ascontiguousarray(a).tobytes())
-    bres["b_set"] = np.array(f"{man['network']} rtol {man.get('rtol')} {n_boxes} boxes sha256 {h.hexdigest()[:16]}")
-    bres["fallback_boxes"] = np.array([fb.get(q, 0) for q in KEYS_FB])
-    box_report(bres, bset, stops)
-    return bres
+    results["b_s"], results["b_cellcalls"] = time.time() - started, n_boxes * calls
+    digest = hashlib.sha256(json.dumps(manifest["stamp"], sort_keys=True).encode())
+    for a in [*(box_set[k] for k in BOX_KEYS), stops, np.array(lines), np.array(species)]:
+        digest.update(np.ascontiguousarray(a).tobytes())
+    results["b_set"] = np.array(
+        f"{manifest['network']} rtol {manifest.get('rtol')} {n_boxes} boxes sha256 {digest.hexdigest()[:16]}"
+    )
+    guard = counts_since(solver, start)
+    results["fallback_boxes"] = np.array([guard[q] for q in GUARD_KEYS])
+    box_report(results, box_set, stops)
+    return results
 
 
-def box_report(bres, bset, stops):
+def box_report(results, box_set, stops):
     """Misses-first lines of the box pass."""
-    w = bres["b_worst"]
+    worst = results["b_worst"]
     print(
-        f"boxes: {len(w):,} boxes x {len(stops) - 1} calls in {bres['b_s']:.0f} s "
-        f"({1e6 * bres['b_s'] / bres['b_cellcalls']:.3f} us per cell-call), steps per call "
-        f"{bres['b_steps'].sum() / bres['b_calls'].sum():.3f}; guard "
-        f"{dict(zip(KEYS_FB, bres['fallback_boxes'].tolist(), strict=True))}"
+        f"boxes: {len(worst):,} boxes x {len(stops) - 1} calls in {results['b_s']:.0f} s "
+        f"({1e6 * results['b_s'] / results['b_cellcalls']:.3f} us per cell-call), steps per call "
+        f"{results['b_steps'].sum() / results['b_calls'].sum():.3f}; guard "
+        f"{dict(zip(GUARD_KEYS, results['fallback_boxes'].tolist(), strict=True))}"
     )
 
-    def line(name, s):
+    def box_line(name, s):
         if s.any():
             print(
-                f"  {name:20s} {int(s.sum()):7,d} boxes: miss {100 * (w[s] > MISS).mean():6.3f} %  large "
-                f"{100 * (w[s] > LARGE).mean():6.3f} %  worst {w[s].max():.3f} | stored states "
-                f"{int(bres['b_saved'][s].sum()):,}: miss {int(bres['b_nmiss'][s].sum()):,} large "
-                f"{int(bres['b_nlarge'][s].sum()):,} | boxes with an unfinished call "
-                f"{int((bres['b_unfinished'][s] > 0).sum())}"
-                f", with a non-finite state {int((bres['b_nonfinite'][s] > 0).sum())}"
+                f"  {name:20s} {int(s.sum()):7,d} boxes: miss {100 * (worst[s] > MISS).mean():6.3f} %  large "
+                f"{100 * (worst[s] > LARGE).mean():6.3f} %  worst {worst[s].max():.3f} | stored states "
+                f"{int(results['b_saved'][s].sum()):,}: miss {int(results['b_nmiss'][s].sum()):,} large "
+                f"{int(results['b_nlarge'][s].sum()):,} | boxes with an unfinished call "
+                f"{int((results['b_unfinished'][s] > 0).sum())}"
+                f", with a non-finite state {int((results['b_nonfinite'][s] > 0).sum())}"
             )
 
-    line("all boxes", np.ones(len(w), bool))
-    line("dark", bset["lit"] == 0)
-    line("lit", bset["lit"] == 1)
+    box_line("all boxes", np.ones(len(worst), bool))
+    box_line("dark", box_set["lit"] == 0)
+    box_line("lit", box_set["lit"] == 1)
     for k, name in enumerate(("unreacted", "reheat", "mixed", "scrambled", "hot-H")):
-        line(f"start {name}", bset["kind"] == k)
+        box_line(f"start {name}", box_set["kind"] == k)
     for lo, hi in ((300, 400), (400, 700), (700, 1200), (1200, 2000), (2000, 3001)):
-        line(f"T {lo}-{hi} K", (bset["T"] >= lo) & (bset["T"] < hi))
+        box_line(f"T {lo}-{hi} K", (box_set["T"] >= lo) & (box_set["T"] < hi))
     print("  worst boxes:")
-    for i in np.argsort(-w)[:5]:
+    for i in np.argsort(-worst)[:5]:
         print(
-            f"    box {bset['box'][i]} T {bset['T'][i]:.0f} K P {bset['P'][i] / 1e6:.1e} bar "
-            f"{'lit' if bset['lit'][i] else 'dark'} "
-            f"start {int(bset['kind'][i])}: {w[i]:.3f} dex in {GASES[bres['b_gworst'][i]]} at stop "
-            f"{stops[bres['b_kworst'][i]]:.3g} s"
+            f"    box {box_set['box'][i]} T {box_set['T'][i]:.0f} K P {box_set['P'][i] / 1e6:.1e} bar "
+            f"{'lit' if box_set['lit'][i] else 'dark'} "
+            f"start {int(box_set['kind'][i])}: {worst[i]:.3f} dex in {GASES[results['b_gworst'][i]]} at stop "
+            f"{stops[results['b_kworst'][i]]:.3g} s"
         )
 
 
-def make_blocks(tier, sp, gi):
+def make_blocks(tier, species, gas_columns):
     """Return the tier's blocks (see the module docstring)."""
-    t0 = time.time()
-    qc = load_paths(("QC", "QCs", "twins/QC"), sp, gi, hold=False)
-    qh = load_paths(("QH", "QHs", "twins/QH"), sp, gi, hold=True)
-    ql = load_paths(("QL",), sp, gi, hold=True)
-    qlc = load_paths(("QLc",), sp, gi, hold=False)
-    pp = load_p(sp)
-    nqc, nh, nl, nlc, npp = (max(len(c["T"]) for c in v) for v in (qc, qh, ql, qlc, pp))
-    print(f"truth and forcing loaded in {time.time() - t0:.0f} s", flush=True)
+    started = time.time()
+    qc = load_paths(("QC", "QCs", "twins/QC"), species, gas_columns, hold=False)
+    qh = load_paths(("QH", "QHs", "twins/QH"), species, gas_columns, hold=True)
+    ql = load_paths(("QL",), species, gas_columns, hold=True)
+    qlc = load_paths(("QLc",), species, gas_columns, hold=False)
+    panel = load_p(species)
+    n_qc, n_qh, n_ql, n_qlc, n_panel = (max(len(c["T"]) for c in v) for v in (qc, qh, ql, qlc, panel))
+    print(f"truth and forcing loaded in {time.time() - started:.0f} s", flush=True)
     if tier == "quick":
         return [
-            Block("QC family, per call", qc, 1, nqc),
-            Block("QH family, 1500-s holds", qh, 1, nh, dt=HOLD),
-            Block("QL, dt 500 s", ql, 1, 10000, rep=3, dt=500.0),
+            Block("QC family, per call", qc, 1, n_qc),
+            Block("QH family, 1500-s holds", qh, 1, n_qh, dt=HOLD),
+            Block("QL, dt 500 s", ql, 1, 10000, calls_per_row=3, dt=500.0),
             Block("QLc, dt 500 s", qlc, 1, 10000),
-            *[Block(f"P, dt {d:g} s", pp, 1, npp, dt=d, cyc=npp) for d in (25.0, 50.0, 500.0)],
+            *[Block(f"P, dt {d:g} s", panel, 1, n_panel, dt=d, cycle_rows=n_panel) for d in (25.0, 50.0, 500.0)],
         ]
     return [
-        Block("QL, dt 25 s", ql, 1, 60 * nl, rep=60, dt=25.0),
-        Block("QL, dt 500 s", ql, 20, 3 * nl, rep=3, dt=500.0),
-        Block("QLc, dt 500 s", qlc, 20, nlc),
-        Block("QH family, dt 50 s", qh, 2, 30 * nh, rep=30, dt=50.0),
-        Block("QC family, per call", qc, 1, nqc),
-        Block("QH family, 1500-s holds", qh, 1, nh, dt=HOLD),
+        Block("QL, dt 25 s", ql, 1, 60 * n_ql, calls_per_row=60, dt=25.0),
+        Block("QL, dt 500 s", ql, 20, 3 * n_ql, calls_per_row=3, dt=500.0),
+        Block("QLc, dt 500 s", qlc, 20, n_qlc),
+        Block("QH family, dt 50 s", qh, 2, 30 * n_qh, calls_per_row=30, dt=50.0),
+        Block("QC family, per call", qc, 1, n_qc),
+        Block("QH family, 1500-s holds", qh, 1, n_qh, dt=HOLD),
         *[
-            Block(f"P, dt {d:g} s", pp, s, int(1000 * DAY / d), dt=d, cyc=npp)
-            for d, s in ((25.0, 1), (50.0, 2), (500.0, 20))
+            Block(f"P, dt {d:g} s", panel, stride, int(1000 * DAY / d), dt=d, cycle_rows=n_panel)
+            for d, stride in ((25.0, 1), (50.0, 2), (500.0, 20))
         ],
     ]
 
 
-def assemble(blocks, net, dev):
-    """Global state, flat forcing (T, P in dyn cm^-2, dt per forcing row) and per-cell counters for all blocks."""
-    x_start, t_forcing, p_forcing, dt_forcing, off0 = [], [], [], [], 0
+@dataclass
+class PathRun:
+    """All blocks' cells together: their state, flat forcing per row and per-cell counters."""
+
+    x: torch.Tensor
+    h: torch.Tensor
+    T: torch.Tensor
+    P: torch.Tensor  # dyn cm^-2
+    dt: torch.Tensor
+    host_forcing: tuple  # T, P and dt on the host
+    atoms: torch.Tensor
+    h_column: int  # the element H's column in atoms
+    start_ratio: torch.Tensor  # each element per H at the start
+    meta: dict
+    outcome: torch.Tensor  # calls, accepted steps, unfinished, non-finite, negative
+    tally: ErrorTally
+    drift: torch.Tensor
+    ticks: int
+
+    @property
+    def n_cells(self):
+        """Return the number of cells."""
+        return len(self.x)
+
+
+def assemble(blocks, net, device):
+    """Return the run's state, with each block set up on it."""
+    x_start, t_forcing, p_forcing, dt_forcing, forcing_rows = [], [], [], [], 0
     meta = {q: [] for q in META}
-    c0 = 0
+    first_cell = 0
     for b in blocks:
-        off = np.zeros(b.n, np.int64)
-        for i, c in enumerate(b.cells):
-            m = int(b.nrow[i])
-            off[i] = off0
-            off0 += m
-            t_forcing.append(c["T"][:m]), p_forcing.append(c["P"][:m] * 1e6)
-            dt_forcing.append(c["dt"][:m] if b.dt is None else np.full(m, b.dt))
-            x_start.append(c["x0"] / c["x0"].sum())
+        forcing_start = np.zeros(b.n_paths, np.int64)
+        for i, path in enumerate(b.cells):
+            rows = int(b.rows_used[i])
+            forcing_start[i] = forcing_rows
+            forcing_rows += rows
+            t_forcing.append(path["T"][:rows]), p_forcing.append(path["P"][:rows] * 1e6)
+            dt_forcing.append(path["dt"][:rows] if b.dt is None else np.full(rows, b.dt))
+            x_start.append(path["x0"] / path["x0"].sum())
             for q in META:
-                meta[q].append(c["meta"][q])
-        b.setup(c0, off, dev)
-        c0 += b.n
+                meta[q].append(path["meta"][q])
+        b.setup(first_cell, forcing_start, device)
+        first_cell += b.n_paths
 
-    def tt(a):
-        return torch.as_tensor(np.concatenate(a), dtype=torch.float64, device=dev)
+    def flat(a):
+        return torch.as_tensor(np.concatenate(a), dtype=torch.float64, device=device)
 
-    x_state = torch.as_tensor(np.stack(x_start), device=dev)
-    atoms = torch.as_tensor(net.atoms, device=dev)
-    i_h = net.elements.index("H")
-    el = x_state @ atoms
-    N = len(x_start)
-
-    def z(*s, dt=torch.float64):
-        return torch.zeros(*s, dtype=dt, device=dev)
-
-    return {
-        "X": x_state,
-        "H": torch.full((N,), 1e-10, dtype=torch.float64, device=dev),
-        "T": tt(t_forcing),
-        "P": tt(p_forcing),
-        "dt": tt(dt_forcing),
-        "host": (np.concatenate(t_forcing), np.concatenate(p_forcing), np.concatenate(dt_forcing)),
-        "atoms": atoms,
-        "iH": i_h,
-        "ratio0": el / el[:, i_h : i_h + 1],
-        "meta": {q: np.array(v) for q, v in meta.items()},
-        "acc": z(N, 5),  # calls, accepted steps, unfinished, non-finite, negative
-        "cnt": z(N, 3),  # stored states, misses, large misses
-        "best": (z(N), torch.full((N,), -1, device=dev), torch.full((N,), -1, device=dev)),
-        "drift": z(N),
-        "N": N,
-    }
-
-
-def _print_tick(t, ticks, elapsed, since_last, cells, w, tot, fb):
-    """Print the loop's progress after tick t."""
-    print(
-        f"tick {t + 1:,} of {ticks:,}: {elapsed:.0f} s, {1e3 * since_last / ((t % READ) + 1):.2f} ms per "
-        f"tick (last {(t % READ) + 1:,}), {cells} cells this tick, "
-        f"paths with a miss "
-        f"{int((w > MISS).sum())}, worst {float(w.max()):.3f} dex, unfinished {tot[2]:.0f}, non-finite "
-        f"{tot[3]:.0f}, negative {tot[4]:.0f}, recomputed by the guard {fb.get('recomputed', 0)}",
-        flush=True,
+    x = torch.as_tensor(np.stack(x_start), device=device)
+    atoms = torch.as_tensor(net.atoms, device=device)
+    h_column = net.elements.index("H")
+    elements = x @ atoms
+    cells = len(x_start)
+    return PathRun(
+        x=x,
+        h=torch.full((cells,), START_STEP, dtype=torch.float64, device=device),
+        T=flat(t_forcing),
+        P=flat(p_forcing),
+        dt=flat(dt_forcing),
+        host_forcing=(np.concatenate(t_forcing), np.concatenate(p_forcing), np.concatenate(dt_forcing)),
+        atoms=atoms,
+        h_column=h_column,
+        start_ratio=elements / elements[:, h_column : h_column + 1],
+        meta={q: np.array(v) for q, v in meta.items()},
+        outcome=torch.zeros(cells, 5, dtype=torch.float64, device=device),
+        tally=ErrorTally(cells, device),
+        drift=torch.zeros(cells, dtype=torch.float64, device=device),
+        ticks=max(b.stride * (b.end - 1) + 1 for b in blocks),
     )
 
 
 def _stop_if_too_long(total, loop, ticks, force):
     """Print the full tier's estimate after the first READ ticks; stop above CAP_H hours unless forced."""
-    est = total + (ticks - READ) * loop / READ
+    estimate = total + (ticks - READ) * loop / READ
     print(
-        f"estimate: {est / 3600:.2f} h in all ({total / 60:.1f} min so far, then {ticks - READ:,} "
+        f"estimate: {estimate / 3600:.2f} h in all ({total / 60:.1f} min so far, then {ticks - READ:,} "
         f"ticks x {1e3 * loop / READ:.2f} ms per tick of ticks 1-{READ:,})",
         flush=True,
     )
-    if est > CAP_H * 3600 and not force:
+    if estimate > CAP_H * 3600 and not force:
         print(f"stopped: the estimate exceeds {CAP_H:g} h (--force runs it anyway)", flush=True)
         sys.exit(2)
 
 
-def _schedule(blocks, t, x_state, dev):
-    """Return the cells, forcing rows and blocks of tick t, after the mixes of its forcing rows."""
-    ids, offs, sched = [], [], []
+def _schedule(blocks, tick, x, device):
+    """Return the cells, forcing rows and blocks of this tick, after the mixes of its forcing rows."""
+    cells, forcing, scheduled = [], [], []
     for b in blocks:
-        if t % b.stride:
+        if tick % b.stride:
             continue
-        j = t // b.stride
+        j = tick // b.stride
         if j >= b.end:
             continue
-        b.live(j, dev)
-        if not b.nlive:
+        b.live(j, device)
+        if not b.n_live:
             continue
-        row = (j // b.rep) % b.cyc
-        if j % b.rep == 0:
-            b.mix(row, x_state)
-        ids.append(b.gidx), offs.append(b.goff + row), sched.append((b, j))
-    return ids, offs, sched
+        row = (j // b.calls_per_row) % b.cycle_rows
+        if j % b.calls_per_row == 0:
+            b.mix(row, x)
+        cells.append(b.live_cells), forcing.append(b.live_forcing + row), scheduled.append((b, j))
+    return cells, forcing, scheduled
 
 
-def run(blocks, S, solver, ticks, snap, full, force, t_all, gi, fl, dev):
-    """Run the tick loop; return timings, snapshots and the guard's counts."""
-    x_state, h_state, acc, best, drift = S["X"], S["H"], S["acc"], S["best"], S["drift"]
-    act, fb, snaps, snap_t, cellcalls = list(blocks), {}, [], [], 0
+def _advance(state, solver, cells, forcing):
+    """Make one dark call of these cells (the paths run without light), and add its counts."""
+    dark = torch.zeros(forcing.shape[0], solver.nj, dtype=torch.float64, device=solver.dev)
+    x_out, h_out, done, steps = solver(
+        state.x[cells], state.T[forcing], state.P[forcing], state.dt[forcing], state.h[cells], J=dark
+    )
+    state.x[cells], state.h[cells] = x_out, h_out
+    finite = torch.isfinite(x_out).all(1)
+    negative = x_out.min(1).values < 0
+    outcome = (torch.ones_like(steps), steps, (~done).double(), (~finite).double(), negative.double())
+    state.outcome.index_add_(0, cells, torch.stack(outcome, 1))
+    elements = x_out @ state.atoms
+    per_h = elements / elements[:, state.h_column : state.h_column + 1]
+    change = torch.log10(per_h / state.start_ratio[cells]).abs().nan_to_num(nan=0.0).max(1).values
+    state.drift[cells] = torch.maximum(state.drift[cells], change)
 
-    def lx():
-        return torch.log10(x_state[:, gi].clamp(min=1e-300)).maximum(fl).float().cpu().numpy()
 
-    t0 = tl = time.time()
-    for t in range(ticks):
-        ids, offs, sched = _schedule(act, t, x_state, dev)
-        if ids:
-            idx = ids[0] if len(ids) == 1 else torch.cat(ids)
-            fo = offs[0] if len(offs) == 1 else torch.cat(offs)
-            dark = torch.zeros(fo.shape[0], solver.nj, dtype=torch.float64, device=dev)  # these paths run without light
-            xo, ho, done, nok = solver(x_state[idx], S["T"][fo], S["P"][fo], S["dt"][fo], h_state[idx], J=dark)
-            add_fb(fb, solver)
-            x_state[idx], h_state[idx] = xo, ho
-            cellcalls += idx.numel()
-            fin = torch.isfinite(xo).all(1)
-            acc.index_add_(
-                0,
-                idx,
-                torch.stack(
-                    (torch.ones_like(nok), nok, (~done).double(), (~fin).double(), (xo.min(1).values < 0).double()), 1
-                ),
-            )
-            el = xo @ S["atoms"]
-            d = (
-                torch.log10(el / el[:, S["iH"] : S["iH"] + 1] / S["ratio0"][idx])
-                .abs()
-                .nan_to_num(nan=0.0)
-                .max(1)
-                .values
-            )
-            drift[idx] = torch.maximum(drift[idx], d)
-            for b, j in sched:
+def run(blocks, state, solver, gases, full, force, started):
+    """Run the tick loop of a tier; return timings, snapshots and the guard's counts.
+
+    full: the full tier, which reads back less often and can stop at its estimate (force: run on); started: the run's
+    start time.
+    """
+    device, ticks = solver.dev, state.ticks
+    snapshot_every = 10 * READ if full else READ
+    active, snapshots, snapshot_ticks, cell_calls = list(blocks), [], [], 0
+    start = solver.total.clone()
+    loop_start = last_read = time.time()
+    for tick in range(ticks):
+        cells, forcing, scheduled = _schedule(active, tick, state.x, device)
+        if cells:
+            cells = cells[0] if len(cells) == 1 else torch.cat(cells)
+            forcing = forcing[0] if len(forcing) == 1 else torch.cat(forcing)
+            _advance(state, solver, cells, forcing)
+            cell_calls += cells.numel()
+            for b, j in scheduled:
                 if b.truth:
-                    a, z = b.sb[j], b.sb[j + 1]
-                    if z > a:
-                        score(x_state, b.sc[a:z], b.st[a:z], j, best, S["cnt"], gi, fl)
-        if (t + 1) % READ == 0 or t + 1 == ticks:
-            w = best[0]
+                    first, stop = b.stored_start[j], b.stored_start[j + 1]
+                    if stop > first:
+                        state.tally.add(state.x, b.stored_cell[first:stop], b.stored_truth[first:stop], j, gases)
+        if (tick + 1) % READ == 0 or tick + 1 == ticks:
+            worst = state.tally.worst
             now = time.time()
-            if not full or (t + 1) % (100 * READ) == 0 or t + 1 in (READ, ticks):
-                _print_tick(t, ticks, now - t0, now - tl, sum(b.nlive for b, _ in sched), w, acc.sum(0).tolist(), fb)
-            tl = now
-            if (t + 1) % snap == 0:
-                snaps.append(lx()), snap_t.append(t + 1)
-            act = [b for b in act if (b.end - 1) * b.stride > t]
-            if full and t + 1 == READ:
-                _stop_if_too_long(now - t_all, now - t0, ticks, force)
+            if not full or (tick + 1) % (100 * READ) == 0 or tick + 1 in (READ, ticks):
+                totals = state.outcome.sum(0).tolist()
+                since_read = (tick % READ) + 1
+                print(
+                    f"tick {tick + 1:,} of {ticks:,}: {now - loop_start:.0f} s, "
+                    f"{1e3 * (now - last_read) / since_read:.2f} ms per tick (last {since_read:,}), "
+                    f"{sum(b.n_live for b, _ in scheduled)} cells this tick, paths with a "
+                    f"miss {int((worst > MISS).sum())}, worst {float(worst.max()):.3f} dex, "
+                    f"unfinished {totals[2]:.0f}, non-finite {totals[3]:.0f}, negative {totals[4]:.0f}, "
+                    f"recomputed by the guard {counts_since(solver, start)['recomputed']}",
+                    flush=True,
+                )
+            last_read = now
+            if (tick + 1) % snapshot_every == 0:
+                snapshots.append(gases.snapshot(state.x)), snapshot_ticks.append(tick + 1)
+            active = [b for b in active if (b.end - 1) * b.stride > tick]
+            if full and tick + 1 == READ:
+                _stop_if_too_long(now - started, now - loop_start, ticks, force)
     torch.cuda.synchronize()
+    guard = counts_since(solver, start)
     return {
-        "loop_s": time.time() - t0,
+        "loop_s": time.time() - loop_start,
         "ticks": ticks,
-        "cellcalls": cellcalls,
-        "snap_tick": np.array(snap_t),
-        "snap_lx": np.stack(snaps) if snaps else np.zeros((0, S["N"], 12), np.float32),
-        "final_lx": lx(),
-        "fallback_loop": np.array([fb.get(q, 0) for q in KEYS_FB]),
+        "cellcalls": cell_calls,
+        "snap_tick": np.array(snapshot_ticks),
+        "snap_lx": np.stack(snapshots) if snapshots else np.zeros((0, state.n_cells, len(GASES)), np.float32),
+        "final_lx": gases.snapshot(state.x),
+        "fallback_loop": np.array([guard[q] for q in GUARD_KEYS]),
     }
 
 
-def results(blocks, S):
+def path_results(blocks, state):
     """Per-cell counters and metadata as numpy arrays (the saved per-path summaries)."""
-    acc, cnt = S["acc"].cpu().numpy(), S["cnt"].cpu().numpy()
-    res = dict(
-        block_names=np.array([b.name for b in blocks]),
-        truth_block=np.array([b.truth for b in blocks]),
-        block_of=np.concatenate([np.full(b.n, i) for i, b in enumerate(blocks)]),
-        mixed=np.concatenate([b.mixed for b in blocks]),
-        **S["meta"],
+    results = {
+        "block_names": np.array([b.name for b in blocks]),
+        "truth_block": np.array([b.truth for b in blocks]),
+        "block_of": np.concatenate([np.full(b.n_paths, i) for i, b in enumerate(blocks)]),
+        "mixed": np.concatenate([b.mixed for b in blocks]),
+        **state.meta,
+    }
+    results["worst"], results["kworst"], results["gworst"] = state.tally.numpy()
+    results["stored"], results["nmiss"], results["nlarge"] = state.tally.counts.cpu().numpy().T
+    results["calls"], results["steps"], results["unfinished"], results["nonfinite"], results["negative"] = (
+        state.outcome.cpu().numpy().T
     )
-    res["worst"], res["kworst"], res["gworst"] = (q.cpu().numpy() for q in S["best"])
-    res["stored"], res["nmiss"], res["nlarge"] = cnt.T
-    res["calls"], res["steps"], res["unfinished"], res["nonfinite"], res["negative"] = acc.T
-    res["drift"] = S["drift"].cpu().numpy()
-    return res
+    results["drift"] = state.drift.cpu().numpy()
+    return results
 
 
-def line(name, s, res, truth):
+def path_line(name, s, results, truth):
     """One misses-first line for the paths s."""
-    w, calls = res["worst"][s], res["calls"][s].sum()
-    um = s & ~res["mixed"]
-    dr = f"{res['drift'][um].max():.1e} dex" if um.any() else "-"
+    worst, calls = results["worst"][s], results["calls"][s].sum()
+    unmixed = s & ~results["mixed"]
+    drift = f"{results['drift'][unmixed].max():.1e} dex" if unmixed.any() else "-"
     head = f"  {name:10s} {int(s.sum()):5d} paths"
     if truth:
         head += (
-            f": miss {100 * (w > MISS).mean():5.1f} %  large {100 * (w > LARGE).mean():5.1f} %  worst {w.max():.3f} | "
-            f"stored states {int(res['stored'][s].sum()):,}: miss {int(res['nmiss'][s].sum())} large "
-            f"{int(res['nlarge'][s].sum())}"
+            f": miss {100 * (worst > MISS).mean():5.1f} %  large {100 * (worst > LARGE).mean():5.1f} %  "
+            f"worst {worst.max():.3f} | stored states {int(results['stored'][s].sum()):,}: "
+            f"miss {int(results['nmiss'][s].sum())} large {int(results['nlarge'][s].sum())}"
         )
     print(
-        head + f" | calls {int(calls):,}: unfinished {int(res['unfinished'][s].sum())} non-finite "
-        f"{int(res['nonfinite'][s].sum())} negative {int(res['negative'][s].sum())} | "
-        f"element drift after the correction (unmixed) {dr} | "
-        f"steps per call {res['steps'][s].sum() / max(calls, 1):.3f}"
+        head + f" | calls {int(calls):,}: unfinished {int(results['unfinished'][s].sum())} non-finite "
+        f"{int(results['nonfinite'][s].sum())} negative {int(results['negative'][s].sum())} | "
+        f"element drift after the correction (unmixed) {drift} | "
+        f"steps per call {results['steps'][s].sum() / max(calls, 1):.3f}"
     )
 
 
-def report(blocks, res, lres, S):
+def report(blocks, results, loop_results, state):
     """Print the report, misses first.
 
-    Misses first: totals over the truth paths, then per block (split by panel and kind; breakdowns by stratum,
+    Totals over the truth paths, then per block (split by panel and kind; breakdowns by stratum,
     start and composition; the worst paths), then timings and the guard's counts.
     """
-    tr = res["truth_block"][res["block_of"]]
-    w = np.where(tr, res["worst"], -1.0)
-    c = int(np.argmax(w))
+    has_truth = results["truth_block"][results["block_of"]]
+    worst = np.where(has_truth, results["worst"], -1.0)
+    c = int(np.argmax(worst))
     print(
-        f"\nMISSES FIRST. qual truth paths {int(tr.sum()):,}: with a miss {int((w > MISS).sum())}, with a large miss "
-        f"{int((w > LARGE).sum())}; stored states {int(res['stored'].sum()):,}: with a miss "
-        f"{int(res['nmiss'].sum())}, large "
-        f"{int(res['nlarge'].sum())}; worst {w[c]:.3f} dex "
-        f"({res['block_names'][res['block_of'][c]]}, path {res['id'][c]}); "
-        f"all blocks: unfinished calls {int(res['unfinished'].sum())}, "
-        f"non-finite states {int(res['nonfinite'].sum())}, "
-        f"negative {int(res['negative'].sum())}"
+        f"\nMISSES FIRST. qual truth paths {int(has_truth.sum()):,}: with a miss {int((worst > MISS).sum())}, "
+        f"with a large miss {int((worst > LARGE).sum())}; stored states {int(results['stored'].sum()):,}: with a miss "
+        f"{int(results['nmiss'].sum())}, large "
+        f"{int(results['nlarge'].sum())}; worst {worst[c]:.3f} dex "
+        f"({results['block_names'][results['block_of'][c]]}, path {results['id'][c]}); "
+        f"all blocks: unfinished calls {int(results['unfinished'].sum())}, "
+        f"non-finite states {int(results['nonfinite'].sum())}, "
+        f"negative {int(results['negative'].sum())}"
     )
-    t_forcing, p_forcing, dt_forcing = S["host"]
-    for bi, b in enumerate(blocks):
-        s = res["block_of"] == bi
-        print(f"{b.name}: {b.n} paths, up to {b.ncall:,} calls (every {b.stride} tick{'s' if b.stride > 1 else ''})")
-        lab = np.char.add(np.char.add(res["panel"], " "), res["kind"])
-        for v in dict.fromkeys(lab[s]):
-            line(v, s & (lab == v), res, b.truth)
+    t_forcing, p_forcing, dt_forcing = state.host_forcing
+    for block_number, b in enumerate(blocks):
+        s = results["block_of"] == block_number
+        every = f"every {b.stride} tick{'s' if b.stride > 1 else ''}"
+        print(f"{b.name}: {b.n_paths} paths, up to {b.calls:,} calls ({every})")
+        labels = np.char.add(np.char.add(results["panel"], " "), results["kind"])
+        for label in dict.fromkeys(labels[s]):
+            path_line(label, s & (labels == label), results, b.truth)
         if not b.truth:
             continue
         for key in ("stratum", "start", "comp"):
             parts = []
-            for v in np.unique(res[key][s]):
-                q = s & (res[key] == v)
+            for value in np.unique(results[key][s]):
+                q = s & (results[key] == value)
                 parts.append(
-                    f"{v} {int(q.sum())} (miss {int((res['worst'][q] > MISS).sum())}, "
-                    f"worst {res['worst'][q].max():.3f})"
+                    f"{value} {int(q.sum())} (miss {int((results['worst'][q] > MISS).sum())}, "
+                    f"worst {results['worst'][q].max():.3f})"
                 )
             print(f"    by {key}: " + "; ".join(parts))
         print("    worst paths:")
-        for c in b.c0 + np.argsort(-res["worst"][s])[:5]:
-            i, j = c - b.c0, int(res["kworst"][c])
+        for c in b.first_cell + np.argsort(-results["worst"][s])[:5]:
+            i, j = c - b.first_cell, int(results["kworst"][c])
             if j < 0:
                 continue
-            f = b.off[i] + (j // b.rep) % b.cyc
-            seg = b.cells[i]["seg"]
-            where = f" seg {seg[1][int(np.searchsorted(seg[0], j // b.rep, side='right')) - 1]}" if seg else ""
+            row = b.forcing_start[i] + (j // b.calls_per_row) % b.cycle_rows
+            segments = b.cells[i]["seg"]
+            where = ""
+            if segments:
+                where = f" seg {segments[1][int(np.searchsorted(segments[0], j // b.calls_per_row, side='right')) - 1]}"
             print(
-                f"      {res['id'][c]} {res['panel'][c]} {res['kind'][c]} {res['stratum'][c]} "
-                f"{res['start'][c]} {res['comp'][c]}: "
-                f"{res['worst'][c]:.3f} dex in {GASES[res['gworst'][c]]} at call {j}{where} (T {t_forcing[f]:.0f} K, P "
-                f"{p_forcing[f] / 1e6:.2e} bar, dt {dt_forcing[f]:.1f} s); "
-                f"stored states with a miss {int(res['nmiss'][c])}"
+                f"      {results['id'][c]} {results['panel'][c]} {results['kind'][c]} {results['stratum'][c]} "
+                f"{results['start'][c]} {results['comp'][c]}: "
+                f"{results['worst'][c]:.3f} dex in {GASES[results['gworst'][c]]} at call {j}{where} "
+                f"(T {t_forcing[row]:.0f} K, P {p_forcing[row] / 1e6:.2e} bar, dt {dt_forcing[row]:.1f} s); "
+                f"stored states with a miss {int(results['nmiss'][c])}"
             )
     print(
-        f"loop: {lres['ticks']:,} ticks in {lres['loop_s']:.0f} s = "
-        f"{1e3 * lres['loop_s'] / lres['ticks']:.3f} ms per tick; "
-        f"{lres['cellcalls']:,} cell-calls = {1e6 * lres['loop_s'] / lres['cellcalls']:.3f} us per cell-call; guard "
-        f"{dict(zip(KEYS_FB, lres['fallback_loop'].tolist(), strict=True))}"
+        f"loop: {loop_results['ticks']:,} ticks in {loop_results['loop_s']:.0f} s = "
+        f"{1e3 * loop_results['loop_s'] / loop_results['ticks']:.3f} ms per tick; "
+        f"{loop_results['cellcalls']:,} cell-calls = "
+        f"{1e6 * loop_results['loop_s'] / loop_results['cellcalls']:.3f} us per cell-call; guard "
+        f"{dict(zip(GUARD_KEYS, loop_results['fallback_loop'].tolist(), strict=True))}"
+    )
+
+
+def _paired_line(name, s, ids, worst, state_change, steps, unfinished):
+    """One line of a paired run: worst is (new, ref) per path, None without truth; steps, unfinished (new, ref)."""
+    text = f"  {name:24s} {int(s.sum()):7,d} paths"
+    if worst is not None:
+        rise = np.nan_to_num(worst[0][s] - worst[1][s], nan=np.inf, posinf=np.inf, neginf=-np.inf)
+        most, least = int(np.argmax(rise)), int(np.argmin(rise))
+        text += (
+            f" | worst error new - ref: mean {rise[np.isfinite(rise)].mean() if np.isfinite(rise).any() else 0:+.5f}, "
+            f"largest rise {rise[most]:+.4f} ({ids[s][most]}), largest fall {rise[least]:+.4f} ({ids[s][least]}); "
+            f"|change| > 0.01: {int((np.abs(rise) > 0.01).sum())}, > 0.03: {int((np.abs(rise) > 0.03).sum())}"
+        )
+    print(
+        text + f" | state change > 0.01: {int((state_change[s] > 0.01).sum())}, "
+        f"> 0.03: {int((state_change[s] > 0.03).sum())} (largest {state_change[s].max():.2e}) | "
+        f"steps per call {steps[0]:.3f} vs {steps[1]:.3f} | unfinished {int(unfinished[0])} vs {int(unfinished[1])}"
     )
 
 
@@ -573,71 +642,59 @@ def compare(new, ref):
         assert np.array_equal(np.asarray(new[k]), np.asarray(ref[k])), f"runs differ in {k}: not comparable"
     assert np.array_equal(new["snap_tick"], ref["snap_tick"])
 
-    def lat(z):
+    def latency(z):
         return (1e3 * float(z["loop_s"]) / int(z["ticks"]), 1e6 * float(z["b_s"]) / int(z["b_cellcalls"]))
 
-    (m1, y1), (m0, y0) = lat(new), lat(ref)
+    (tick_new, box_new), (tick_ref, box_ref) = latency(new), latency(ref)
     print(
-        f"\nPAIRED with the reference (tier {new['tier']}): latency loop {m1:.3f} vs {m0:.3f} ms per tick "
-        f"({m1 / m0:.2f}x), boxes {y1:.3f} vs {y0:.3f} us per cell-call ({y1 / y0:.2f}x)"
+        f"\nPAIRED with the reference (tier {new['tier']}): latency loop {tick_new:.3f} vs {tick_ref:.3f} ms per tick "
+        f"({tick_new / tick_ref:.2f}x), boxes {box_new:.3f} vs {box_ref:.3f} us per cell-call "
+        f"({box_new / box_ref:.2f}x)"
     )
 
-    def spc(z, s):
+    def steps_per_call(z, s):
         return z["steps"][s].sum() / max(z["calls"][s].sum(), 1)
 
-    def dif(a, b):
+    def difference(a, b):
         return np.nan_to_num(np.abs(np.asarray(a, np.float64) - np.asarray(b, np.float64)), nan=np.inf)
 
-    ds = np.maximum(
-        dif(new["final_lx"], ref["final_lx"]).max(1),
-        dif(new["snap_lx"], ref["snap_lx"]).max((0, 2)) if len(new["snap_tick"]) else 0.0,
+    change = np.maximum(
+        difference(new["final_lx"], ref["final_lx"]).max(1),
+        difference(new["snap_lx"], ref["snap_lx"]).max((0, 2)) if len(new["snap_tick"]) else 0.0,
     )
-
-    def row(name, s, truth, w1, w0, st, c1, c0, u1, u0, ids):
-        txt = f"  {name:24s} {int(s.sum()):7,d} paths"
-        if truth:
-            dw = np.nan_to_num(w1[s] - w0[s], nan=np.inf, posinf=np.inf, neginf=-np.inf)
-            i, k = int(np.argmax(dw)), int(np.argmin(dw))
-            txt += (
-                f" | worst error new - ref: mean {dw[np.isfinite(dw)].mean() if np.isfinite(dw).any() else 0:+.5f}, "
-                f"largest rise {dw[i]:+.4f} ({ids[s][i]}), largest fall {dw[k]:+.4f} ({ids[s][k]}); |change| "
-                f"> 0.01: {int((np.abs(dw) > 0.01).sum())}, > 0.03: {int((np.abs(dw) > 0.03).sum())}"
-            )
-        print(
-            txt + f" | state change > 0.01: {int((st[s] > 0.01).sum())}, > 0.03: {int((st[s] > 0.03).sum())} (largest "
-            f"{st[s].max():.2e}) | steps per call {c1:.3f} vs {c0:.3f} | unfinished {int(u1)} vs {int(u0)}"
-        )
-
-    for bi, name in enumerate(new["block_names"]):
-        s = new["block_of"] == bi
-
-        row(
+    for block_number, name in enumerate(new["block_names"]):
+        s = new["block_of"] == block_number
+        _paired_line(
             str(name),
             s,
-            bool(new["truth_block"][bi]),
-            new["worst"],
-            ref["worst"],
-            ds,
-            spc(new, s),
-            spc(ref, s),
-            new["unfinished"][s].sum(),
-            ref["unfinished"][s].sum(),
             new["id"],
+            (new["worst"], ref["worst"]) if new["truth_block"][block_number] else None,
+            change,
+            (steps_per_call(new, s), steps_per_call(ref, s)),
+            (new["unfinished"][s].sum(), ref["unfinished"][s].sum()),
         )
-    bs = np.ones(len(new["b_box"]), bool)
-    row(
+    _paired_line(
         "boxes",
-        bs,
-        True,
-        new["b_worst"],
-        ref["b_worst"],
-        dif(new["b_lx"], ref["b_lx"]).max(1),
-        new["b_steps"].sum() / new["b_calls"].sum(),
-        ref["b_steps"].sum() / ref["b_calls"].sum(),
-        new["b_unfinished"].sum(),
-        ref["b_unfinished"].sum(),
+        np.ones(len(new["b_box"]), bool),
         new["b_box"],
+        (new["b_worst"], ref["b_worst"]),
+        difference(new["b_lx"], ref["b_lx"]).max(1),
+        (new["b_steps"].sum() / new["b_calls"].sum(), ref["b_steps"].sum() / ref["b_calls"].sum()),
+        (new["b_unfinished"].sum(), ref["b_unfinished"].sum()),
     )
+
+
+def _paths_digest(blocks):
+    """Return a digest of the paths' truth and forcing, for paired runs."""
+    digest = hashlib.sha256()
+    for b in blocks:
+        for path in b.cells:
+            for v in (path["T"], path["P"], path["dt"], path["x0"], path["rows"], path["truth"]):
+                if v is not None:
+                    digest.update(np.ascontiguousarray(v).tobytes())
+            for row, fraction, gas in path["mix"]:
+                digest.update(np.array([row, fraction]).tobytes() + np.ascontiguousarray(gas).tobytes())
+    return digest.hexdigest()[:16]
 
 
 def main():
@@ -650,63 +707,61 @@ def main():
     a = ap.parse_args()
     if a.save and Path(a.save).exists():
         sys.exit(f"{a.save} exists; not overwriting")
-    paths.need(paths.QUAL / "QC", paths.DESIGNS / "decision/P", paths.BOXES, *([a.ref] if a.ref else []))
+    paths.need(paths.qual() / "QC", paths.designs() / "decision/P", paths.boxes(), *([a.ref] if a.ref else []))
     check_jobs()
     ref = np.load(a.ref) if a.ref else None
-    t_all = time.time()
-    dev = torch.device("cuda")
+    started = time.time()
+    device = torch.device("cuda")
     quick = a.tier == "quick"
-    sp = [str(q) for q in np.load(min((paths.QUAL / "QC").glob("*.npz")))["species"]]
-    gi = [sp.index(g) for g in GASES]
-    net = kinvulcan.VulcanNetwork(
-        f"{paths.VULCAN_THERMO}/NCHO_photo_network.txt", f"{paths.VULCAN_THERMO}/NASA9", species=sp
-    )
-    solver = kincuda.CudaSolver(net, dev, photo=True)
-    gi_t, fl = torch.tensor(gi, device=dev), torch.tensor(FLOOR, device=dev)
+    species = [str(q) for q in np.load(min((paths.qual() / "QC").glob("*.npz")))["species"]]
+    columns = [species.index(g) for g in GASES]
+    thermo = paths.vulcan_thermo()
+    net = kinvulcan.VulcanNetwork(f"{thermo}/NCHO_photo_network.txt", f"{thermo}/NASA9", species=species)
+    solver = kincuda.CudaSolver(net, device, photo=True)
+    gases = ScoredGases(columns, torch.tensor(columns, device=device), torch.tensor(FLOOR, device=device))
     print(
-        f"{a.tier}: {torch.cuda.get_device_name(dev)}, kernel ready ({solver.wpb} warps per block), "
-        f"{time.time() - t_all:.0f} s",
+        f"{a.tier}: {torch.cuda.get_device_name(device)}, kernel ready ({solver.wpb} warps per block), "
+        f"{time.time() - started:.0f} s",
         flush=True,
     )
-    box_out = boxes(solver, net, sp, gi, gi_t, fl, 32768 if quick else None, dev)
-    blocks = make_blocks(a.tier, sp, gi)
-    qh = hashlib.sha256()  # the paths' truth and forcing, for paired runs
-    for b in blocks:
-        for c in b.cells:
-            for v in (c["T"], c["P"], c["dt"], c["x0"], c["rows"], c["truth"]):
-                if v is not None:
-                    qh.update(np.ascontiguousarray(v).tobytes())
-            for at, fr, y in c["mix"]:
-                qh.update(np.array([at, fr]).tobytes() + np.ascontiguousarray(y).tobytes())
-    S = assemble(blocks, net, dev)
-    ticks = max(b.stride * (b.end - 1) + 1 for b in blocks)
-    print(f"{len(blocks)} blocks, {S['N']:,} cells, {ticks:,} ticks; set up in {time.time() - t_all:.0f} s", flush=True)
-    lres = run(blocks, S, solver, ticks, READ if quick else 10 * READ, not quick, a.force, t_all, gi_t, fl, dev)
-    solver.check()  # raises if any cell was below 300 K
-    res = results(blocks, S)
-    report(blocks, res, lres, S)
-    res.update(lres, **box_out, tier=np.array(a.tier), q_set=np.array(qh.hexdigest()[:16]))
+    box_results = boxes(solver, net, species, gases, QUICK_BOXES if quick else None)
+    blocks = make_blocks(a.tier, species, columns)
+    paths_digest = _paths_digest(blocks)
+    state = assemble(blocks, net, device)
     print(
-        f"wall time {time.time() - t_all:.0f} s (boxes {box_out['b_s']:.0f} s, loop {lres['loop_s']:.0f} s)",
+        f"{len(blocks)} blocks, {state.n_cells:,} cells, {state.ticks:,} ticks; "
+        f"set up in {time.time() - started:.0f} s",
+        flush=True,
+    )
+    loop_results = run(blocks, state, solver, gases, not quick, a.force, started)
+    solver.check()  # raises if any cell was below 300 K
+    results = path_results(blocks, state)
+    report(blocks, results, loop_results, state)
+    record = run_record(thermo / "NCHO_photo_network.txt", thermo / "NASA9", species, solver.drift, a)
+    results |= loop_results | box_results
+    results |= {"tier": np.array(a.tier), "q_set": np.array(paths_digest), "run": np.array(json.dumps(record))}
+    print(
+        f"wall time {time.time() - started:.0f} s "
+        f"(boxes {box_results['b_s']:.0f} s, loop {loop_results['loop_s']:.0f} s)",
         flush=True,
     )
     if a.save:
         Path(a.save).parent.mkdir(parents=True, exist_ok=True)
-        np.savez(a.save, **res)
+        np.savez(a.save, **results)
         print(f"saved {a.save}")
     if ref is not None:
-        compare(res, ref)
-    tr = res["truth_block"][res["block_of"]]
+        compare(results, ref)
+    has_truth = results["truth_block"][results["block_of"]]
     fail = int(
-        (np.where(tr, res["worst"], 0.0) > MISS).sum()
-        + (box_out["b_worst"] > MISS).sum()
-        + res["unfinished"].sum()
-        + res["nonfinite"].sum()
-        + res["negative"].sum()
-        + box_out["b_unfinished"].sum()
-        + box_out["b_nonfinite"].sum()
-        + box_out["fallback_boxes"][KEYS_FB.index("still_failed")]
-        + res["fallback_loop"][KEYS_FB.index("still_failed")]
+        (np.where(has_truth, results["worst"], 0.0) > MISS).sum()
+        + (box_results["b_worst"] > MISS).sum()
+        + results["unfinished"].sum()
+        + results["nonfinite"].sum()
+        + results["negative"].sum()
+        + box_results["b_unfinished"].sum()
+        + box_results["b_nonfinite"].sum()
+        + box_results["fallback_boxes"][GUARD_KEYS.index("still_failed")]
+        + results["fallback_loop"][GUARD_KEYS.index("still_failed")]
     )
     if fail:
         sys.exit(

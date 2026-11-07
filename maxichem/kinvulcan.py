@@ -1,8 +1,7 @@
 """Read VULCAN's reaction lists and NASA-9 files as data.
 
-Public names: ``VulcanNetwork``, ``formula``, ``SPECIAL``, ``KB``, ``P0``. The rate laws are in docs/method.md, the
-object's attributes in docs/api.md. Each reaction dict holds its law: kind (2 two-body, 3 falloff, 5 low-pressure
-only, 6 special), the Arrhenius terms, and optional troe, width and eff.
+The rate laws are in docs/method.md, the object's attributes in docs/api.md. Each reaction dict holds its law: kind (2
+two-body, 3 falloff, 5 low-pressure only, 6 special), the Arrhenius terms, and optional troe, width and eff.
 """
 
 import ast
@@ -16,12 +15,13 @@ __all__ = ["KB", "MAX_GIBBS_JUMP", "P0", "SPECIAL", "VulcanNetwork", "formula"]
 
 KB = 1.380649e-16  # erg K^-1
 P0 = 1.0e6  # dyn cm^-2 (1 bar)
-NASA_SPLIT_T = 1000.0  # K: where the NASA-9 fits change range (the kernels' NASA_SPLIT_T)
+NASA_SPLIT_T = 1000.0  # K: where the NASA-9 fits change range; the kernels get it through their header
 # Largest |G/RT, low range - G/RT, high range| at NASA_SPLIT_T. Sound fits meet: over the 11 networks the largest jump
 # is 1.6e-6 (TiC). TiH, at 0.143, is refused on purpose, and TiSNCHO with it: below 1000 K its fit has Cp / R from -36
 # to 819 (notes.md). A file with a wrong coefficient set reaches 17.6 (HNO3 with its below-200 K set read as the low
 # range).
 MAX_GIBBS_JUMP = 1.0e-5
+TROE_FIELDS = 4  # the a, T3, T1, T2 of a "Troe [...]" line
 NASA_FILE_SIZES = (20, 30, 40)  # numbers in a NASA-9 file: two to four ranges of 10 (those past the second are unused)
 
 
@@ -73,6 +73,13 @@ def _reaction_line(line: str, where: str) -> tuple[str, list[str]]:
     return equation.strip(), fields.split()
 
 
+def _finite(values: list[float], where: str, line: str) -> list[float]:
+    """Return rate coefficients that are all finite; a NaN prefactor would pass as a zero rate."""
+    if not np.isfinite(values).all():
+        raise ValueError(f"{where}: finite rate coefficients expected, got {values}: {line}")
+    return values
+
+
 def _numbers(fields: list[str], count: int, where: str, line: str) -> list[float]:
     """Return the first count fields as numbers."""
     try:
@@ -81,7 +88,7 @@ def _numbers(fields: list[str], count: int, where: str, line: str) -> list[float
         raise ValueError(f"{where}: {count} rate coefficients expected: {line}") from None
     if len(values) < count:
         raise ValueError(f"{where}: {count} rate coefficients expected, found {len(values)}: {line}")
-    return values
+    return _finite(values, where, line)
 
 
 def _photolysis_branch(line: str, where: str, photo: list[dict[str, Any]]) -> dict[str, Any]:
@@ -91,10 +98,14 @@ def _photolysis_branch(line: str, where: str, photo: list[dict[str, Any]]) -> di
         raise ValueError(f"{where}: a photolysis line needs its absorber and branch index: {line}")
     lhs, rhs = ([q.strip() for q in side.split("+")] for side in equation.split("->"))
     if lhs != [fields[0]]:
-        raise ValueError(f"photolysis line whose reactant is not its absorber {fields[0]}: {line}")
-    if (fields[0], int(fields[1])) in {(r["absorber"], r["branch"]) for r in photo}:
-        raise ValueError(f"two photolysis lines for absorber {fields[0]}, branch {fields[1]}")
-    return {"eq": equation, "names": (lhs, rhs), "absorber": fields[0], "branch": int(fields[1])}
+        raise ValueError(f"{where}: a photolysis line whose reactant is not its absorber {fields[0]}: {line}")
+    try:
+        branch = int(fields[1])
+    except ValueError:
+        raise ValueError(f"{where}: a photolysis branch index must be an integer: {line}") from None
+    if (fields[0], branch) in {(r["absorber"], r["branch"]) for r in photo}:
+        raise ValueError(f"{where}: two photolysis lines for absorber {fields[0]}, branch {branch}")
+    return {"eq": equation, "names": (lhs, rhs), "absorber": fields[0], "branch": branch}
 
 
 def _thermal_reaction(line: str, where: str, section: str) -> dict[str, Any]:
@@ -127,13 +138,21 @@ def _extra_line(line: str, where: str, reactions: list[dict[str, Any]], bulk: st
     """Add a "Troe [...]" or "effi {...}" line to the reaction above it."""
     if not reactions:
         raise ValueError(f"{where}: this line must follow a reaction: {line}")
+    try:
+        values = ast.literal_eval(line[4:].strip())
+    except (ValueError, SyntaxError):
+        raise ValueError(f"{where}: this line's list or dict cannot be read: {line}") from None
     if line.startswith("Troe"):
-        reactions[-1]["troe"] = tuple(float(v) for v in ast.literal_eval(line[4:].strip()))
+        if len(values) != TROE_FIELDS:
+            raise ValueError(
+                f"{where}: a Troe line holds {TROE_FIELDS} numbers (a, T3, T1, T2), got {len(values)}: {line}"
+            )
+        reactions[-1]["troe"] = tuple(_finite([float(v) for v in values], where, line))
         return
-    efficiencies = ast.literal_eval(line[4:].strip())
+    efficiencies = values
     if bulk not in efficiencies:
         raise ValueError(f"{where}: no efficiency for the bulk gas {bulk}; pass another bulk: {line}")
-    reactions[-1]["eff"] = float(efficiencies[bulk])
+    reactions[-1]["eff"] = _finite([float(efficiencies[bulk])], where, line)[0]
 
 
 def _check_comment(low: str, line: str, where: str) -> None:
@@ -237,6 +256,9 @@ class VulcanNetwork:
     ) -> None:
         reactions, photo, self.skipped = _read_reactions(network_file, bulk)
         self.species = self._species_order(reactions) if species is None else list(species)
+        repeated = sorted({name for name in self.species if self.species.count(name) > 1})
+        if repeated:
+            raise ValueError(f"species names {repeated} more than once: a name is one row of the state; drop repeats")
         self.lo, self.hi = self._read_nasa9(nasa_dir)
         self.reac = reactions
         self._index_species(reactions, network_file)

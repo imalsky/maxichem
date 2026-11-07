@@ -13,10 +13,11 @@ uvx pre-commit install
 
 ```bash
 uvx pre-commit run --all-files   # format, lint, types, spelling, size limits
-uv run pytest                    # tests; `-m "not slow and not gpu"` is what CI runs
+uv run pytest -m "not slow and not gpu"   # what CI runs
 ```
 
-GPU tests run on a machine with a GPU and never in CI.
+GPU tests run on a machine with a GPU and never in CI. They and the slow tests need `VULCAN_THERMO`, `CHEM_DATA` (README.md) and a
+CUDA toolkit, and fail with a message naming what is missing.
 
 ## What a change needs
 

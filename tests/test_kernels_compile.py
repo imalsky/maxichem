@@ -2,14 +2,14 @@
 
 import pytest
 
-from maxichem import _ad_tables, _cuda, _kernel_header, _tables
+from maxichem import _ad_tables, _constants, _cuda, _kernel_header, _tables
 
 ARCH = "89"  # sm_89: the RTX 6000 Ada, the card the kernels run on
 
 
 def _compile(tab):
     """Compile the solver's kernels for these tables."""
-    sources = _kernel_header.kernel_sources(_kernel_header.call_header(tab, 1))
+    sources = _kernel_header.kernel_sources(_kernel_header.call_header(tab, 1, True, _constants.DRIFT))
     return _cuda.compile_cubin(_cuda.SOLVER_KERNELS, sources, ARCH)
 
 
@@ -33,5 +33,7 @@ def test_call_kernels_compile_for_a_small_network(read_network):
 def test_derivative_kernels_compile(read_network, kind):
     net = read_network()
     tab = _tables.tables(net, 2, True)
-    header = _kernel_header.derivative_header(tab, _ad_tables.ad_tables(net, tab), kind, 2)
+    header = _kernel_header.derivative_header(
+        tab, _ad_tables.ad_tables(net, tab), kind, 2, _constants.CAP, _constants.DRIFT
+    )
     assert _cuda.compile_cubin(f"{kind}.cu", _kernel_header.kernel_sources(header), ARCH)

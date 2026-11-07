@@ -59,7 +59,7 @@ gitignored); it holds the truth sets, benches, the checks' references and the ca
 
 ## Judging results
 - A miss is a scored point whose floored error against VULCAN is above 0.1 dex; a large miss is above 1 dex. The 12
-  scored gases and their floors are in `bench/kintest.py`. A non-finite prediction is a failed step, never a zero error.
+  scored gases and their floors are in `maxichem/_checks.py`. A non-finite prediction is a failed step, never a zero error.
 - Lead every report with the misses: the share of rows and of start states with any miss and with any large miss, and
   the worst error. Never call a model close to VULCAN on an averaged score alone; read the worst cases first.
 
@@ -90,7 +90,7 @@ from source with `../.cuda`); the shared `../.venv` keeps the released snapy whe
 - Numerics: a change of method, tolerance, pivoting, step control or the constant-P form
   (dx/dt = (S v - x sum(S v)) / n_tot) is a numerics change. It has to be checked against VULCAN; it is never a cleanup.
   The method is in `docs/method.md`; the production settings are named constants.
-- The checks' references are stored files: `paths.LIBREF` holds the torch reference solver's outputs on exactly the
+- The checks' references are stored files: `paths.libref()` holds the torch reference solver's outputs on exactly the
   checks' inputs. `tests/libref.py` refuses inputs whose digest differs (network files, inputs, max_steps). A change of
   a check's inputs or of the numerics needs a new reference, made with `../reference/make_libref.py`. If a reference
   file is missing, the check stops with a message naming it (`paths.need`).
@@ -106,6 +106,7 @@ every edit, and never on a GPU where a timing is running. `docs/testing.md` list
 - Before a commit: `uvx pre-commit run --files <changed files>`.
   clang-tidy reads `build/kernels/network.h`: run `PYTHONPATH=. python tools/write_kernel_header.py` when the header's macros change.
 - After any code change: `pytest -m "not slow and not gpu"` (CPU, under a minute).
+- After a change to the reader, the packaging or the kernels' tables: `pytest -m "slow and not gpu"` (with `VULCAN_THERMO` set).
 - After a change under `maxichem/`: `pytest tests/test_parity.py tests/test_guard.py -m gpu -s` (with `VULCAN_THERMO` set).
   The bar is 1e-6 dex against the stored references (one cell-call in 100,000 may reach 1e-5). Also `pytest
   tests/test_vulcan_truth.py -s`: 0 misses against VULCAN, and no path's worst error may change by more than 0.01 dex.

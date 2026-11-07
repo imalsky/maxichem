@@ -9,9 +9,9 @@
 // x [B, ns] mole fractions in the network's species order, T [B] K, P [B] dyn cm^-2, dt [B] s, h [B] the
 // starting step sizes (all float64 on the solver's device); J [B, nj] s^-1, required for a network exported with
 // photo=True (zeros for dark cells). Returns the new mole fractions, the next step sizes, done (bool) and the accepted
-// steps per cell (float64). No host sync: `count` holds the call's counts on the device (int32 [11]: queue,
+// steps per cell (float64). No host sync: `count` holds the call's counts on the device (int32: queue,
 // then bad_input, cold, nonfinite, unfinished, drift, recomputed, recovered, still_failed, nonfinite_h, then the
-// recovery's queue) and `total` their sum since construction (int64 [11]).
+// recovery's queue) and `total` their sum since construction (int64).
 //
 // The cubin is for one GPU architecture (meta.txt "arch"): export on the machine that runs it.
 // Calls share the scratch and the counts, so they run one at a time: on one stream, or synchronize before
@@ -26,7 +26,7 @@
 
 namespace maxichem {
 
-// DEFAULT_RTOL and DEFAULT_MAX_STEPS in maxichem/_constants.py; a test compares them.
+// DEFAULT_RTOL and DEFAULT_MAX_STEPS in maxichem/_constants.py; tests/test_export_cpp.py calls with them.
 inline constexpr double kDefaultRtol = 1e-3;
 inline constexpr int kDefaultMaxSteps = 4000;
 

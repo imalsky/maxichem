@@ -5,8 +5,11 @@ from typing import Any
 
 import numpy as np
 
-from ._constants import MAX_SPECIES, NO_SLOT, NTAIL, RATE_LAW_FLAGS, RATE_LAW_SHIFTS
+from ._constants import NO_SLOT, RATE_LAW_FLAGS, RATE_LAW_SHIFTS
 from .kinvulcan import VulcanNetwork
+
+MAX_SPECIES = 254  # species slots are uint8, with one value left for the padding
+NTAIL = 32  # rows of the trailing block factored in registers (at most 32)
 
 
 def warps_per_cell(fit: int) -> int:
@@ -68,7 +71,7 @@ def _law(r: dict[str, Any]) -> tuple[list[float], int]:
         a1 = (r["A1"], r["B1"], r["C1"]) if "A1" in r else (0.0, 0.0, 0.0)
         ai = (r["Ai"], r["Bi"], r["Ci"]) if r["kind"] in (3, 6) else (1.0, 0.0, 0.0)
     if min(a0[0], a1[0], ai[0]) < 0:
-        raise ValueError(f"negative Arrhenius prefactor in {r.get('eq', r)}: the kernel takes ln A")
+        raise ValueError(f"negative Arrhenius prefactor in {r['eq']}: the kernel takes ln A")
     row = [
         ln(a0[0]),
         a0[1],
@@ -167,7 +170,10 @@ def _reaction_tables(
     rf = np.zeros(nr, np.int32)
     for j, r in enumerate(reac):
         if "rev" in r:
-            raise ValueError(f"reaction {r.get('eq', j)} has an explicit reverse law: every reverse comes from NASA-9")
+            raise ValueError(
+                f"reaction {r.get('eq', j)} has an explicit reverse law, which would be ignored: "
+                "every reverse comes from NASA-9; remove its 'rev' entry"
+            )
         rx[j, : len(reactants[j])] = [pos[q] for q in reactants[j]]
         if j >= n_thermal:  # photolysis: no reverse side, no law (kf = J, kr = 0 in the kernel)
             continue
@@ -180,7 +186,7 @@ def _reaction_tables(
             | len(products[j]) << RATE_LAW_SHIFTS["FL_REVERSE_SHIFT"]
         )
     law = sorted({"troe" for r in reac if "troe" in r} | {"eff" for r in reac if "eff" in r})
-    if not {"troe", "eff"} & set(law):
+    if not law:
         rc = rc[:, :9]
     return rx, rc, rf, law
 
@@ -188,7 +194,7 @@ def _reaction_tables(
 def _sv_stream(
     stoichiometry: np.ndarray, perm: list[int], live: list[int], lanes: int, widths: dict[str, int]
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    """Return the S v lane stream, each row's extra pieces and the number of pieces.
+    """Return the S v lane stream, each row's extra pieces and the number of pieces; adds the piece's width to widths.
 
     Each row's terms are cut into pieces of at most an even share; its first piece writes part[i], the others
     part[ns + e]. A word holds the reaction, sign, x2, destination piece and end of piece.
@@ -356,23 +362,10 @@ def _slot_lookups(slot: dict[tuple[int, int], int], lead: list[tuple[int, int]],
 
 
 def tables(net: VulcanNetwork, warps: int, photo: bool = False) -> dict[str, Any]:
-    """Build the kernels' tables for a network.
+    """Build the kernels' tables: species order (perm[i] = network index of row i), rate laws, streams, LU pattern.
 
-    Parameters
-    ----------
-    net : VulcanNetwork
-        The network.
-    warps : int
-        Warps per cell, at least 2.
-    photo : bool
-        Add the network's photolysis branches after the thermal reactions: irreversible, their forward rate
-        coefficient the call's per-cell input J.
-
-    Returns
-    -------
-    dict
-        Species order (perm[i] = network index of row i), rate laws, S v and Jacobian term streams, LU pattern and
-        update operations, descriptor bit widths.
+    Warps per cell at least 2. With photo, the network's photolysis branches follow the thermal reactions: irreversible,
+    their forward rate coefficient the call's per-cell input J.
     """
     reac = net.reac + (net.photo if photo else [])
     S = np.asarray(net.S, np.float64)
@@ -439,10 +432,10 @@ def tables(net: VulcanNetwork, warps: int, photo: bool = False) -> dict[str, Any
 def tables_for_device(net: VulcanNetwork, photo: bool, shared_memory: int) -> dict[str, Any]:
     """Build the tables with the warps per cell that fit a device with this shared memory per block (bytes)."""
     tab = tables(net, 2, photo)
-    warps = warps_per_cell(_cells_per_block(tab, shared_memory))
+    warps = warps_per_cell(cells_per_block(tab, shared_memory))
     if warps != 2:
         tab = tables(net, warps, photo)
-    if _cells_per_block(tab, shared_memory) < 1:
+    if cells_per_block(tab, shared_memory) < 1:
         blob = pack_small_tables(tab)[0]
         raise ValueError(
             f"one cell needs {8 * shared_doubles_per_cell(tab) + len(blob)} B of shared memory per block; "
@@ -451,7 +444,7 @@ def tables_for_device(net: VulcanNetwork, photo: bool, shared_memory: int) -> di
     return tab
 
 
-def _cells_per_block(tab: dict[str, Any], shared_memory: int) -> int:
+def cells_per_block(tab: dict[str, Any], shared_memory: int) -> int:
     """Return the cells per block the shared memory (bytes) holds."""
     return int((shared_memory - len(pack_small_tables(tab)[0])) // (8 * shared_doubles_per_cell(tab)))
 
@@ -470,6 +463,17 @@ def rates_fit_in_block(tab: dict[str, Any]) -> bool:
     """Say whether the rates (or G / RT) and the S v pieces fit in the trailing block's slots."""
     nt = tab["ns"] - tab["k0"]
     return bool(max(tab["nr"], tab["ns"] + 1) + tab["npart"] <= nt * nt)
+
+
+def scratch_strides(tab: dict[str, Any], wsh: bool) -> tuple[int, int]:
+    """Return the doubles of global scratch per cell slot of the call kernel and per block of the recover kernel.
+
+    Each holds the rate coefficients (2 NR + 2) and the copy of F, u and -Jn kept for the try after a rejection; the
+    recover kernel also W when it is not in shared memory.
+    """
+    ns, nr = tab["ns"], tab["nr"]
+    call = 2 * nr + 2 + 2 * ns + tab["nnz"]
+    return call, call + (0 if wsh else ns * ns)
 
 
 def shared_doubles_per_cell(tab: dict[str, Any]) -> int:

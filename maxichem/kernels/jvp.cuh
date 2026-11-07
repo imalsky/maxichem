@@ -1,6 +1,5 @@
 // The tangent kernels: the call with its directional derivatives.
 
-// ---------------------------------------------------------------------------------------------------------- tangent
 // The tangent of F = (n_tot / nd) S v at Y, Fd (unless null), for the state tangent Yd and the rate tangents (dk:
 // d kf, d kr; dlnd: d ln nd); leaves n, n1 = the concentrations and their tangent; sv, svd = S v and its tangent
 // (va: a per-reaction work array). Returns n_tot, td = sum Yd.
@@ -36,7 +35,7 @@ __device__ __forceinline__ double rhs_dual(double* work, const double* Y, const 
     va[r] = dk[r] * P + kf[r] * Pd - (dk[NR + r] * Q + kr[r] * Qd);
   }
   __syncwarp();
-  svs2(v, va, sv, svd, part, tab, sst, sround, lane);
+  stoichiometry_times_two(v, va, sv, svd, part, tab, sst, sround, lane);
   if (Fd) {
     const double g = ntot / nd, gd = g * (rt - dlnd);
     for (int i = lane; i < NS; i += 32) Fd[i] = svd[i] * g + sv[i] * gd;
@@ -48,11 +47,11 @@ __device__ __forceinline__ double rhs_dual(double* work, const double* Y, const 
 // out = d/de [J(N) K] along the tangent (N + e Nd, k + e dk, ln nd + e dlnd): the second derivative of F, reaction
 // by reaction, from hyper-dual products. n, n1 = the concentrations at N and their tangent; svN, sv1N = S v at N and
 // its tangent; ntot, td = sum N, sum Nd.
-__device__ __forceinline__ void jdot(double* work, const double* N, const double* Nd, const double* K, double* out,
-                                     const double* svN, const double* sv1N, double ntot, double td, const double* kf,
-                                     const double* kr, const double* dk, double nd, double dlnd, double* sv2,
-                                     double* sv12, double* va, const Tab& tab, const unsigned* __restrict__ sst,
-                                     int sround, int lane) {
+__device__ __forceinline__ void jacobian_dot(double* work, const double* N, const double* Nd, const double* K,
+                                             double* out, const double* svN, const double* sv1N, double ntot, double td,
+                                             const double* kf, const double* kr, const double* dk, double nd,
+                                             double dlnd, double* sv2, double* sv12, double* va, const Tab& tab,
+                                             const unsigned* __restrict__ sst, int sround, int lane) {
   double *n = work + A_N0, *n1 = work + A_N1, *n2 = work + A_N2, *n12 = work + A_N12, *v = work + A_V,
          *part = work + A_PART;
   double p = 0.0;
@@ -93,7 +92,7 @@ __device__ __forceinline__ void jdot(double* work, const double* N, const double
     va[r] = kf[r] * hp[0][3] + dk[r] * hp[0][2] - (kr[r] * hp[1][3] + dk[NR + r] * hp[1][2]);
   }
   __syncwarp();
-  svs2(v, va, sv2, sv12, part, tab, sst, sround, lane);
+  stoichiometry_times_two(v, va, sv2, sv12, part, tab, sst, sround, lane);
   const double g = ntot / nd, g1 = g * (td / ntot - dlnd), g2 = t2 / nd, g12 = -t2 * dlnd / nd;
   for (int i = lane; i < NS; i += 32) out[i] = sv12[i] * g + sv1N[i] * g2 + sv2[i] * g1 + svN[i] * g12;
   __syncwarp();
@@ -136,11 +135,11 @@ __device__ __forceinline__ double error_tangent(const double* N, const double* N
 // state tangent Nd, the step-size tangent had and the rate tangents: Yd = the new state's tangent; returns the error's
 // tangent (adapt) or 0.
 template <bool DN>
-__device__ __forceinline__ double tstep(double* work, const double (&c)[NT], const double* Wd, double ha, double had,
-                                        double c0, double en, bool first, int adapt, const double* kf, const double* kr,
-                                        const double* dk, double* va, double nd, double dlnd, double rtol, double atol,
-                                        const Tab& tab, const unsigned* __restrict__ sst, int sround, int lane,
-                                        int myt) {
+__device__ __forceinline__ double tangent_step(double* work, const double (&c)[NT], const double* Wd, double ha,
+                                               double had, double c0, double en, bool first, int adapt,
+                                               const double* kf, const double* kr, const double* dk, double* va,
+                                               double nd, double dlnd, double rtol, double atol, const Tab& tab,
+                                               const unsigned* __restrict__ sst, int sround, int lane, int myt) {
   double *N = work + A_NN, *Nd = work + A_ND, *Y = work + A_Y, *Yd = work + A_YD, *Fd = work + A_FD,
          *svN = work + A_SVN, *sv1N = work + A_SV1N, *Ys = work + A_YS, *Yds = work + A_YDS, *t1 = work + A_T1,
          *t2 = work + A_T2, *K = work + A_K1, *Kd = work + A_KD1;
@@ -150,8 +149,8 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
   double td = 0.0, tdx = 0.0;
   const double ntot = rhs_dual(work, N, Nd, nullptr, svN, sv1N, va, kf, kr, dk, nd, dlnd, td, tab, sst, sround, lane);
   for (int s = 0; s < 4; s++) {
-    jdot(work, N, Nd, K + s * NS, Kd + s * NS, svN, sv1N, ntot, td, kf, kr, dk, nd, dlnd, t1, t2, va, tab, sst, sround,
-         lane);
+    jacobian_dot(work, N, Nd, K + s * NS, Kd + s * NS, svN, sv1N, ntot, td, kf, kr, dk, nd, dlnd, t1, t2, va, tab, sst,
+                 sround, lane);
     for (int i = lane; i < NS; i += 32) Kd[s * NS + i] += 2.0 * hh * K[s * NS + i];
   }
   {  // F's tangent at N (its space held n12 so far)
@@ -160,10 +159,10 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
   }
   for (int i = lane; i < NS; i += 32) Kd1[i] += Fd[i];
   __syncwarp();
-  xsolve<DN>(work, Wd, c, c0, Kd1, tab.smap, lane, myt);
+  solve_attempt<DN>(work, Wd, c, c0, Kd1, tab.smap, lane, myt);
   for (int i = lane; i < NS; i += 32) Kd2[i] += Fd[i] + RODAS_C21 * ih * Kd1[i] - RODAS_C21 * hh * K1[i];
   __syncwarp();
-  xsolve<DN>(work, Wd, c, c0, Kd2, tab.smap, lane, myt);
+  solve_attempt<DN>(work, Wd, c, c0, Kd2, tab.smap, lane, myt);
   for (int i = lane; i < NS; i += 32) {
     Ys[i] = N[i] + 2.0 * K1[i];
     Yds[i] = Nd[i] + 2.0 * Kd1[i];
@@ -172,7 +171,7 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
   rhs_dual(work, Ys, Yds, Fd, svN, sv1N, va, kf, kr, dk, nd, dlnd, tdx, tab, sst, sround, lane);
   for (int i = lane; i < NS; i += 32) Kd3[i] += Fd[i] + ih * (Kd1[i] - Kd2[i]) - hh * (K1[i] - K2[i]);
   __syncwarp();
-  xsolve<DN>(work, Wd, c, c0, Kd3, tab.smap, lane, myt);
+  solve_attempt<DN>(work, Wd, c, c0, Kd3, tab.smap, lane, myt);
   for (int i = lane; i < NS; i += 32) {
     Ys[i] += K3[i];
     Yds[i] += Kd3[i];
@@ -182,7 +181,7 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
   for (int i = lane; i < NS; i += 32)
     Kd4[i] += Fd[i] + ih * (Kd1[i] - Kd2[i] - RODAS_C43 * Kd3[i]) - hh * (K1[i] - K2[i] - RODAS_C43 * K3[i]);
   __syncwarp();
-  xsolve<DN>(work, Wd, c, c0, Kd4, tab.smap, lane, myt);
+  solve_attempt<DN>(work, Wd, c, c0, Kd4, tab.smap, lane, myt);
   for (int i = lane; i < NS; i += 32) Yd[i] = Nd[i] + 2.0 * Kd1[i] + Kd3[i] + Kd4[i];
   __syncwarp();
   if (!adapt || !(en > 0.0)) return 0.0;
@@ -205,14 +204,13 @@ __device__ __forceinline__ double tstep(double* work, const double (&c)[NT], con
       B, rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, sst, jt, lu, optr, sround, jround, Jin, dJin
 
 // The call and its tangents, one warp per cell. D tangent directions share the call: direction d's inputs and outputs
-// at [d * B + cell] (dx0, dxout, dlm, dJin by rows of NS, NR or NJ), drc at [d * NR * 9]; dlm, drc, dJin may be
-// null; Jin [B, NJ] (null when NJ = 0). DN = false: every
-// cell, the call kernel's attempts (queue count[0]). DN = true: the first count[COUNT_RECOMPUTED] cells of list, the
-// recover kernel's attempts (dense W in wscr, one NS x NS per warp; max_steps = the recovery's tries; the recovery's
-// queue), each result then tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8] and NaN
-// tangents.
+// at [d * B + cell] (dx0, dxout, dlm, dJin by rows of NS, NR or NJ), drc at [d * NR * 9]; dlm, drc, dJin may be null;
+// Jin [B, NJ] (null when NJ = 0). DN = false: every cell, the call kernel's attempts (COUNT_QUEUE). DN = true: the
+// first count[COUNT_RECOMPUTED] cells of list, the recover kernel's attempts (dense W in wscr, one NS x NS per warp;
+// max_steps = the recovery's tries; COUNT_RECOVERY_QUEUE), each result then tested as the recover kernel tests it: redo
+// = 1 and COUNT_RECOVERED, or redo = 2, COUNT_STILL_FAILED and NaN tangents.
 template <bool DN>
-// size-limit-ok: one cell's state runs through every part: a further split passes 30 or more arguments per helper
+// size-limit-ok: the parts left share one cell's state and each direction's tangents, which a split would pass by hand
 __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, double* wscr,
                                           const u16* __restrict__ didx, const double* __restrict__ atoms) {
   extern __shared__ double smem[];
@@ -226,10 +224,9 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
   double* work = smem + wib * PERWA;
   double *N = work + A_NN, *Nd = work + A_ND, *Y = work + A_Y, *Yd = work + A_YD;
   const size_t wid = (size_t)blockIdx.x * WPB + wib;
-  double* kf = scratch + wid * (5 * NR + 2 + D * (2 * NR + NS));
-  double *kr = kf + NR, *va = kr + NR + 2, *cw = va + NR, *dk = cw + 2 * NR,
-         *Ng = dk + 2 * NR * D;  // per direction:
-                                 // d kf, d kr, state tangent
+  double* kf = scratch + wid * (JVP_STRIDE + D * JVP_DIRECTION_STRIDE);
+  // dk and Ng, per direction: d kf, d kr; the state tangent
+  double *kr = kf + NR, *va = kr + NR + 2, *cw = va + NR, *dk = cw + 2 * NR, *Ng = dk + 2 * NR * D;
   double* Wd = DN ? wscr + wid * NS * NS : nullptr;
   if (lane == 0) kf[2 * NR] = 0.0;          // the zero rate of the Jacobian's padding words
   double hd[DMAX], tdot[DMAX], dlnd[DMAX];  // per direction: h, t, ln nd tangents (warp-uniform)
@@ -276,9 +273,9 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
       const double rem = dt - t, ha = fmin(h, rem);
       double c0 = 0.0, dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
       bool ok = false;
-      const double en = xattempt<DN>(work, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr,
-                                     didx, sround, jround, lane, myt);
-      const double fac = factor(en, ok, prej, pen, pha, ha, dfe, dfh, dfp, dfq);
+      const double en = run_attempt<DN>(work, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu,
+                                        optr, didx, sround, jround, lane, myt);
+      const double fac = step_factor_partials(en, ok, prej, pen, pha, ha, dfe, dfh, dfp, dfq);
       // the error's tangent where this factor depends on it, or the next attempt's secant may (a rejection, err > 1)
       const bool wte = ok || (adapt && (dfe != 0.0 || (!ok && isfinite(en) && en > 1.0)));
       for (int d = 0; d < D; d++) {  // each direction's tangent on the attempt in place
@@ -289,8 +286,8 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
           double* ng = Ng + d * NS;
           for (int i = lane; i < NS; i += 32) Nd[i] = ng[i];
           __syncwarp();
-          end = tstep<DN>(work, c, Wd, ha, had, c0, en, t == 0.0, adapt, kf, kr, dk + 2 * NR * d, va, nd, dlnd[d], rtol,
-                          atol, tab, sst, sround, lane, myt);
+          end = tangent_step<DN>(work, c, Wd, ha, had, c0, en, t == 0.0, adapt, kf, kr, dk + 2 * NR * d, va, nd,
+                                 dlnd[d], rtol, atol, tab, sst, sround, lane, myt);
           if (ok)
             for (int i = lane; i < NS; i += 32) ng[i] = Y[i] >= 0.0 ? Yd[i] : 0.0;
           __syncwarp();
@@ -327,25 +324,12 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
       doneo[cell] = dn;
       noko[cell] = nok;
     }
-    if (DN) {  // the recover kernel's test of the result
-      __syncwarp();
-      int bad = 0;
-      if (lane == 0) {
-        bad = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell J_ARG);
-        if (bad) doneo[cell] = 0;  // done: finished and passing the guard
-        redo[cell] = bad ? 2 : 1;
-        atomicAdd(count + (bad ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
+    if (DN && recovery_fails(x0, Ta, Pa, dta, xout, doneo, redo, count, dn, nok, atoms, atol, cell, lane J_ARG))
+      for (int d = 0; d < D; d++) {
+        for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + i] = DNAN;
+        if (lane == 0) dhout[(size_t)d * B + cell] = DNAN;
       }
-      if (__shfl_sync(FULL, bad, 0))
-        for (int d = 0; d < D; d++) {
-          for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + i] = DNAN;
-          if (lane == 0) dhout[(size_t)d * B + cell] = DNAN;
-        }
-    }
-    int nxt = 0;
-    if (lane == 0) nxt = gridDim.x * WPB + atomicAdd(count + (DN ? COUNT_RECOVERY_QUEUE : COUNT_QUEUE), 1);
-    q = __shfl_sync(FULL, nxt, 0);
-    __syncwarp();
+    q = next_queued<DN>(count, lane);
   }
 }
 

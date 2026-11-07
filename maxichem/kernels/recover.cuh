@@ -126,9 +126,9 @@ __device__ __forceinline__ void form_dense_w(double* Wd, const double* u, double
   }
 }
 
-// The recovery's work arrays for a cell: M the dense W, dinv 1 / its pivots, n the
-// concentrations, N the state, Y a stage state, F the right-hand side, u the Sherman-Morrison vector, K1..K4 the
-// stages, v the rates of progress, part the S v pieces, kf and kr the rate coefficients, rsc the copy kept for a retry.
+// The recovery's work arrays for a cell: M the dense W, dinv 1 / its pivots, n the concentrations, N the state, Y a
+// stage state, F the right-hand side, u the Sherman-Morrison vector, K1..K4 the stages, v the rates of progress, part
+// the S v pieces, kf and kr the rate coefficients, rsc the copy kept for a retry.
 struct CellArrays {
   double *M, *dinv, *n, *N, *Y, *F, *u, *K1, *K2, *K3, *K4, *v, *part, *kf, *kr, *rsc;
 };
@@ -136,7 +136,7 @@ struct CellArrays {
 // The arrays of the recovery's one cell in shared memory, and its slot of the global scratch; M is the dense W.
 __device__ __forceinline__ CellArrays recover_arrays(double* smem, double* scratch, size_t slot) {
   CellArrays a;
-  a.kf = scratch + slot * (2 * NR + 2 + (WSH ? 0 : NS * NS) + RSN);
+  a.kf = scratch + slot * RECOVER_STRIDE;
   a.kr = a.kf + NR;
   a.M = WSH ? smem : a.kf + 2 * NR + 2;
   a.rsc = a.kf + 2 * NR + 2 + (WSH ? 0 : NS * NS);  // F, u, -Jn's slots of the last fresh evaluation
@@ -222,7 +222,7 @@ __device__ __forceinline__ void dense_stages(const CellArrays& a, int* pr, doubl
 // count[COUNT_RECOMPUTED] entries of list) from their inputs with max_steps tries: the call kernel's rates, S v and
 // Jacobian streams, stages and step control, with the dense W = I / (gamma h) - Jn - w 1^T factored by dense_lu on the
 // first warp; writes the result over the call's (xout, hio, doneo, noko), sets redo to 1 (the result passes the guard's
-// test) or 2 and counts it in count[7] / count[8]. Returns at once when the list is empty.
+// test) or 2 and counts it in COUNT_RECOVERED or COUNT_STILL_FAILED. Returns at once when the list is empty.
 extern "C" __global__ void __launch_bounds__(NL, 1)
     recover(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
             const double* __restrict__ dta, const double* __restrict__ hin, double* xout, double* hio, int* doneo,
@@ -293,8 +293,8 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
     if (cl == 0) {
       const int c = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell J_ARG);
       hio[cell] = h;
-      doneo[cell] = c ? 0 : dn;
-      noko[cell] = nok;  // done: finished and passing the guard
+      doneo[cell] = c ? 0 : dn;  // done: finished and passing the guard
+      noko[cell] = nok;
       redo[cell] = c ? 2 : 1;
       atomicAdd(count + (c ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
       *nextq = (int)(gridDim.x + atomicAdd(count + COUNT_RECOVERY_QUEUE, 1));

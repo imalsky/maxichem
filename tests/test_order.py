@@ -1,8 +1,8 @@
 """Rodas3's order of accuracy, measured on a problem with a known answer."""
 
+import helpers
 import numpy as np
 import pytest
-import test_known_answers as answers
 import torch
 
 from maxichem import kincuda
@@ -26,7 +26,7 @@ def test_rodas3_is_third_order(read_network, gpu):
         for steps in STEPS:
             dt = END / steps
             one = torch.full((1,), 1.0, dtype=torch.float64, device=gpu)
-            x = answers._state(net, 1, gpu, N2_1=1.0)
+            x = helpers.state(net, 1, gpu, N2_1=1.0)
             J = torch.full((1, len(net.photo)), J_TEST, dtype=torch.float64, device=gpu)
             for _ in range(steps):
                 x, _, done, accepted = solver(
@@ -34,7 +34,7 @@ def test_rodas3_is_third_order(read_network, gpu):
                 )
                 assert bool(done.all())
                 assert float(accepted[0]) == 1.0
-            errors.append(abs(float(x[0, a]) - answers.decay_answer(J_TEST * END)[0]))
+            errors.append(abs(float(x[0, a]) - helpers.decay_answer(J_TEST * END)[0]))
     slope = np.polyfit(np.log(END / np.array(STEPS)), np.log(errors), 1)[0]
     print(f"order: errors {errors}, slope {slope:.3f}")
     assert ORDER_BAND[0] <= slope <= ORDER_BAND[1]

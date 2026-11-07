@@ -20,19 +20,21 @@ first appearance in the list, with He appended. `bulk` is the gas whose efficien
 | `skipped` | Condensation lines skipped |
 | `duplicates` | Pairs of entries with the same species on both sides; their rates add, as in VULCAN |
 
-It refuses a reaction whose atoms do not balance, a reaction above the first heading (it has no rate law), a reaction after
+It refuses a non-finite rate coefficient, a reaction whose atoms do not balance, a reaction above the first heading (it has no rate law), a reaction after
 `# reverse stops` outside photolysis or condensation, a photolysis line whose reactant is not its absorber, a repeated absorber and
-branch, and an `# irreversible` reaction: every reverse comes from NASA-9.
+branch, a name given twice in `species`, and an `# irreversible` reaction: every reverse comes from NASA-9. Building a solver's tables
+refuses a hand-built reaction with an explicit reverse law (`rev`), for the same reason.
 
-After the first heading, a comment must be a known heading (`KNOWN_HEADINGS`), a line of column titles (`# id`), a commented-out
-reaction or empty: reactions under an unknown heading would keep the law of the section above. Free text goes above the first
-heading. A NASA-9 file must hold 20 or 30 numbers, and G / RT may jump by at most `MAX_GIBBS_JUMP` at 1000 K. VULCAN's
+From the first heading to the end of the thermal sections (`# reverse stops`, condensation, photolysis or `# re_end`), a comment must be a known
+heading (`KNOWN_HEADINGS`), a line of column titles (`# id`), a commented-out reaction or empty: reactions under an unknown heading would
+keep the law of the section above. Free text goes above the first heading or past those sections. A NASA-9 file must hold 20, 30 or 40
+numbers (two to four ranges of 10; those past the second are unused), and G / RT may jump by at most `MAX_GIBBS_JUMP` at 1000 K. VULCAN's
 `TiH.txt` fails this, so `TiSNCHO_photo_network.txt` is refused until that file is corrected.
 
 ## `CudaSolver(net, device, drift=None, photo=False)`
 
-Builds the kernels on the device. `drift` is the element-drift allowance (default `DRIFT`). With `photo=True`, the network's
-on torch's current stream.
+Builds the kernels on the device. `drift` is the element-drift allowance (default `DRIFT`). With `photo=True`, the network's photolysis
+branches enter the call, which then takes J. Calls run one at a time on torch's current stream.
 
 | Member | Meaning |
 | --- | --- |
@@ -43,11 +45,12 @@ on torch's current stream.
 | `export(folder)` | Writes what `cpp/maxichem.hpp` loads |
 | `count`, `total` | The counts on the device: the last call's (int32), and those since construction (int64) |
 | `info` | The kernel's layout |
-| `close()` | Unloads the kernels |
+| `close()` | Unloads the kernels and drops the tables and scratch; the counts stay readable |
 
 J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells) and refused
 without it. A row with a negative or non-finite J or a negative mole fraction is bad input: not stepped, and counted. A non-finite h
-acts as dt and is counted in `nonfinite_h`. `launch` and a call both add their counts to `total`.
+acts as dt and is counted in `nonfinite_h`. `launch` and a call both add their counts to `total`, which `check()` reads, so a cold cell in
+a `launch` makes `check()` raise.
 
 ## `ADSolver(net, device, cap=CAP, drift=None, photo=False)`
 
@@ -55,8 +58,9 @@ acts as dt and is counted in `nonfinite_h`. `launch` and a call both add their c
 | --- | --- |
 | `jvp(x, T, P, dt, h, dx, dT, dP, ddt, dh, lm, dlm, rc, drc, adapt, rtol, atol, max_steps, J, dJ)` | Returns (x, h, done, accepted steps, dx, dh) |
 | `vjp(x, T, P, dt, h, gx, gh, lm, rc, adapt, rtol, atol, max_steps, J)` | Returns (x, h, done, accepted steps, cotangents dict) |
-| `status`, `check()`, `flag` | Counts as `CudaSolver`, and the last call's per-cell flag |
-| `close()` | Unloads the kernels |
+| `fallback`, `check()`, `flag` | Counts as `CudaSolver`, and the last call's per-cell flag |
+| `rc0` | The network's rate table [R, W], which a call uses unless given another |
+| `close()` | As `CudaSolver` |
 
 A non-finite log multiplier in `lm` takes no try: its cell comes back with done 0, flag 2 and NaN derivatives, counted as unfinished,
 recomputed and still failed. `cap` is a positive integer; `drift`, in both solvers, is finite and at least 0.
@@ -66,7 +70,7 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 
 ## Constants in `kincuda`
 
-`ATOL`, `DRIFT`, `K_COLL`, `REC_STEPS`, `T_MIN`, `COUNTS`.
+`ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `COUNTS`.
 
 ## C++: `maxichem::Solver(folder, device)`
 

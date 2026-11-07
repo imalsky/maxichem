@@ -19,10 +19,10 @@ COUNTS = (
     "still_failed",
     "nonfinite_h",
 )
-EXPORT_FORMAT = 3  # raised when the export's files or the kernels' arguments change; cpp/maxichem.cpp checks it
-MAX_SPECIES = 254  # species slots are uint8, with one value left for the padding
-NTAIL = 32  # rows of the trailing block factored in registers (at most 32)
-CAP = 100  # attempts stored per cell before the adjoint switches to segment checkpoints (calls up to CAP^2 attempts)
+EXPORT_FORMAT = 3  # raised by a change the export's reader depends on; cpp/maxichem.cpp refuses any other
+# attempts stored per cell before the adjoint switches to segment checkpoints; a call may take max_steps up to
+# (2 CAP)^2 / REC_STEPS, 0.4 CAP^2, so this CAP's limit is DEFAULT_MAX_STEPS
+CAP = 100
 DMAX = 16  # tangent directions per jvp call
 COUNT_SLOTS = ("queue", *COUNTS, "recovery_queue")  # the device's count array: the two cell queues around COUNTS
 NO_SLOT = 0xFFFF  # marks a (row, column) with no slot in the kernels' uint16 map
@@ -77,6 +77,4 @@ KERNEL_ARGUMENTS = {
 PHOTOLYSIS_ARGUMENT = "Jin"
 
 GUARD_BLOCK_THREADS = 128  # threads per block of the guard kernel; any size works, this one packs cells densely
-MAX_THREADS_PER_BLOCK = 1024  # CUDA's limit
-MAX_NAMED_BARRIERS = 15  # per block: the hardware's named barriers, one per cell (bar.sync in common.cuh)
-REGISTER_ALLOCATION_UNIT = 8  # registers per thread are allocated in this unit
+ARRH_BLOCK_THREADS = 256  # threads per block of the arrh kernel, a power of 2: its reduction halves it

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the hard size limits on source files. Run by pre-commit and CI.
 
-Public name: ``main``. The limits are the constants below.
+The limits are the constants below.
 
 Python: module docstring, file and function length. Python complexity is Ruff's C901.
 C, C++ and CUDA: file and function length, and complexity by a scan with comments and strings removed.

@@ -1,18 +1,15 @@
 """The guard and the recovery, input checks, and the independence of results from the batch."""
 
-import gc
-import sys
-import types
-
 import helpers
 import libref
 import numpy as np
 import pytest
 import torch
 
-from maxichem import kincuda
+from maxichem import kincuda, kincuda_ad
 
 pytestmark = pytest.mark.gpu
+CLOSED_SOLVER_BYTES = 4096  # the counts stay readable after close: two small tensors, in allocator blocks
 
 
 def _settled(parity, x0, T, P):
@@ -184,50 +181,45 @@ def test_launch_adds_to_the_total(parity):
     assert torch.equal(parity.solver.total - before, parity.solver.count.to(torch.int64))
 
 
-def test_lit_solver_refuses_a_missing_j(parity):
-    x, T, P = parity.starts(8, 2, 1.0)
-    with pytest.raises(ValueError, match="required"):
-        parity.lit(x, T, P, parity.full(8, 1.0), parity.full(8, 1.0))
-
-
-@pytest.mark.parametrize(
-    "bad",
-    ["h one short", "T on the CPU", "P float32", "x one species short", "rtol 0", "atol NaN", "max_steps 0"],
-)
-def test_wrong_inputs_raise_before_any_launch(parity, bad):
+def test_wrong_inputs_raise_before_any_launch(parity):
     cells = 64
     x, T, P = parity.starts(cells, 2, 1.0)
     dt = h = parity.full(cells, 50.0)
-    keywords: dict[str, dict[str, float]] = {
-        "rtol 0": {"rtol": 0.0},
-        "atol NaN": {"atol": float("nan")},
-        "max_steps 0": {"max_steps": 0},
-    }
-    h = h[:-1] if bad == "h one short" else h
-    T = T.cpu() if bad == "T on the CPU" else T
-    P = P.float() if bad == "P float32" else P
-    x = x[:, :-1] if bad == "x one species short" else x
-    with pytest.raises(ValueError, match=r"\S"):
-        parity.solver(x, T, P, dt, h, **keywords.get(bad, {}))
+    with pytest.raises(ValueError, match=r"^T: .* on cpu$"):
+        parity.solver(x, T.cpu(), P, dt, h)
+    with pytest.raises(ValueError, match="required"):
+        parity.lit(x, T, P, dt, h)
+    with pytest.raises(ValueError, match=r"^max_steps from 1"):
+        parity.solver(x, T, P, dt, h, max_steps=0)
 
 
-def test_failed_constructor_leaves_no_error_at_deletion(gpu):
-    seen: list[object] = []  # a constructor that fails before it loads anything: nothing to unload
-    hook, sys.unraisablehook = sys.unraisablehook, seen.append
-    with pytest.raises(ValueError, match="photo=True"):
-        kincuda.CudaSolver(types.SimpleNamespace(photo=[], photo_missing=[]), gpu, photo=True)  # type: ignore[arg-type]  # refused before use
-    gc.collect()
-    sys.unraisablehook = hook
-    assert not seen
-
-
-def test_closed_solver_refuses_a_call(parity):
+def test_closed_solver_refuses_a_call(parity, tmp_path):
     with kincuda.CudaSolver(parity.network.net, parity.device) as solver:
         assert solver.fallback["cold"] == 0
     solver.close()  # closing twice does nothing
     x, T, P = parity.starts(8, 2, 1.0)
     with pytest.raises(RuntimeError, match="closed"):
         solver(x, T, P, parity.full(8, 1.0), parity.full(8, 1.0))
+    with pytest.raises(RuntimeError, match="closed"):
+        solver.export(tmp_path)
+
+
+def test_closed_solver_refuses_its_rate_table(read_network, gpu):
+    with kincuda_ad.ADSolver(read_network("synthetic_small"), gpu) as ad:
+        assert ad.rc0.shape[0] == ad.nr
+    with pytest.raises(RuntimeError, match="closed"):
+        _ = ad.rc0
+
+
+@pytest.mark.parametrize("build", [kincuda.CudaSolver, kincuda_ad.ADSolver])
+def test_close_releases_the_gpu_memory(read_network, gpu, build):
+    before = torch.cuda.memory_allocated(gpu)
+    solver = build(read_network("synthetic_small"), gpu)
+    held = torch.cuda.memory_allocated(gpu) - before
+    solver.close()
+    left = torch.cuda.memory_allocated(gpu) - before
+    print(f"{build.__name__}: holds {held} B, {left} B after close")
+    assert left <= CLOSED_SOLVER_BYTES < held
 
 
 def test_results_do_not_depend_on_the_batch(parity, verdict):

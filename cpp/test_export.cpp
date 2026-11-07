@@ -2,8 +2,9 @@
 //   test_export <export folder> <case folder>
 // The case folder holds raw little-endian files written by tests/cpp_export_case.py: the inputs x.bin [B, ns],
 // T.bin, P.bin, dt.bin, h.bin [B], J.bin [B, nj] (photolysis networks; all float64), the Python call's results
-// x_out.bin, h_out.bin, steps_out.bin (float64), done_out.bin (int8) and counts_out.bin (int32 [11]), and B.txt and
-// max_steps.txt. The call runs twice, and both are compared in full (counts included); the second is timed.
+// x_out.bin, h_out.bin, steps_out.bin (float64), done_out.bin (int8) and counts_out.bin (int32), and B.txt and
+// max_steps.txt. The call runs twice, and both are compared in full (counts included); the second is timed. At the
+// default max_steps it uses the default arguments, so they answer for the Python defaults too.
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -42,16 +43,18 @@ int main(int argc, char** argv) {
   auto h = load(cs + "/h.bin", {B}, f64).to(dev);
   torch::Tensor J;
   if (chem.nj) J = load(cs + "/J.bin", {B, chem.nj}, f64).to(dev);
-  int max_steps = 4000;
-  {
-    std::ifstream ms(cs + "/max_steps.txt");
-    if (ms) ms >> max_steps;
-  }
-  auto r = chem(x, T, P, dt, h, J, 1e-3, -1.0, max_steps);
+  int max_steps = 0;
+  if (!(std::ifstream(cs + "/max_steps.txt") >> max_steps) || max_steps < 1)
+    throw std::runtime_error("cannot read " + cs + "/max_steps.txt");
+  bool const defaults = max_steps == maxichem::kDefaultMaxSteps;
+  auto call = [&] {
+    return defaults ? chem(x, T, P, dt, h, J) : chem(x, T, P, dt, h, J, maxichem::kDefaultRtol, -1.0, max_steps);
+  };
+  auto r = call();
   auto counts = chem.count.cpu().clone();
   torch::cuda::synchronize();
   auto t0 = std::chrono::steady_clock::now();
-  auto r2 = chem(x, T, P, dt, h, J, 1e-3, -1.0, max_steps);
+  auto r2 = call();
   auto counts2 = chem.count.cpu().clone();
   torch::cuda::synchronize();
   double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -59,7 +62,7 @@ int main(int argc, char** argv) {
   auto ho = load(cs + "/h_out.bin", {B}, f64);
   auto so = load(cs + "/steps_out.bin", {B}, f64);
   auto dn = load(cs + "/done_out.bin", {B}, torch::kInt8).to(torch::kBool);
-  auto co = load(cs + "/counts_out.bin", {11}, torch::kInt32);
+  auto co = load(cs + "/counts_out.bin", {chem.count.size(0)}, torch::kInt32);
   auto same = [](torch::Tensor a, torch::Tensor b) {
     return torch::equal(a.cpu().contiguous().view(torch::kInt64), b.contiguous().view(torch::kInt64));
   };
@@ -70,6 +73,7 @@ int main(int argc, char** argv) {
   std::cout << "cells " << B << ", species " << chem.ns << ", branches " << chem.nj << ": C++ call "
             << (ok ? "bitwise identical to the Python call" : "DIFFERENT") << "; second call " << ms << " ms ("
             << 1e3 * ms / B << " us per cell)"
-            << "; max_steps " << max_steps << "; counts " << counts.view({1, 11}) << std::endl;
+            << "; max_steps " << max_steps << (defaults ? " (default arguments)" : "") << "; counts "
+            << counts.view({1, -1}) << std::endl;
   return ok ? 0 : 1;
 }

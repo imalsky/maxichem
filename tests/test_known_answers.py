@@ -1,11 +1,11 @@
 """The solver against answers known without the solver: first-order decay at constant pressure, and equilibrium."""
 
+import helpers
 import numpy as np
 import pytest
 import torch
 
-from maxichem import kincuda, kincuda_ad
-from maxichem.kinvulcan import KB, P0
+from maxichem import kincuda, kincuda_ad, kinvulcan
 
 pytestmark = pytest.mark.gpu
 
@@ -16,25 +16,7 @@ DECAY_TOLERANCE = 2e-5  # relative, at rtol 1e-6: the integrator's error; measur
 EQUILIBRIUM_TOLERANCE = 1e-12  # relative, on a mass-action ratio against the NASA-9 closed form; measured 1.3e-15
 SHARE_TOLERANCE = 1e-14  # relative: the guard's correction restores each element's share; measured 1.3e-16
 SMALL_TANGENT_TOLERANCE = 1e-4  # relative: central differences at dT = 1e-3 K carry about this much
-
-
-def _state(net, cells, device, **fractions):
-    """Return mole fractions [cells, species] with the given species and the rest zero."""
-    x = torch.zeros(cells, len(net.species), dtype=torch.float64, device=device)
-    for name, value in fractions.items():
-        x[:, net.species.index(name)] = value
-    return x / x.sum(1, keepdim=True)
-
-
-def _full(cells, value, device):
-    return torch.full((cells,), value, dtype=torch.float64, device=device)
-
-
-def decay_answer(t):
-    """Return the mole fractions of A and B for A -> 2 B at constant pressure, from pure A, at J t."""
-    survive = np.exp(-t)
-    total = 2.0 - survive
-    return survive / total, 2.0 * (1.0 - survive) / total
+SMALL_ADJOINT_TOLERANCE = 1e-6  # relative: only rounding separates the adjoint from the tangent (DOT_P99 of test_ad.py)
 
 
 def test_photolysis_decay_at_constant_pressure(read_network, gpu):
@@ -42,14 +24,20 @@ def test_photolysis_decay_at_constant_pressure(read_network, gpu):
     with kincuda.CudaSolver(net, gpu, photo=True) as solver:
         times = np.array([0.1, 0.5, 1.0, 2.0])
         cells = len(times)
-        x0 = _state(net, cells, gpu, N2_1=1.0)
+        x0 = helpers.state(net, cells, gpu, N2_1=1.0)
         J = torch.full((cells, len(net.photo)), J_TEST, dtype=torch.float64, device=gpu)
         dt = torch.tensor(times, dtype=torch.float64, device=gpu)
         x, _, done, _ = solver(
-            x0, _full(cells, T_TEST, gpu), _full(cells, P_TEST, gpu), dt, _full(cells, 1e-6, gpu), rtol=1e-6, J=J
+            x0,
+            helpers.full(cells, T_TEST, gpu),
+            helpers.full(cells, P_TEST, gpu),
+            dt,
+            helpers.full(cells, 1e-6, gpu),
+            rtol=1e-6,
+            J=J,
         )
     assert bool(done.all())
-    a_answer, b_answer = decay_answer(J_TEST * times)
+    a_answer, b_answer = helpers.decay_answer(J_TEST * times)
     assert np.allclose(x[:, net.species.index("N2_1")].cpu().numpy(), a_answer, rtol=DECAY_TOLERANCE, atol=0.0)
     assert np.allclose(x[:, net.species.index("N_1")].cpu().numpy(), b_answer, rtol=DECAY_TOLERANCE, atol=0.0)
 
@@ -66,10 +54,14 @@ def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T, stem):
     net = read_network(stem)
     with kincuda.CudaSolver(net, gpu) as solver:
         cells = 4
-        x0 = _state(net, cells, gpu, H=0.1, H2=0.6, OH=0.05, H2O=0.1, O=0.05, He=0.1)
+        x0 = helpers.state(net, cells, gpu, H=0.1, H2=0.6, OH=0.05, H2O=0.1, O=0.05, He=0.1)
         shares0 = (x0 @ torch.as_tensor(net.atoms, device=gpu)).sum(0)
         x, _, done, _ = solver(
-            x0, _full(cells, T, gpu), _full(cells, P_TEST, gpu), _full(cells, 1e10, gpu), _full(cells, 1e-10, gpu)
+            x0,
+            helpers.full(cells, T, gpu),
+            helpers.full(cells, P_TEST, gpu),
+            helpers.full(cells, 1e10, gpu),
+            helpers.full(cells, 1e-10, gpu),
         )
     assert bool(done.all())
     fractions = {q: float(x[0, net.species.index(q)]) for q in ("H", "H2", "OH", "O", "H2O")}
@@ -84,7 +76,7 @@ def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T, stem):
         k2, rel=EQUILIBRIUM_TOLERANCE
     )
     # H + H + M = H2 + M: one mole fewer, so the ratio carries n_tot against the standard state
-    k3 = np.exp(-(g["H2"] - 2.0 * g["H"])) * (P0 / (KB * T)) * (KB * T / P_TEST)
+    k3 = np.exp(-(g["H2"] - 2.0 * g["H"])) * (kinvulcan.P0 / (kinvulcan.KB * T)) * (kinvulcan.KB * T / P_TEST)
     assert fractions["H2"] / fractions["H"] ** 2 == pytest.approx(k3, rel=EQUILIBRIUM_TOLERANCE)
     shares = (x @ torch.as_tensor(net.atoms, device=gpu)).sum(0)
     assert (
@@ -100,9 +92,9 @@ def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T, stem):
 def test_small_network_runs_in_every_kernel(read_network, gpu):
     net = read_network("synthetic_small")
     cells = 4
-    x0 = _state(net, cells, gpu, H=0.1, H2=0.6, OH=0.05, H2O=0.1, O=0.05, He=0.1)
-    T, P = _full(cells, 1500.0, gpu), _full(cells, P_TEST, gpu)
-    dt, h = _full(cells, 1e-3, gpu), _full(cells, 5e-4, gpu)
+    x0 = helpers.state(net, cells, gpu, H=0.1, H2=0.6, OH=0.05, H2O=0.1, O=0.05, He=0.1)
+    T, P = helpers.full(cells, 1500.0, gpu), helpers.full(cells, P_TEST, gpu)
+    dt, h = helpers.full(cells, 1e-3, gpu), helpers.full(cells, 5e-4, gpu)
     J = torch.full((cells, len(net.photo)), 1e-4, dtype=torch.float64, device=gpu)
     zero = torch.zeros_like(T)
     with kincuda.CudaSolver(net, gpu, photo=True) as solver:
@@ -117,12 +109,16 @@ def test_small_network_runs_in_every_kernel(read_network, gpu):
         tangent = ad.jvp(x0, T, P, dt, h, torch.zeros_like(x0), torch.ones_like(T), zero, zero, zero, J=J)
         up = ad.jvp(x0, T + step, P, dt, h, torch.zeros_like(x0), zero, zero, zero, zero, J=J)[0]
         down = ad.jvp(x0, T - step, P, dt, h, torch.zeros_like(x0), zero, zero, zero, zero, J=J)[0]
-        adjoint = ad.vjp(x0, T, P, dt, h, torch.ones_like(x0), J=J)
+        # a weight per species: the plain sum of x is 1 whatever T is, so its derivative says nothing
+        weights = torch.arange(1.0, len(net.species) + 1.0, dtype=torch.float64, device=gpu)
+        adjoint = ad.vjp(x0, T, P, dt, h, weights.expand_as(x0), J=J)
     for a, b in zip(called[:4], tangent[:4], strict=True):
         assert torch.equal(a, b)
     for a, b in zip(called[:4], adjoint[:4], strict=True):
         assert torch.equal(a, b)
     difference = (up - down) / (2.0 * step)
     assert torch.allclose(tangent[4], difference, rtol=SMALL_TANGENT_TOLERANCE, atol=1e-9)
-    dot = (tangent[4]).sum()  # the adjoint of the sum of x against the tangent of T
-    assert float(adjoint[4]["T"].sum()) == pytest.approx(float(dot), rel=SMALL_TANGENT_TOLERANCE, abs=1e-9)
+    contraction = (weights * tangent[4]).sum(1)
+    print(f"small network: adjoint {adjoint[4]['T'].tolist()}, tangent {contraction.tolist()}")
+    assert bool((contraction != 0.0).all())
+    assert torch.allclose(adjoint[4]["T"], contraction, rtol=SMALL_ADJOINT_TOLERANCE, atol=0.0)

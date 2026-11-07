@@ -1,21 +1,18 @@
 """The derivative kernels against finite differences of the call and against each other.
 
-States: truth boxes made with an earlier version of the NCHO network data (paths.AD_BOXES), mapped by species name, with
-their T, P and J. On SNCHO_photo_network_2025 the branches the boxes lack take the J of a 1-D WASP-39b model. The cases
-are in docs/testing.md. Run with ``pytest tests/test_ad.py -s`` to see each case's numbers.
+States: truth boxes made with an earlier version of the NCHO network data (paths.ad_boxes()), mapped by species name,
+with their T, P and J. On SNCHO_photo_network_2025 the branches the boxes lack take the J of a 1-D WASP-39b model. The
+cases are in docs/testing.md. Run with ``pytest tests/test_ad.py -s`` to see each case's numbers.
 """
 
-import gc
-import sys
 import types
 from typing import Any
 
-import helpers
 import numpy as np
 import pytest
 import torch
 
-from maxichem import kincuda, kincuda_ad, kinvulcan, paths
+from maxichem import _checks, kincuda, kincuda_ad, kinvulcan, paths
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
@@ -51,18 +48,24 @@ def pct(a):
     )
 
 
-def fd_verdict(verdict, label, b, nj, cover=FD_COVERAGE):
-    """Judge a case's finite-difference errors."""
+def fd_verdict(verdict, label, b, nj, nonfin, flag2, cover=FD_COVERAGE):
+    """Judge a case's finite-difference errors, and its counts of non-finite cells and of cells the guard flagged 2."""
     fin = b[np.isfinite(b)]
     cov = len(fin) / max(nj, 1)
     ok = (
-        len(fin) >= FD_MIN_CELLS
+        nonfin == 0
+        and flag2 == 0
+        and len(fin) >= FD_MIN_CELLS
         and cov >= cover
         and np.quantile(fin, 0.9) <= FD_P90
         and np.quantile(fin, 0.99) <= FD_P99
-        and (len(fin) == 0 or fin.max() <= FD_MAX)
+        and fin.max() <= FD_MAX
     )
-    verdict(label, ok, f"judged {nj}, with a plateau {len(fin)} ({100 * cov:.0f} %); {pct(fin)}")
+    verdict(
+        label,
+        ok,
+        f"judged {nj}, with a plateau {len(fin)} ({100 * cov:.0f} %), non-finite {nonfin}, flag 2 {flag2}; {pct(fin)}",
+    )
 
 
 def dot_verdict(verdict, label, e, nj, nex, nonfin, p99=DOT_P99):
@@ -75,14 +78,14 @@ class DerivativeChecks:
     """A network with its solvers, states and the comparisons the tests run."""
 
     def __init__(self, name, device):
-        thermo = helpers.thermo_folder()
-        helpers.require_data(paths.AD_BOXES)
+        thermo = paths.vulcan_thermo()
+        paths.need(paths.ad_boxes())
         file = name if name.endswith(".txt") else f"{name}_network.txt"
         self.device = device
         self.net = kinvulcan.VulcanNetwork(thermo / file, thermo / "NASA9")
         self.kc = kincuda.CudaSolver(self.net, device, photo=True)
         self.ad = kincuda_ad.ADSolver(self.net, device, photo=True)
-        self.boxes = np.load(paths.AD_BOXES)
+        self.boxes = np.load(paths.ad_boxes())
         self.box_species = [str(q) for q in self.boxes["species"]]
         lines = [str(q) for q in self.boxes["lines"]]
         self.columns = [
@@ -91,8 +94,8 @@ class DerivativeChecks:
         ]
         self.reference_J = None  # J of the branches the boxes lack
         if file == "SNCHO_photo_network_2025.txt":
-            helpers.require_data(paths.JREF_S)
-            stored = np.load(paths.JREF_S)
+            paths.need(paths.jref_sulfur())
+            stored = np.load(paths.jref_sulfur())
             keys = [str(q) for q in stored["lines"]]
             self.reference_J = np.stack(
                 [stored["J"][:, keys.index(f"{q['absorber']},{q['branch']}")] for q in self.net.photo], 1
@@ -120,7 +123,7 @@ class DerivativeChecks:
             [box[:, self.box_species.index(q)] if q in self.box_species else np.zeros(len(sel)) for q in species], 1
         )
         if "H2S" in species:
-            x[:, species.index("H2S")] = helpers.H2S_PER_H2_SOLAR * x[:, species.index("H2")]
+            x[:, species.index("H2S")] = _checks.H2S_PER_H2_SOLAR * x[:, species.index("H2")]
         x = x / x.sum(1, keepdims=True)
         rows = []
         for j, c in enumerate(self.columns):
@@ -163,6 +166,17 @@ class DerivativeChecks:
             o = self.ad.jvp(x, T, P, d, h, *self.zt(x), lm=lm, rc=rc, J=J, atol=atol)
         return o[0], o[3]
 
+    def last_flag(self):
+        """Return a copy of the last call's per-cell flag."""
+        assert self.ad.flag is not None
+        return self.ad.flag.clone()
+
+    @staticmethod
+    def nonfinite_cells(flag, tx, th, S):
+        """Count the cells with a non-finite tangent or difference (S holds both); only flag 2 may have them."""
+        finite = torch.isfinite(tx).all(1) & torch.isfinite(th) & torch.isfinite(S)
+        return int(((flag != 2) & torch.logical_not(finite)).sum())
+
     def plateau(self, fds, ad_t, big, k1, ks):
         """Return per cell the best error over a plateau of the differences against ad_t, and its scale S.
 
@@ -184,7 +198,7 @@ class DerivativeChecks:
         return best, S
 
     def fd_case(self, x, T, P, J, dt, cls, seed, with_lm):
-        """Compare one input class's tangent with central differences: errors of the judged cells and their count."""
+        """Compare one input class's tangent with central differences: judged errors, count, non-finite, flag 2."""
         B = x.shape[0]
         rn = self.gen(seed)
         h, d = torch.full_like(T, 1e-10), torch.full_like(T, dt)
@@ -205,9 +219,10 @@ class DerivativeChecks:
             drc = rn(self.ad.nr, 9) * torch.tensor([1.0, 0.1, 30.0, 1.0, 0.1, 30.0, 1.0, 0.1, 30.0], device=self.device)
         elif cls == "J":
             dJ = J * rn(*J.shape)
-        x1, _, _, k1, tx, _ = self.ad.jvp(
+        x1, _, _, k1, tx, th = self.ad.jvp(
             x, T, P, d, h, dx, dT, dP, ddt, dh, lm=lm, dlm=dlm, drc=drc, dJ=dJ, J=J, adapt=True
         )
+        flag = self.last_flag()  # the differences' own calls replace it
         adl = tx / x1
         big = x1 > 1e-20
         fds, ks = [], []
@@ -229,10 +244,15 @@ class DerivativeChecks:
         judged = S > 1e-6
         if cls == "J":
             judged &= lit
-        return best[judged].cpu().numpy(), int(judged.sum())
+        return (
+            best[judged].cpu().numpy(),
+            int(judged.sum()),
+            self.nonfinite_cells(flag, tx, th, S),
+            int((flag == 2).sum()),
+        )
 
     def dark_fd(self, x, T, P, J, dt, single, with_lm, seed, j0, atol):
-        """Compare the J tangent in dark cells with differences: errors of the judged cells and their count."""
+        """Compare the J tangent in dark cells with differences: judged errors, their count, non-finite, flag 2."""
         B = x.shape[0]
         rn = self.gen(seed)
         lit = (J > 0).any(1)
@@ -245,7 +265,8 @@ class DerivativeChecks:
             dJ = torch.zeros_like(dJ).scatter_(1, keep[:, None], 1.0)
         dJ = torch.where(dark[:, None], dJ, torch.zeros_like(dJ))
         j_base = J + j0 * dJ
-        x0, _, _, k0, tx, _ = self.ad.jvp(x, T, P, d, h, *self.zt(x), lm=lm, dJ=dJ, J=j_base, atol=atol)
+        x0, _, _, k0, tx, th = self.ad.jvp(x, T, P, d, h, *self.zt(x), lm=lm, dJ=dJ, J=j_base, atol=atol)
+        flag = self.last_flag()  # the differences' own calls replace it
         mt = tx.abs().amax(1).clamp_min(1e-300)
         big = torch.ones_like(x0, dtype=torch.bool)
         e = (1e-8 / mt).clamp_max(0.1 * j0 if j0 > 0 else 1e-6)[:, None]  # capped once, then smaller by ten twice
@@ -263,7 +284,12 @@ class DerivativeChecks:
             e = e / 10
         best, S = self.plateau(fds, tx, big, k0, ks)
         judged = dark & (S > 1e-2)  # resolvable: J 1e-6 s^-1 moves x by > 1e-8 within dt
-        return best[judged].cpu().numpy(), int(judged.sum())
+        return (
+            best[judged].cpu().numpy(),
+            int(judged.sum()),
+            self.nonfinite_cells(flag, tx, th, S),
+            int((flag == 2).sum()),
+        )
 
     def dot_terms(self, x, T, P, J, dt, cls, adapt, seed, max_steps=4000, sel=None):
         """Return the dot-product errors of one input class, with the call's flags, tangents and cotangents."""
@@ -290,8 +316,7 @@ class DerivativeChecks:
         x1, h1, _, _, tx, th = self.ad.jvp(
             x, T, P, d, h, dx, dT, dP, ddt, dh, lm=lm, dlm=dlm, dJ=dJ, J=J, adapt=adapt, max_steps=max_steps
         )
-        assert self.ad.flag is not None
-        flj = self.ad.flag.clone()
+        flj = self.last_flag()
         c = torch.where(x1 > 1e-20, rn(*x.shape) / x1.clamp_min(1e-300), 0.0)
         ch = rn(B) / h1 if adapt else None
         gg = self.ad.vjp(x, T, P, d, h, c, gh=ch, lm=lm, J=J, adapt=adapt, max_steps=max_steps)[4]
@@ -314,15 +339,15 @@ class DerivativeChecks:
         if sel is not None:
             judged &= sel(flj)
         nonfin = int((torch.logical_not(torch.isfinite(e)) & (flj != 2)).sum())
-        return (
-            e[judged & torch.isfinite(e)].cpu().numpy(),
-            int(judged.sum()),
-            int((flj != 2).sum()) - int(judged.sum()),
-            nonfin,
-            flj,
-            tx,
-            gg,
-            th,
+        return types.SimpleNamespace(
+            e=e[judged & torch.isfinite(e)].cpu().numpy(),
+            judged=int(judged.sum()),
+            not_judged=int((flj != 2).sum()) - int(judged.sum()),
+            nonfinite=nonfin,
+            flag=flj,
+            tx=tx,
+            cotangents=gg,
+            th=th,
         )
 
 
@@ -352,44 +377,58 @@ def test_tangents_against_differences(checks, verdict):
     for name, (x, T, P, J, dt) in checks.cases.items():
         for with_lm in (False, True):
             for cls in ("x", "T", "P", "J", "lm", "rc"):
-                b, nj = checks.fd_case(x, T, P, J, dt, cls, 11, with_lm)
-                fd_verdict(verdict, f"FD {name} {cls}{' (lm != 0)' if with_lm else ''}", b, nj)
+                b, nj, nonfin, flag2 = checks.fd_case(x, T, P, J, dt, cls, 11, with_lm)
+                fd_verdict(verdict, f"FD {name} {cls}{' (lm != 0)' if with_lm else ''}", b, nj, nonfin, flag2)
 
 
 def test_dark_tangents_near_zero(checks, verdict):
-    pool, njudged, low = [], 0, []
+    pool, njudged, nonfinite, flagged, low = [], 0, 0, 0, []
     for name, (x, T, P, J, dt) in checks.cases.items():
         for single in (False, True):
             for with_lm in (False, True):
-                b, nj = checks.dark_fd(x, T, P, J, dt, single, with_lm, 13, 1e-8, kincuda.ATOL)
+                b, nj, nonfin, flag2 = checks.dark_fd(x, T, P, J, dt, single, with_lm, 13, 1e-8, kincuda.ATOL)
                 fin = b[np.isfinite(b)]
                 pool.append(fin)
                 njudged += nj
+                nonfinite += nonfin
+                flagged += flag2
                 lab = f"{name} {'one branch' if single else 'all branches'}{' (lm != 0)' if with_lm else ''}"
                 if nj >= FD_MIN_CELLS and len(fin) < FD_CASE_COVERAGE * nj:
                     low.append(f"{lab}: {len(fin)} of {nj}")
                 print(f"INFO  FD J near 0 {lab}: judged {nj}, with a plateau {len(fin)}; {pct(fin)}", flush=True)
-    fd_verdict(verdict, "FD J near 0 (J0 1e-8 s^-1), the 12 cases pooled", np.concatenate(pool), njudged)
+    fd_verdict(
+        verdict, "FD J near 0 (J0 1e-8 s^-1), the 12 cases pooled", np.concatenate(pool), njudged, nonfinite, flagged
+    )
     verdict(
         "FD J near 0, every case with 20 judged cells has a plateau in >= 80 %", not low, "; ".join(low) or "all do"
     )
 
 
 def test_dark_tangents_at_zero(checks, verdict):
-    pool, judged_at_zero = [], 0
+    pool, judged_at_zero, nonfinite, flagged = [], 0, 0, 0
     for name, (x, T, P, J, dt) in checks.cases.items():
         for single in (False, True):
             for with_lm in (False, True):
-                b, nj = checks.dark_fd(x, T, P, J, dt, single, with_lm, 13, 0.0, 1e-16)
+                b, nj, nonfin, flag2 = checks.dark_fd(x, T, P, J, dt, single, with_lm, 13, 0.0, 1e-16)
                 fin = b[np.isfinite(b)]
                 pool.append(fin)
                 judged_at_zero += nj
+                nonfinite += nonfin
+                flagged += flag2
                 print(
                     f"INFO  FD J at exactly 0, atol 1e-16, {name} {'one branch' if single else 'all branches'}"
                     f"{' (lm != 0)' if with_lm else ''}: judged {nj}, with a plateau {len(fin)}; {pct(fin)}",
                     flush=True,
                 )
-    fd_verdict(verdict, "FD J at exactly 0, atol 1e-16, the 12 cases pooled", np.concatenate(pool), judged_at_zero, 0.0)
+    fd_verdict(
+        verdict,
+        "FD J at exactly 0, atol 1e-16, the 12 cases pooled",
+        np.concatenate(pool),
+        judged_at_zero,
+        nonfinite,
+        flagged,
+        0.0,
+    )
 
 
 def test_dot_products(checks, verdict):
@@ -398,14 +437,14 @@ def test_dot_products(checks, verdict):
             for cls in ("x", "T", "P", "dt", "h", "lm", "J"):
                 if cls in ("dt", "h") and not adapt:
                     continue
-                e, nj, nex, nonfin = checks.dot_terms(x, T, P, J, dt, cls, adapt, 21)[:4]
+                t = checks.dot_terms(x, T, P, J, dt, cls, adapt, 21)
                 dot_verdict(
                     verdict,
                     f"dot {name} {'adaptive' if adapt else 'frozen'} {cls}",
-                    e,
-                    nj,
-                    nex,
-                    nonfin,
+                    t.e,
+                    t.judged,
+                    t.not_judged,
+                    t.nonfinite,
                     DOT_P99_LM if cls == "lm" else DOT_P99,
                 )
 
@@ -431,26 +470,26 @@ def test_recovered_dot_products(checks, verdict):
         for cls in ("x", "T", "P", "dt", "h", "lm", "J"):
             if cls in ("dt", "h") and not adapt:
                 continue
-            e, nj, nex, nonfin, flj, tx, gg, th = checks.dot_terms(x, T, P, J, dt, cls, adapt, 31, 3, lambda f: f == 1)
-            bad2 = flj == 2
+            t = checks.dot_terms(x, T, P, J, dt, cls, adapt, 31, 3, lambda f: f == 1)
+            bad2 = t.flag == 2
             nan2 = bool(
-                torch.isnan(tx[bad2]).all()
-                and torch.isnan(gg["x"][bad2]).all()
-                and torch.isnan(gg["T"][bad2]).all()
-                and (not adapt or torch.isnan(th[bad2]).all())
+                torch.isnan(t.tx[bad2]).all()
+                and torch.isnan(t.cotangents["x"][bad2]).all()
+                and torch.isnan(t.cotangents["T"][bad2]).all()
+                and (not adapt or torch.isnan(t.th[bad2]).all())
             )
             fin = bool(
-                torch.isfinite(tx[torch.logical_not(bad2)]).all()
-                and torch.isfinite(gg["x"][torch.logical_not(bad2)]).all()
+                torch.isfinite(t.tx[torch.logical_not(bad2)]).all()
+                and torch.isfinite(t.cotangents["x"][torch.logical_not(bad2)]).all()
             )
             dot_verdict(
                 verdict,
                 f"recovered cells dot {'adaptive' if adapt else 'frozen'} {cls} (finite on flags 0 / 1 {fin}, NaN on "
                 f"flag 2 {nan2})",
-                e if fin and nan2 else np.array([np.inf]),
-                nj,
-                nex,
-                nonfin,
+                t.e if fin and nan2 else np.array([np.inf]),
+                t.judged,
+                t.not_judged,
+                t.nonfinite,
             )
 
 
@@ -510,23 +549,28 @@ def _directions(checks):
     lm = 0.1 * rn(B, checks.ad.nr)
     c = rn(*x.shape)
     tangents_h = (*tan[:4], d * rn(D, B))
-    return x, T, P, J, d, h, tan, tangents_h, dlm, dJ, lm, c, D, B
+    return types.SimpleNamespace(
+        x=x, T=T, P=P, J=J, d=d, h=h, tan=tan, tangents_with_h=tangents_h, dlm=dlm, dJ=dJ, lm=lm, c=c, D=D, B=B
+    )
 
 
 def test_directions_share_one_call(checks, verdict):
-    x, T, P, J, d, h, tan, _, dlm, dJ, lm, _, D, _ = _directions(checks)
-    allx = checks.ad.jvp(x, T, P, d, h, *tan, lm=lm, dlm=dlm, dJ=dJ, J=J)
-    one = [checks.ad.jvp(x, T, P, d, h, *(a[k] for a in tan), lm=lm, dlm=dlm[k], dJ=dJ[k], J=J) for k in range(D)]
-    same = all(torch.equal(allx[4][k], one[k][4]) and torch.equal(allx[5][k], one[k][5]) for k in range(D))
+    s = _directions(checks)
+    allx = checks.ad.jvp(s.x, s.T, s.P, s.d, s.h, *s.tan, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    one = [
+        checks.ad.jvp(s.x, s.T, s.P, s.d, s.h, *(a[k] for a in s.tan), lm=s.lm, dlm=s.dlm[k], dJ=s.dJ[k], J=s.J)
+        for k in range(s.D)
+    ]
+    same = all(torch.equal(allx[4][k], one[k][4]) and torch.equal(allx[5][k], one[k][5]) for k in range(s.D))
     verdict("three directions in one call", same, f"bitwise equal to one call per direction: {same}")
 
 
 def test_determinism(checks, verdict):
-    x, T, P, J, d, h, _, _, _, _, lm, c, _, B = _directions(checks)
-    a1 = checks.ad.vjp(x, T, P, d, h, c, lm=lm, J=J)[4]
-    a2 = checks.ad.vjp(x, T, P, d, h, c, lm=lm, J=J)[4]
-    perm = torch.randperm(B, generator=torch.Generator().manual_seed(1)).to(checks.device)
-    a3 = checks.ad.vjp(x[perm], T[perm], P[perm], d[perm], h[perm], c[perm], lm=lm[perm], J=J[perm])[4]
+    s = _directions(checks)
+    a1 = checks.ad.vjp(s.x, s.T, s.P, s.d, s.h, s.c, lm=s.lm, J=s.J)[4]
+    a2 = checks.ad.vjp(s.x, s.T, s.P, s.d, s.h, s.c, lm=s.lm, J=s.J)[4]
+    perm = torch.randperm(s.B, generator=torch.Generator().manual_seed(1)).to(checks.device)
+    a3 = checks.ad.vjp(s.x[perm], s.T[perm], s.P[perm], s.d[perm], s.h[perm], s.c[perm], lm=s.lm[perm], J=s.J[perm])[4]
     det = all(torch.equal(a1[k], a2[k]) for k in a1)
     pm = all(torch.equal(a1[k][perm], a3[k]) for k in a1 if k != "rc")
     verdict(
@@ -536,19 +580,21 @@ def test_determinism(checks, verdict):
 
 def test_non_finite_step_acts_as_twice_dt(checks, verdict):
     # A non-finite starting step acts as dt with no sensitivity to it: min(h, dt) = dt at h = 2 dt too.
-    x, T, P, J, d, _, _, tanh, dlm, dJ, lm, c, _, _ = _directions(checks)
-    j2 = checks.ad.jvp(x, T, P, d, 2.0 * d, *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
-    v2 = checks.ad.vjp(x, T, P, d, 2.0 * d, c, lm=lm, J=J)
+    s = _directions(checks)
+    j2 = checks.ad.jvp(s.x, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    v2 = checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
     nonfin = {}
     for q in (float("nan"), float("-inf")):
-        jn = checks.ad.jvp(x, T, P, d, torch.full_like(T, q), *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
-        vn = checks.ad.vjp(x, T, P, d, torch.full_like(T, q), c, lm=lm, J=J)
+        jn = checks.ad.jvp(
+            s.x, s.T, s.P, s.d, torch.full_like(s.T, q), *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J
+        )
+        vn = checks.ad.vjp(s.x, s.T, s.P, s.d, torch.full_like(s.T, q), s.c, lm=s.lm, J=s.J)
         nonfin[str(q)] = (
             all(torch.equal(a, b) for a, b in zip(jn, j2, strict=True))
             and all(torch.equal(a, b) for a, b in zip(vn[:4], v2[:4], strict=True))
             and all(torch.equal(vn[4][k], v2[4][k]) for k in vn[4])
             and bool((vn[4]["h"] == 0).all())
-            and checks.ad.status["nonfinite_h"] == x.shape[0]
+            and checks.ad.fallback["nonfinite_h"] == s.x.shape[0]
         )
     verdict(
         "non-finite starting step",
@@ -558,15 +604,15 @@ def test_non_finite_step_acts_as_twice_dt(checks, verdict):
 
 
 def test_nan_log_multiplier_takes_no_tries(checks, verdict):
-    x, T, P, J, d, _, _, tanh, dlm, dJ, lm, c, _, _ = _directions(checks)
-    lm_bad = lm.clone()
+    s = _directions(checks)
+    lm_bad = s.lm.clone()
     lm_bad[0, 0] = float("nan")
-    jb = checks.ad.jvp(x, T, P, d, 2.0 * d, *tanh, lm=lm_bad, dlm=dlm, dJ=dJ, J=J)
-    cj = checks.ad.status
-    vb = checks.ad.vjp(x, T, P, d, 2.0 * d, c, lm=lm_bad, J=J)
-    cv = checks.ad.status
-    j2 = checks.ad.jvp(x, T, P, d, 2.0 * d, *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
-    v2 = checks.ad.vjp(x, T, P, d, 2.0 * d, c, lm=lm, J=J)
+    jb = checks.ad.jvp(s.x, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=lm_bad, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    cj = checks.ad.fallback
+    vb = checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=lm_bad, J=s.J)
+    cv = checks.ad.fallback
+    j2 = checks.ad.jvp(s.x, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    v2 = checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
     ok = (
         int(jb[3][0]) == 0
         and int(vb[3][0]) == 0
@@ -585,23 +631,71 @@ def test_nan_log_multiplier_takes_no_tries(checks, verdict):
 
 
 def test_missing_j_is_refused(checks):
-    x, T, P, _, d, _, _, tanh, _, _, _, c, _, _ = _directions(checks)
+    s = _directions(checks)
     with pytest.raises(ValueError, match="required"):
-        checks.ad.jvp(x, T, P, d, 2.0 * d, *tanh)
+        checks.ad.jvp(s.x, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h)
     with pytest.raises(ValueError, match="required"):
-        checks.ad.vjp(x, T, P, d, 2.0 * d, c)
+        checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c)
+
+
+@pytest.mark.parametrize(
+    ("argument", "bad"),
+    [
+        ("lm", lambda a: a[:-1]),
+        ("rc", lambda a: a[:-1]),
+        ("dx", lambda a: a.float()),
+        ("dT", lambda a: a[:-1]),
+        ("dlm", lambda a: a[:-1]),
+        ("dJ", lambda a: a.cpu()),
+    ],
+)
+def test_wrong_tangent_inputs_name_the_argument(checks, argument, bad):
+    s = _directions(checks)
+    good = dict(zip(("dx", "dT", "dP", "ddt", "dh"), s.tan, strict=True)) | {
+        "dlm": s.dlm,
+        "dJ": s.dJ,
+        "lm": s.lm,
+        "rc": checks.ad.rc0,
+    }
+    good[argument] = bad(good[argument])
+    with pytest.raises(ValueError, match=rf"^{argument}: float64 "):
+        checks.ad.jvp(s.x, s.T, s.P, s.d, s.h, J=s.J, **good)
+
+
+def test_zero_dimensional_tangent_is_refused_by_name(checks):
+    s = _directions(checks)
+    with pytest.raises(ValueError, match=r"^dx: \[B, S\] or \[D, B, S\]"):
+        checks.ad.jvp(s.x, s.T, s.P, s.d, s.h, torch.tensor(0.0, dtype=torch.float64), *s.tan[1:], J=s.J)
+
+
+@pytest.mark.parametrize("argument", ["gx", "gh"])
+def test_wrong_cotangents_name_the_argument(checks, argument):
+    s = _directions(checks)
+    gh = torch.zeros_like(s.T)
+    with pytest.raises(ValueError, match=rf"^{argument}: float64 "):
+        checks.ad.vjp(
+            s.x,
+            s.T,
+            s.P,
+            s.d,
+            s.h,
+            s.c[:-1] if argument == "gx" else s.c,
+            gh=gh[:-1] if argument == "gh" else gh,
+            lm=s.lm,
+            J=s.J,
+        )
 
 
 def test_negative_x_is_bad_input(checks, verdict):
-    x, T, P, J, d, _, _, tanh, dlm, dJ, lm, c, _, _ = _directions(checks)
-    j2 = checks.ad.jvp(x, T, P, d, 2.0 * d, *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
-    v2 = checks.ad.vjp(x, T, P, d, 2.0 * d, c, lm=lm, J=J)
-    xneg = x.clone()
+    s = _directions(checks)
+    j2 = checks.ad.jvp(s.x, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    v2 = checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
+    xneg = s.x.clone()
     xneg[0, 0] = -1e-3
-    jb = checks.ad.jvp(xneg, T, P, d, 2.0 * d, *tanh, lm=lm, dlm=dlm, dJ=dJ, J=J)
-    cj = checks.ad.status
-    vb = checks.ad.vjp(xneg, T, P, d, 2.0 * d, c, lm=lm, J=J)
-    cv = checks.ad.status
+    jb = checks.ad.jvp(xneg, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    cj = checks.ad.fallback
+    vb = checks.ad.vjp(xneg, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
+    cv = checks.ad.fallback
     negok = (
         cj["bad_input"] == 1
         and cv["bad_input"] == 1
@@ -614,13 +708,3 @@ def test_negative_x_is_bad_input(checks, verdict):
         and all(torch.equal(vb[4][k][1:], v2[4][k][1:]) for k in vb[4] if k != "rc")  # rc sums over the cells
     )
     verdict("negative x", negok, f"jvp {cj}; vjp {cv}; cell 0 not done, the others bitwise the valid batch's")
-
-
-def test_failed_constructor_leaves_no_error_at_deletion(gpu):
-    seen: list[object] = []  # a constructor that fails before it loads anything: nothing to unload
-    hook, sys.unraisablehook = sys.unraisablehook, seen.append
-    with pytest.raises(ValueError, match="photo=True"):
-        kincuda_ad.ADSolver(types.SimpleNamespace(photo=[], photo_missing=[]), gpu, photo=True)  # type: ignore[arg-type]  # refused before use
-    gc.collect()
-    sys.unraisablehook = hook
-    assert not seen

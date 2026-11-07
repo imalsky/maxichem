@@ -7,14 +7,14 @@ from maxichem import paths
 
 def test_data_root_follows_the_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("CHEM_DATA", str(tmp_path))
-    assert tmp_path == paths.DATA
-    assert paths.LIBREF.is_relative_to(tmp_path)
+    assert tmp_path == paths.data()
+    assert paths.libref().is_relative_to(tmp_path)
 
 
 def test_unset_thermo_folder_says_what_to_set(monkeypatch):
     monkeypatch.delenv("VULCAN_THERMO", raising=False)
     with pytest.raises(RuntimeError, match="VULCAN_THERMO"):
-        _ = paths.VULCAN_THERMO
+        paths.vulcan_thermo()
 
 
 def test_need_names_what_is_missing(tmp_path):

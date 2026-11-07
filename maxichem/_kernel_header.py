@@ -1,7 +1,6 @@
 """The kernels' data header: one network's sizes, offsets and bit masks as preprocessor macros.
 
-Public names: ``call_header``, ``derivative_header``, ``kernel_sources``. The kernels themselves are the files in
-``kernels/``; see docs/architecture.md.
+The kernels themselves are the files in ``kernels/``; see docs/architecture.md.
 """
 
 from collections.abc import Iterable
@@ -9,19 +8,24 @@ from pathlib import Path
 from typing import Any
 
 from . import kinvulcan
-from ._ad_tables import layout
+from ._ad_tables import GATHER_FIELDS, layout, scratch_sizes
 from ._constants import (
-    CAP,
+    ARRH_BLOCK_THREADS,
     COUNT_SLOTS,
     DMAX,
-    DRIFT,
     K_COLL,
     NO_SLOT,
     RATE_LAW_FLAGS,
     RATE_LAW_SHIFTS,
     T_MIN,
 )
-from ._tables import pack_small_tables, rates_fit_in_block, shared_doubles_per_cell, shared_doubles_recover
+from ._tables import (
+    pack_small_tables,
+    rates_fit_in_block,
+    scratch_strides,
+    shared_doubles_per_cell,
+    shared_doubles_recover,
+)
 
 _KERNELS = Path(__file__).parent / "kernels"
 _HEADER = "network.h"
@@ -103,28 +107,14 @@ def _stream_fields(widths: dict[str, int]) -> dict[str, int | str]:
     }
 
 
-def call_header(tab: dict[str, Any], cpb: int, wsh: bool = True, drift: float | None = None) -> str:
-    """Return the data header of the call, guard and recovery kernels.
-
-    Parameters
-    ----------
-    tab : dict
-        The network's tables, from ``_tables.tables``.
-    cpb : int
-        Cells per block.
-    wsh : bool
-        The recovery kernel holds W in shared memory.
-    drift : float, optional
-        The element-drift allowance, relative; the default is ``DRIFT``.
-
-    Returns
-    -------
-    str
-        The text of ``network.h``.
-    """
+def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
+    """Return network.h for the call, guard and recovery kernels; wsh: the recovery holds W in shared memory."""
     ns, nnz, tb0, law = tab["ns"], tab["nnz"], tab["tb0"], tab["law"]
     blob, offsets = pack_small_tables(tab)
+    call_stride, recover_stride = scratch_strides(tab, wsh)
     macros = {
+        "CALL_STRIDE": call_stride,
+        "RECOVER_STRIDE": recover_stride,
         "NS": ns,
         "NR": tab["nr"],
         "NRT": tab["nrt"],
@@ -146,9 +136,10 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool = True, drift: float | 
         "NEL": tab["atoms"].shape[1],
         "ETOT": repr(float(tab["atoms"].sum())),
         "TMIN": repr(T_MIN),
-        "DRIFT": repr(float(DRIFT if drift is None else drift)),
+        "DRIFT": repr(float(drift)),
         "KCOLL": repr(K_COLL),
         "KBOLTZ": repr(kinvulcan.KB),
+        "NASA_SPLIT_T_K": repr(kinvulcan.NASA_SPLIT_T),
         "P0BAR": repr(kinvulcan.P0),
         "WSH": int(wsh),
         "VR": max(tab["nr"], ns + 1),
@@ -167,30 +158,10 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool = True, drift: float | 
     return "\n".join([*lines, *_pattern_macros(tab)]) + "\n"
 
 
-def derivative_header(
-    tab: dict[str, Any], ext: dict[str, Any], kind: str, wpb: int, cap: int = CAP, drift: float | None = None
-) -> str:
-    """Return the data header of the tangent ("jvp") or adjoint ("vjp") kernels.
+def derivative_header(tab: dict[str, Any], ext: dict[str, Any], kind: str, wpb: int, cap: int, drift: float) -> str:
+    """Return the text of network.h for the tangent ("jvp") or adjoint ("vjp") kernels.
 
     They are built on the call kernels with one cell per block, so this header starts with ``call_header``'s.
-
-    Parameters
-    ----------
-    tab, ext : dict
-        The network's tables, from ``_tables.tables`` and ``_ad_tables.ad_tables``.
-    kind : str
-        "jvp" or "vjp".
-    wpb : int
-        Warps per block.
-    cap : int
-        Attempts stored per cell before the adjoint switches to checkpoints.
-    drift : float, optional
-        The element-drift allowance, relative; the default is ``DRIFT``.
-
-    Returns
-    -------
-    str
-        The text of ``network.h``.
     """
     offsets, perwa = layout(tab, ext, kind)
     macros = {
@@ -202,6 +173,9 @@ def derivative_header(
         "UROW": f"{ext['urow']}ull",
         "LROW": f"{ext['lrow']}ull",
         "PX_SLOTS": ", ".join(map(str, ext["px"])),
+        "ARRH_BLOCK_THREADS": ARRH_BLOCK_THREADS,
+        **scratch_sizes(tab, cap),
+        **GATHER_FIELDS,
         **{f"A_{name}": offset for name, offset in offsets.items()},
     }
-    return call_header(tab, 1, drift=drift) + "\n".join(f"#define {k} {v}" for k, v in macros.items()) + "\n"
+    return call_header(tab, 1, True, drift) + "\n".join(f"#define {k} {v}" for k, v in macros.items()) + "\n"

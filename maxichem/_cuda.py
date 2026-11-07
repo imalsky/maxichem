@@ -50,22 +50,7 @@ def check_driver(result: int, what: str) -> None:
 
 
 def compile_cubin(name: str, sources: dict[str, str], arch: str) -> bytes:
-    """Compile a kernel file to a cubin with NVRTC, the libnvrtc of the nvidia-cuda-nvrtc wheel.
-
-    Parameters
-    ----------
-    name : str
-        The kernel file to compile: a key of ``sources``.
-    sources : dict of str to str
-        Each file's text by name; the others are the kernel's in-memory headers.
-    arch : str
-        The architecture's digits, as in sm_89.
-
-    Returns
-    -------
-    bytes
-        The cubin.
-    """
+    """Compile the file name, a key of sources (the others are headers), with the wheel's NVRTC; arch as in sm_89."""
     nv = ctypes.CDLL(str(Path(next(iter(nvidia.cuda_nvrtc.__path__))) / "lib" / NVRTC_LIBRARY))
     nv.nvrtcGetErrorString.restype = ctypes.c_char_p
 
@@ -94,14 +79,16 @@ def compile_cubin(name: str, sources: dict[str, str], arch: str) -> bytes:
     return cubin.raw
 
 
-def launch_kernel(fn: Any, grid: int, block: int, smem: int, stream: Any, args: Iterable[Any]) -> None:
+def launch_kernel(fn: ctypes.c_void_p, grid: int, block: int, smem: int, stream: int, args: Iterable[Any]) -> None:
     """Launch a kernel on a stream with args: tensors (passed as pointers) or ctypes scalars."""
     vals = [ctypes.c_void_p(a.data_ptr()) if isinstance(a, torch.Tensor) else a for a in args]
     ptrs = (ctypes.c_void_p * len(vals))(*[ctypes.addressof(v) for v in vals])
     check_driver(driver().cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, smem, stream, ptrs, None), "launch")
 
 
-def load_module(cubin: bytes, names: Iterable[str], loaded: list[Any]) -> tuple[Any, list[Any]]:
+def load_module(
+    cubin: bytes, names: Iterable[str], loaded: list[ctypes.c_void_p]
+) -> tuple[ctypes.c_void_p, list[ctypes.c_void_p]]:
     """Load a cubin and return its module with its kernels, by the names given.
 
     The module's handle goes into ``loaded`` first, so a caller can unload it if a later step fails.
@@ -118,7 +105,7 @@ def load_module(cubin: bytes, names: Iterable[str], loaded: list[Any]) -> tuple[
     return module, functions
 
 
-def unload_modules(device: torch.device, modules: list[Any]) -> None:
+def unload_modules(device: torch.device, modules: list[ctypes.c_void_p]) -> None:
     """Unload CUDA modules on their device, after the device's work is done, and empty the list."""
     with torch.cuda.device(device):
         torch.cuda.synchronize(device)
@@ -126,19 +113,19 @@ def unload_modules(device: torch.device, modules: list[Any]) -> None:
             check_driver(driver().cuModuleUnload(modules.pop()), "unload")
 
 
-def unload_at_deletion(device: torch.device, modules: list[Any]) -> None:
+def unload_at_deletion(device: torch.device, modules: list[ctypes.c_void_p]) -> None:
     """Unload what a solver still holds when it is deleted; a destructor must not raise, the process may be ending."""
     with contextlib.suppress(Exception):
         if modules:
             unload_modules(device, modules)
 
 
-def opt_in_shared_memory(fn: Any, smem: int) -> None:
+def opt_in_shared_memory(fn: ctypes.c_void_p, smem: int) -> None:
     """Let a kernel use this much shared memory per block (bytes)."""
     check_driver(driver().cuFuncSetAttribute(fn, ATTR_MAX_DYNAMIC_SHARED_BYTES, smem), "shared memory")
 
 
-def blocks_per_multiprocessor(fn: Any, threads: int, smem: int) -> int:
+def blocks_per_multiprocessor(fn: ctypes.c_void_p, threads: int, smem: int) -> int:
     """Opt a kernel in to this shared memory and return the blocks one multiprocessor holds at once."""
     opt_in_shared_memory(fn, smem)
     blocks = ctypes.c_int()
@@ -170,7 +157,7 @@ def on_device(method: Callable[..., Any]) -> Callable[..., Any]:
     return run
 
 
-def function_attribute(fn: Any, attribute: int) -> int:
+def function_attribute(fn: ctypes.c_void_p, attribute: int) -> int:
     """Return a kernel's attribute: ``ATTR_LOCAL_BYTES`` or ``ATTR_REGISTERS``, per thread."""
     value = ctypes.c_int()
     check_driver(driver().cuFuncGetAttribute(ctypes.byref(value), attribute, fn), "attribute")

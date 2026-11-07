@@ -15,7 +15,3 @@ def __getattr__(name: str) -> Any:
     if name in _HOME:
         return getattr(importlib.import_module(f".{_HOME[name]}", __name__), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    return sorted(__all__)

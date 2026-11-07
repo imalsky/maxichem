@@ -2,9 +2,11 @@
 
 from pathlib import Path
 
+import helpers
 import pytest
+import torch
 
-from maxichem.kinvulcan import VulcanNetwork
+from maxichem import VulcanNetwork
 
 DATA = Path(__file__).parent / "data"
 
@@ -49,7 +51,6 @@ def verdict():
 @pytest.fixture(scope="session")
 def gpu():
     """Return the CUDA device, or skip the test where there is none."""
-    torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("this test needs a GPU")
     return torch.device("cuda")
@@ -58,7 +59,6 @@ def gpu():
 @pytest.fixture(scope="session", params=["NCHO_photo_network.txt", "SNCHO_photo_network_2025.txt"])
 def parity(request, gpu):
     """Return a real network with its stored reference and solvers."""
-    helpers = pytest.importorskip("helpers")
     case = helpers.Parity(request.param, gpu)
     yield case
     case.close()

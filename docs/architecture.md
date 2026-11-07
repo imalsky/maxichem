@@ -14,10 +14,12 @@ How the code is laid out, and why the kernels look as they do. [method.md](metho
 | `kernels/` | The kernels themselves, as `.cu` and `.cuh` files |
 | `_cuda.py` | NVRTC and the CUDA driver through ctypes: compile, load, launch |
 | `_export.py` | Writes a solver's kernels and tables for the C++ caller |
+| `_solver.py` | What the two solvers share: the kernels' lifetime, the counts, the input checks, the shared tables |
 | `kincuda.py` | `CudaSolver` |
 | `kincuda_ad.py` | `ADSolver` |
 | `_constants.py` | Settings and tables shared by the modules above |
 | `paths.py` | Data locations of the checks and benches |
+| `_checks.py` | What the checks and benches share: the scored gases and their floors, the start gas |
 
 ## From a network to a kernel
 
@@ -57,9 +59,10 @@ per thread, the register file already caps a block at 2 or 3 cells, so the extra
 - **Queue.** Persistent cells take work from an atomic queue, so no cell waits for the stiffest one. Results do not depend on the
   batch size or order.
 
-Shared arithmetic is `__forceinline__`: a noinline helper changes which operations fuse, and so the bits. What stays repeated says
+Shared arithmetic is `__forceinline__`: a noinline helper changes which operations fuse, and so the bits. `rhs`, `rhs1` and
+`check_cell` stay out of line, and their sums that reach the state use explicit `fma`. What stays repeated says
 why beside it: the kernels' `rhs` and `rhs1` differ in barriers and lanes, the call's LU reads its update words ahead, and the
-derivative forms of the rate law (`kpart`) need the terms the primal `law` folds. `test_ad.py` holds them to the call's bits and to
+derivative forms of the rate law (`rate_law_partials`) need the terms the primal `law` folds. `test_ad.py` holds them to the call's bits and to
 finite differences.
 
 The derivative kernels use one warp per cell. Each lane walks `W` of the call kernel's lane streams, so every sum of the primal
@@ -67,7 +70,9 @@ is the call kernel's. They take networks up to 96 species (64 leading rows and t
 
 ## Tables shared by Python and the kernels
 
-Some facts must stay equal in Python, the kernels and the C++ caller. `_constants.py` holds each one once:
+Some facts must stay equal in Python, the kernels and the C++ caller. Each is held once, and reaches the kernels through `network.h`.
+`kinvulcan.py` holds `NASA_SPLIT_T`; `_tables.py` the call and recovery scratch (`scratch_strides`); `_ad_tables.py` the derivative
+kernels' scratch (`scratch_sizes`) and the fields of the adjoint's stream words (`GATHER_FIELDS`); and `_constants.py` the rest:
 
 - `RATE_LAW_FLAGS`, `RATE_LAW_SHIFTS`: the bits of a reaction's flag word.
 - `COUNT_SLOTS`: the device's count array.

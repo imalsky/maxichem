@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile CUDA kernels with NVRTC to check that they build. Needs no GPU and no CUDA driver.
 
-Public name: ``main``. Run with ``uv run --no-project --with nvidia-cuda-nvrtc-cu12 python tools/nvrtc_compile.py``.
+Run with ``uv run --no-project --with nvidia-cuda-nvrtc-cu12 python tools/nvrtc_compile.py``.
 """
 
 from __future__ import annotations

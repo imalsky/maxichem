@@ -1,9 +1,5 @@
 // What the tangent and adjoint kernels share: the call's arithmetic on one warp, rates and their derivatives.
 
-#define CAPR (2 * CAP)  // attempts stored per recovered cell (REC_STEPS x max_steps <= CAPR^2)
-#define REC \
-  (NS + 6)                                         // a stored attempt: N, h, t, accepted, then the previous attempt's
-                                                   // error, size and rejection (the step control's history)
 __device__ const unsigned char PX[] = {PX_SLOTS};  // photolysis branches' product slots, 3 per branch (padding NS)
 
 __device__ __forceinline__ double sgn(double a) { return a > 0.0 ? 1.0 : (a < 0.0 ? -1.0 : 0.0); }
@@ -46,8 +42,9 @@ __device__ __noinline__ double rhs1(const double* Y, double* F, double* u0, doub
 }
 
 // o1 = S w1, o2 = S w2 in one pass of the S v lane streams (part holds 2 NPART doubles).
-__device__ __forceinline__ void svs2(const double* w1, const double* w2, double* o1, double* o2, double* part,
-                                     const Tab& tab, const unsigned* __restrict__ sst, int sround, int lane) {
+__device__ __forceinline__ void stoichiometry_times_two(const double* w1, const double* w2, double* o1, double* o2,
+                                                        double* part, const Tab& tab, const unsigned* __restrict__ sst,
+                                                        int sround, int lane) {
   for (int i = lane; i < 2 * NPART; i += 32) part[i] = 0.0;
   __syncwarp();
   for (int m = 0; m < W; m++) {
@@ -83,10 +80,11 @@ __device__ __forceinline__ void svs2(const double* w1, const double* w2, double*
   __syncwarp();
 }
 
-// The collision limit's derivative weights of a reaction from its pair before the limit (COLL's q): wA = 1 if
-// q > K_COLL, 1/2 at q = K_COLL (the tie of the min), else 0; wG = wA v, v = the reverse direction's share of the
+// The collision limit's derivative weights of a reaction from its pair before the limit (collision_limit's q): wA = 1
+// if q > K_COLL, 1/2 at q = K_COLL (the tie of the min), else 0; wG = wA v, v = the reverse direction's share of the
 // larger (1/2 at a tie; a direction of fewer than two molecules does not count).
-__device__ __forceinline__ void cap_w(int fl, double kf, double kr, double nd, double& wA, double& wG) {
+__device__ __forceinline__ void collision_limit_weights(int fl, double kf, double kr, double nd, double& wA,
+                                                        double& wG) {
   const int mf = (fl >> FL_FORWARD_SHIFT) & 3, mr = (fl >> FL_REVERSE_SHIFT) & 3;
   const double qf = bimolecular_rate(mf, kf, nd), qr = bimolecular_rate(mr, kr, nd);
   const double q = fmax(qf, qr), weight = q > KCOLL ? 1.0 : (q == KCOLL ? 0.5 : 0.0);
@@ -94,9 +92,16 @@ __device__ __forceinline__ void cap_w(int fl, double kf, double kr, double nd, d
   wG = weight * (qr > qf ? 1.0 : (qr < qf ? 0.0 : 0.5));
 }
 
+// The collision limit's weight on ln nd (rates_tan's wE): wA - wG for a forward side of 3 molecules, wG for a reverse
+// one.
+__device__ __forceinline__ double collision_limit_nd_weight(int fl, double wA, double wG) {
+  return (wA - wG) * (((fl >> FL_FORWARD_SHIFT) & 3) == 3 ? 1.0 : 0.0) +
+         wG * (((fl >> FL_REVERSE_SHIFT) & 3) == 3 ? 1.0 : 0.0);
+}
+
 // Rate coefficients of the cell (the call kernel's code: the law, the reverse from Gibbs, the collision limit;
 // photolysis rows kf = J, kr = 0), times exp(lm) when per-cell log multipliers are given; cw[r], cw[NR + r] = the
-// collision limit's weights (cap_w).
+// collision limit's weights (collision_limit_weights).
 __device__ __forceinline__ void rates(double* work, double* kf, double* kr, double* cw, double Tc, double nd,
                                       const double* lmc, const double* Jc, const double* __restrict__ rc,
                                       const int* __restrict__ rf, const double* __restrict__ nasa, const Tab& tab,
@@ -117,7 +122,7 @@ __device__ __forceinline__ void rates(double* work, double* kf, double* kr, doub
     }
     const int fl = rf[r];
     rate_pair(r, fl, rc, tab.rx + 6 * r, g, Tc, lT, iT, lKT, nd, kf[r], kr[r]);
-    cap_w(fl, kf[r], kr[r], nd, cw[r], cw[NR + r]);
+    collision_limit_weights(fl, kf[r], kr[r], nd, cw[r], cw[NR + r]);
     collision_limit(fl, kf[r], kr[r], nd);
     if (lmc) {
       const double e = exp(lmc[r]);
@@ -135,8 +140,8 @@ __device__ __forceinline__ void rates(double* work, double* kf, double* kr, doub
 // reactants)/dT + dmu / T to dT. Troe factor: log10 F = f / (1 + y^2), f = log10 Fc(T), z = log10 Pr, N = 0.75 - 1.27
 // f; vm11 y = z / N, standard x = z - 0.4 - 0.67 f, y = x / (N - 0.14 x); s = d log10 F / dz enters d ln k / d ln
 // k_low, d ln k_inf, d ln nd.
-__device__ __forceinline__ void kpart(const double* q, int fl, double Tc, double lT, double iT, double nd, double& dT,
-                                      double& dn, double* D) {
+__device__ __forceinline__ void rate_law_partials(const double* q, int fl, double Tc, double lT, double iT, double nd,
+                                                  double& dT, double& dn, double* D) {
   const double e0 = exp(q[0] + q[1] * lT - q[2] * iT),
                e1 = (fl & FL_SECOND_K0) ? exp(q[3] + q[4] * lT - q[5] * iT) : 0.0;
   const double kl = e0 + e1, w0 = kl > 0.0 ? e0 / kl : 0.0, w1 = kl > 0.0 ? e1 / kl : 0.0;
@@ -206,16 +211,15 @@ __device__ __forceinline__ void rates_tan(double* work, double* dk, double Tc, d
     }
     const int fl = rf[r];
     double dT = 0.0, dn = 0.0, D[9];
-    kpart(rc + RCW * r, fl, Tc, lT, iT, nd, dT, dn, D);
+    rate_law_partials(rc + RCW * r, fl, Tc, lT, iT, nd, dT, dn, D);
     double dA = dT * dTc + dn * dlnd;
     if (drc)
       for (int j = 0; j < 9; j++) dA += D[j] * drc[9 * r + j];
     const u8* x = tab.rx + 6 * r;
     const double ddg = gT[x[3]] + gT[x[4]] + gT[x[5]] - gT[x[0]] - gT[x[1]] - gT[x[2]];
-    const double dG = (ddg + (double)(((fl >> FL_DMU_SHIFT) & 7) - 4) * iT) * dTc;
+    const double dG = (ddg + reaction_dmu(fl) * iT) * dTc;
     const double wA = cw[r], wG = cw[NR + r];
-    const double wE = (wA - wG) * (((fl >> FL_FORWARD_SHIFT) & 3) == 3 ? 1.0 : 0.0) +
-                      wG * (((fl >> FL_REVERSE_SHIFT) & 3) == 3 ? 1.0 : 0.0);
+    const double wE = collision_limit_nd_weight(fl, wA, wG);
     const double dc = -(wA * dA + wG * dG + wE * dlnd);
     dk[r] = kf[r] * (dA + dc + dl);
     dk[NR + r] = kr[r] * (dA + dG + dc + dl);
@@ -224,8 +228,8 @@ __device__ __forceinline__ void rates_tan(double* work, double* dk, double Tc, d
 }
 
 // y <- M0^-1 y on one warp (the call kernel's msolve, results stored).
-__device__ __forceinline__ void msol(const double* M, const double* dinv, double* y, const u16* smap,
-                                     const double (&c)[NT], int lane, int myt) {
+__device__ __forceinline__ void solve_m0(const double* M, const double* dinv, double* y, const u16* smap,
+                                         const double (&c)[NT], int lane, int myt) {
   double a0[RP], a1 = 0.0;
   msolve(M, dinv, y, smap, c, lane, myt, a0, a1);
   __syncwarp();
@@ -234,28 +238,28 @@ __device__ __forceinline__ void msol(const double* M, const double* dinv, double
 }
 
 // The Sherman-Morrison update of a solved stage, then the warp's barrier.
-__device__ __forceinline__ void smup(double* y, const double* u, double c0, int lane) {
+__device__ __forceinline__ void sherman_morrison_step(double* y, const double* u, double c0, int lane) {
   sherman_morrison_update(y, u, c0, lane);
   __syncwarp();
 }
 
 // y <- W^-1 y = M0^-1 y + c0 (1 . M0^-1 y) u with the attempt's factors.
-__device__ __forceinline__ void wsolve(const double* M, const double* dinv, double* y, const double* u, double c0,
-                                       const u16* smap, const double (&c)[NT], int lane, int myt) {
-  msol(M, dinv, y, smap, c, lane, myt);
-  smup(y, u, c0, lane);
+__device__ __forceinline__ void solve_w(const double* M, const double* dinv, double* y, const double* u, double c0,
+                                        const u16* smap, const double (&c)[NT], int lane, int myt) {
+  solve_m0(M, dinv, y, smap, c, lane, myt);
+  sherman_morrison_step(y, u, c0, lane);
 }
 
 // y <- W^-1 y with the attempt's factors: the sparse LU of M0 and the Sherman-Morrison step, or (DN: the recovery's
-// attempt) the dense threshold-pivoted LU of W in Wd with 1 / U_ii at S + A_DINV and the row order at S + A_M (as
+// attempt) the dense threshold-pivoted LU of W in Wd with 1 / U_ii at work + A_DINV and the row order at work + A_M (as
 // ints).
 template <bool DN>
-__device__ __forceinline__ void xsolve(double* work, const double* Wd, const double (&c)[NT], double c0, double* y,
-                                       const u16* smap, int lane, int myt) {
+__device__ __forceinline__ void solve_attempt(double* work, const double* Wd, const double (&c)[NT], double c0,
+                                              double* y, const u16* smap, int lane, int myt) {
   if (DN)
     dense_solve(Wd, work + A_DINV, (const int*)(work + A_M), y, lane);
   else
-    wsolve(work + A_M, work + A_DINV, y, work + A_U, c0, smap, c, lane, myt);
+    solve_w(work + A_M, work + A_DINV, y, work + A_U, c0, smap, c, lane, myt);
 }
 
 // LU of M0 on one warp: the sparse leading columns, then the dense trailing block in registers c and back in its slots
@@ -320,7 +324,7 @@ __device__ __forceinline__ double attempt(double* work, double (&c)[NT], double 
   factor_warp(M, dinv, c, tab, lu, optr, lane, myt);
   for (int i = lane; i < NS; i += 32) K1[i] = F[i];
   __syncwarp();
-  msol(M, dinv, K1, tab.smap, c, lane, myt);  // stage 1: K1 and u = M0^-1 w, c0 = 1 / (1 - sum u)
+  solve_m0(M, dinv, K1, tab.smap, c, lane, myt);  // stage 1: K1 and u = M0^-1 w, c0 = 1 / (1 - sum u)
   {
     double a0[RP], a1 = 0.0;
     msolve(M, dinv, u, tab.smap, c, lane, myt, a0, a1);
@@ -329,16 +333,16 @@ __device__ __forceinline__ double attempt(double* work, double (&c)[NT], double 
     store_solved(u, a0, a1, lane);
     __syncwarp();
   }
-  smup(K1, u, c0, lane);
+  sherman_morrison_step(K1, u, c0, lane);
   for (int i = lane; i < NS; i += 32) K2[i] = stage2_rhs(ih, K1[i], F[i]);
   __syncwarp();
-  wsolve(M, dinv, K2, u, c0, tab.smap, c, lane, myt);
+  solve_w(M, dinv, K2, u, c0, tab.smap, c, lane, myt);
   for (int i = lane; i < NS; i += 32) Y[i] = N[i] + 2.0 * K1[i];
   __syncwarp();
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, tab, sst, sround, lane);
   for (int i = lane; i < NS; i += 32) K3[i] = stage3_rhs(ih, K1[i], K2[i], F[i]);
   __syncwarp();
-  wsolve(M, dinv, K3, u, c0, tab.smap, c, lane, myt);
+  solve_w(M, dinv, K3, u, c0, tab.smap, c, lane, myt);
   for (int i = lane; i < NS; i += 32) {
     double y = N[i] + 2.0 * K1[i];
     y = y + K3[i];
@@ -348,7 +352,7 @@ __device__ __forceinline__ double attempt(double* work, double (&c)[NT], double 
   rhs1(Y, F, nullptr, n, v, part, kf, kr, nd, tab, sst, sround, lane);
   for (int i = lane; i < NS; i += 32) K4[i] = stage4_rhs(ih, K1[i], K2[i], K3[i], F[i]);
   __syncwarp();
-  wsolve(M, dinv, K4, u, c0, tab.smap, c, lane, myt);
+  solve_w(M, dinv, K4, u, c0, tab.smap, c, lane, myt);
   const double en = try_error(N, K1, K3, K4, Y, true, first, rtol, atol, lane, ok);
   __syncwarp();
   return en;
@@ -356,12 +360,13 @@ __device__ __forceinline__ double attempt(double* work, double (&c)[NT], double 
 
 // One attempt of the recover kernel on one warp, repeating its order, which spreads the right-hand side over the cell's
 // warps (test_ad.py holds the two to the same bits): W = I / (gamma h) - Jn - w 1^T
-// formed densely in Wd from the call kernel's streams, dense_lu (1 / U_ii in dinv, the row order in pr = S + A_M as
+// formed densely in Wd from the call kernel's streams, dense_lu (1 / U_ii in dinv, the row order in pr = work + A_M as
 // ints), the stages with dense_solve; K1..K4, Y = the new state; ok = accepted; returns the error (as attempt).
-__device__ __forceinline__ double rattempt(double* work, double* Wd, double ha, bool first, const double* kf,
-                                           const double* kr, double nd, double rtol, double atol, bool& ok,
-                                           const Tab& tab, const unsigned* __restrict__ sst, const u64* __restrict__ jt,
-                                           const u16* __restrict__ didx, int sround, int jround, int lane) {
+__device__ __forceinline__ double recovery_attempt(double* work, double* Wd, double ha, bool first, const double* kf,
+                                                   const double* kr, double nd, double rtol, double atol, bool& ok,
+                                                   const Tab& tab, const unsigned* __restrict__ sst,
+                                                   const u64* __restrict__ jt, const u16* __restrict__ didx, int sround,
+                                                   int jround, int lane) {
   double *dinv = work + A_DINV, *n = work + A_N0, *v = work + A_V, *N = work + A_NN, *Y = work + A_Y, *F = work + A_F,
          *u = work + A_U, *K1 = work + A_K1, *K2 = work + A_K2, *K3 = work + A_K3, *K4 = work + A_K4,
          *part = work + A_PART;
@@ -405,17 +410,17 @@ __device__ __forceinline__ double rattempt(double* work, double* Wd, double ha, 
   return en;
 }
 
-// An attempt of the call kernel (attempt) or, DN, of the recover kernel (rattempt; c0 = 0, unused).
+// An attempt of the call kernel (attempt) or, DN, of the recover kernel (recovery_attempt; c0 = 0, unused).
 template <bool DN>
-__device__ __forceinline__ double xattempt(double* work, double (&c)[NT], double* Wd, double ha, bool first,
-                                           const double* kf, const double* kr, double nd, double rtol, double atol,
-                                           double& c0, bool& ok, const Tab& tab, const unsigned* __restrict__ sst,
-                                           const u64* __restrict__ jt, const u64* __restrict__ lu,
-                                           const int* __restrict__ optr, const u16* __restrict__ didx, int sround,
-                                           int jround, int lane, int myt) {
+__device__ __forceinline__ double run_attempt(double* work, double (&c)[NT], double* Wd, double ha, bool first,
+                                              const double* kf, const double* kr, double nd, double rtol, double atol,
+                                              double& c0, bool& ok, const Tab& tab, const unsigned* __restrict__ sst,
+                                              const u64* __restrict__ jt, const u64* __restrict__ lu,
+                                              const int* __restrict__ optr, const u16* __restrict__ didx, int sround,
+                                              int jround, int lane, int myt) {
   if (DN) {
     c0 = 0.0;
-    return rattempt(work, Wd, ha, first, kf, kr, nd, rtol, atol, ok, tab, sst, jt, didx, sround, jround, lane);
+    return recovery_attempt(work, Wd, ha, first, kf, kr, nd, rtol, atol, ok, tab, sst, jt, didx, sround, jround, lane);
   }
   return attempt(work, c, ha, first, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr, sround, jround, lane, myt);
 }
@@ -425,8 +430,8 @@ __device__ __forceinline__ double xattempt(double* work, double (&c)[NT], double
 // derivatives on the branch taken: dfe = d fac / d en, dfh = / d ha, dfp = / d pen, dfq = / d pha (0 where a limit
 // holds or the factor is a constant of its branch). Secant branch: fac = (0.5 / en)^(1 / p), p = min(pe, 3),
 // pe = ln(pen / en) / L, L = ln(pha / ha).
-__device__ __forceinline__ double factor(double en, bool ok, bool prej, double pen, double pha, double ha, double& dfe,
-                                         double& dfh, double& dfp, double& dfq) {
+__device__ __forceinline__ double step_factor_partials(double en, bool ok, bool prej, double pen, double pha, double ha,
+                                                       double& dfe, double& dfh, double& dfp, double& dfq) {
   const double fac = step_factor(en, ok, prej, pen, pha, ha);
   const bool efin = isfinite(en);
   dfe = 0.0;
@@ -455,20 +460,49 @@ __device__ __forceinline__ double factor(double en, bool ok, bool prej, double p
   return fac;
 }
 
+// The recover kernel's test of a recomputed cell's result: its flag (redo), count and done; returns on every lane
+// whether it still fails.
+__device__ __forceinline__ bool recovery_fails(const double* __restrict__ x0, const double* __restrict__ Ta,
+                                               const double* __restrict__ Pa, const double* __restrict__ dta,
+                                               double* xout, int* doneo, int* redo, int* count, int dn, double nok,
+                                               const double* __restrict__ atoms, double atol, int cell,
+                                               int lane J_PARAM) {
+  __syncwarp();
+  int bad = 0;
+  if (lane == 0) {
+    bad = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell J_ARG);
+    if (bad) doneo[cell] = 0;  // done: finished and passing the guard
+    redo[cell] = bad ? 2 : 1;
+    atomicAdd(count + (bad ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
+  }
+  return __shfl_sync(FULL, bad, 0) != 0;
+}
+
+// The warp's next cell from the queue.
+template <bool DN>
+__device__ __forceinline__ int next_queued(int* count, int lane) {
+  int nxt = 0;
+  if (lane == 0) nxt = gridDim.x * WPB + atomicAdd(count + (DN ? COUNT_RECOVERY_QUEUE : COUNT_QUEUE), 1);
+  const int q = __shfl_sync(FULL, nxt, 0);
+  __syncwarp();
+  return q;
+}
+
 // One attempt with acceptance and step control (the call kernel's loop body; DN: the recover kernel's); returns ok, en
 // = its error, c0 = its Sherman-Morrison factor (its stages and factors stay in place).
 template <bool DN>
-__device__ __forceinline__ bool fstep(double* work, double (&c)[NT], double* Wd, double& h, double& t, double& nok,
-                                      bool& prej, double& pen, double& pha, double dt, const double* kf,
-                                      const double* kr, double nd, double rtol, double atol, double& en, double& c0,
-                                      const Tab& tab, const unsigned* __restrict__ sst, const u64* __restrict__ jt,
-                                      const u64* __restrict__ lu, const int* __restrict__ optr,
-                                      const u16* __restrict__ didx, int sround, int jround, int lane, int myt) {
+__device__ __forceinline__ bool forward_step(double* work, double (&c)[NT], double* Wd, double& h, double& t,
+                                             double& nok, bool& prej, double& pen, double& pha, double dt,
+                                             const double* kf, const double* kr, double nd, double rtol, double atol,
+                                             double& en, double& c0, const Tab& tab, const unsigned* __restrict__ sst,
+                                             const u64* __restrict__ jt, const u64* __restrict__ lu,
+                                             const int* __restrict__ optr, const u16* __restrict__ didx, int sround,
+                                             int jround, int lane, int myt) {
   double *N = work + A_NN, *Y = work + A_Y;
   const double ha = fmin(h, dt - t);
   bool ok = false;
-  en = xattempt<DN>(work, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr, didx, sround,
-                    jround, lane, myt);
+  en = run_attempt<DN>(work, c, Wd, ha, t == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr, didx, sround,
+                       jround, lane, myt);
   if (ok) {
     for (int i = lane; i < NS; i += 32) N[i] = fmax(Y[i], 0.0);
     t += ha;

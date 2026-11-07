@@ -51,3 +51,25 @@ Names in the code that are shorter than a description. Math symbols follow the e
 | `work` | a derivative kernel's per-warp work arrays in shared memory |
 | `word` | one packed term of a lane stream |
 | `pattern` | the sparsity pattern of the matrix after fill, as (row, column) pairs |
+
+## Step control and derivative kernels
+
+| Name | Meaning |
+| --- | --- |
+| `ha` | the size of this try: min(h, dt - t) |
+| `en`, `pen`, `pha`, `prej` | a try's error; the previous try's error and size, and whether it was rejected |
+| `nok` | accepted steps so far |
+| `igh`, `ih` | 1 / (gamma h), 1 / h |
+| `c0` | the Sherman-Morrison factor |
+| `dfe`, `dfh`, `dfp`, `dfq` | the step factor's partial derivatives in en, ha, pen and pha |
+| `hab`, `enb`, `hb`, `tb`, `dtb` | adjoints (cotangents) of ha, en, h, t and dt |
+| `enc`, `hac` | cotangents passed to the previous attempt: of its error and of its size |
+| `lbk`, `lbnd` | cotangents of the ln rate coefficients and of ln nd |
+| `cot_k`, `lr` | a reaction's `lbk` entries: ln k common to both directions, ln kr alone |
+| `rho` | a stage's cotangent times the signed rate coefficient, for the adjoint's gather |
+| `wA`, `wG`, `wE` | the collision limit's weights on ln k, on ln kr - ln k, on ln nd |
+| `Nd`, `Yd`, `Kd`, `hd` | tangents of `N`, `Y`, `K` and `h` |
+| `Nb`, `Yb`, `Kb` | cotangents of `N`, `Y` and `K` |
+| `wib`, `wid` | a warp's index in its block; in the whole grid |
+| `myt` | this lane's row in the dense trailing block, or -1 |
+| `CP` | attempts stored per cell: `CAP`, or `CAPR` on the recovery's path |

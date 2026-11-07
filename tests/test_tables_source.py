@@ -1,13 +1,14 @@
 """The kernels' tables and their source on the invented networks: what the streams hold, not how they are packed."""
 
-import copy
+import gc
 import re
-from pathlib import Path
+import sys
 
 import numpy as np
 import pytest
+import torch
 
-from maxichem import _constants, _kernel_header, _tables, kincuda, kincuda_ad
+from maxichem import _constants, _kernel_header, _solver, _tables, kincuda, kincuda_ad
 
 
 def _stoichiometry_from_stream(tab):
@@ -25,22 +26,22 @@ def _stoichiometry_from_stream(tab):
     return np.stack([pieces[i] + pieces[ns + tab["xp"][i] : ns + tab["xp"][i + 1]].sum(0) for i in range(ns)])
 
 
+@pytest.mark.parametrize("stem", ["synthetic", "synthetic_small"])
 @pytest.mark.parametrize("photo", [False, True])
-def test_streams_hold_the_stoichiometry(read_network, photo):
-    net = read_network()
+def test_streams_hold_the_stoichiometry(read_network, stem, photo):
+    net = read_network(stem)
     tab = _tables.tables(net, 2, photo)
     stoichiometry = np.hstack([net.S, net.Sp]) if photo else net.S
     assert sorted(tab["perm"].tolist()) == list(range(tab["ns"]))
-    assert np.array_equal(_stoichiometry_from_stream(tab), stoichiometry[tab["perm"]])
-
-
-@pytest.mark.parametrize("photo", [False, True])
-def test_small_network_has_tables(read_network, photo):
-    net = read_network("synthetic_small")
-    tab = _tables.tables(net, 2, photo)
-    stoichiometry = np.hstack([net.S, net.Sp]) if photo else net.S
     assert tab["nfix"] <= tab["ns"]  # the extra Jacobian pieces fit in Y
     assert np.array_equal(_stoichiometry_from_stream(tab), stoichiometry[tab["perm"]])
+
+
+def test_hand_built_reverse_law_is_refused(read_network):
+    net = read_network()
+    net.reac[0]["rev"] = {"kind": 2, "A": 2e-12, "B": 0.0, "C": 0.0}
+    with pytest.raises(ValueError, match=f"reaction {re.escape(net.reac[0]['eq'])} has an explicit reverse law"):
+        _tables.tables(net, 2)
 
 
 def test_rate_law_table_takes_the_network_forms(read_network):
@@ -52,16 +53,9 @@ def test_rate_law_table_takes_the_network_forms(read_network):
 
 def test_header_selects_the_rate_law_forms(read_network):
     for network, troe, eff in ((read_network(), 1, 1), (read_network("synthetic_falloff"), 0, 0)):
-        header = _kernel_header.call_header(_tables.tables(network, 2), 1)
+        header = _kernel_header.call_header(_tables.tables(network, 2), 1, True, _constants.DRIFT)
         for name, value in (("HAS_TROE", troe), ("HAS_EFF", eff)):
             assert f"#define {name} {value}\n" in header
-
-
-def test_explicit_reverse_law_is_refused(read_network):
-    net = copy.deepcopy(read_network())
-    net.reac[0]["rev"] = {"kind": 2, "A": 1e-12, "B": 0.0, "C": 500.0}
-    with pytest.raises(ValueError, match="reverse"):
-        _tables.tables(net, 2)
 
 
 @pytest.mark.parametrize("kernel", sorted(_constants.KERNEL_ARGUMENTS))
@@ -79,10 +73,51 @@ def test_argument_table_matches_the_kernel_signature(kernel):
     assert tuple(names) == _constants.KERNEL_ARGUMENTS[kernel]
 
 
-def test_cpp_format_and_counts_match_python():
-    source = (Path(__file__).parents[1] / "cpp" / "maxichem.cpp").read_text()
-    assert f"kExportFormat = {_constants.EXPORT_FORMAT};" in source
-    assert f"kCountSlots = {len(_constants.COUNT_SLOTS)};" in source
+def _good_inputs(cells=4, species=3):
+    """Return the arguments of a call that the input checks accept, by name, on the CPU."""
+    one = torch.ones(cells, dtype=torch.float64)
+    return {
+        "x": torch.ones(cells, species, dtype=torch.float64),
+        "T": one,
+        "P": one,
+        "dt": one,
+        "h": one,
+        "rtol": 1e-3,
+        "atol": 1e-25,
+        "max_steps": 10,
+    }
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"h": torch.ones(3, dtype=torch.float64)}, r"^h: float64 \[4\] .* got torch.float64 \[3\]"),
+        ({"P": torch.ones(4, dtype=torch.float32)}, r"^P: .* got torch.float32"),
+        ({"x": torch.ones(4, 2, dtype=torch.float64)}, r"^x: \[B, 3\]"),
+        ({"rtol": 0.0}, "^rtol and atol"),
+        ({"atol": float("nan")}, "^rtol and atol"),
+        ({"max_steps": 2.5}, "^max_steps: an integer"),
+        ({"max_steps": 2**31}, "^max_steps from 1"),
+    ],
+)
+def test_input_checks_name_the_input(change, message):
+    device = torch.device("cpu")
+    assert _solver.check_inputs(device, 3, **_good_inputs()) == 4
+    with pytest.raises(ValueError, match=message):
+        _solver.check_inputs(device, 3, **(_good_inputs() | change))
+
+
+def test_photolysis_check_refuses_each_wrong_j():
+    device = torch.device("cpu")
+    good = torch.zeros(4, 2, dtype=torch.float64)
+    assert _solver.check_photolysis(None, 4, 0, device) is None
+    assert torch.equal(_solver.check_photolysis(good, 4, 2, device), good)
+    with pytest.raises(ValueError, match="no photolysis"):
+        _solver.check_photolysis(good, 4, 0, device)
+    with pytest.raises(ValueError, match="required"):
+        _solver.check_photolysis(None, 4, 2, device)
+    with pytest.raises(ValueError, match=r"^J: float64 \[4, 2\]"):
+        _solver.check_photolysis(good[:-1], 4, 2, device)
 
 
 @pytest.mark.parametrize("drift", [float("nan"), float("inf"), -1e-6])
@@ -100,10 +135,13 @@ def test_bad_cap_is_refused_before_any_device_use(read_network, cap):
         kincuda_ad.ADSolver(read_network(), "cuda", cap=cap)
 
 
-def test_cpp_defaults_match_the_python_defaults():
-    header = (Path(__file__).parents[1] / "cpp" / "maxichem.hpp").read_text()
-    rtol, steps = re.search(r"kDefaultRtol = ([\d.e-]+);", header), re.search(r"kDefaultMaxSteps = (\d+);", header)
-    assert rtol is not None
-    assert steps is not None
-    assert float(rtol.group(1)) == _constants.DEFAULT_RTOL
-    assert int(steps.group(1)) == _constants.DEFAULT_MAX_STEPS
+@pytest.mark.parametrize("solver", [kincuda.CudaSolver, kincuda_ad.ADSolver])
+def test_failed_constructor_leaves_no_error_at_deletion(read_network, monkeypatch, solver):
+    net = read_network()
+    net.photo = []
+    seen: list[object] = []
+    monkeypatch.setattr(sys, "unraisablehook", seen.append)
+    with pytest.raises(ValueError, match="photo=True"):
+        solver(net, "cuda", photo=True)  # refused before it loads anything: nothing to unload
+    gc.collect()
+    assert not seen

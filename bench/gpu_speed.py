@@ -7,8 +7,8 @@ The batch: cells spread over 800-2000 K and 1e-4 to 10 bar (log-spaced), a solar
 sulfur network) relaxed by one 1e10 s call. Then --calls calls of 70 s each, every call starting from the previous
 call's output (about one solver step per call, as in a GCM), first dark, then with J = 1e-4 s^-1 on every branch above
 0.03 bar. A first call of each kind is not timed. Prints one JSON line: the GPU, the batch, the relaxation's
-unfinished cells and guard counts, and per kind the median us per cell-call, the mean solver steps per call, and the
-unfinished cells and guard counts summed over every call of that kind.
+unfinished cells and guard counts, per kind the median us per cell-call, the mean solver steps per call, and the
+unfinished cells and guard counts summed over every call of that kind, and the run's commit and settings.
 """
 
 import argparse
@@ -17,11 +17,10 @@ import statistics
 import time
 
 import torch
+from run_record import run_record
 
 from maxichem import CudaSolver, VulcanNetwork, paths
-
-SOLAR_START = {"H2": 0.84, "He": 0.16, "H2O": 9e-4, "CO": 5e-4, "CH4": 1e-5, "N2": 6e-5, "NH3": 1e-6}
-H2S_PER_H2_SOLAR = 1.41e-5
+from maxichem._checks import H2S_PER_H2_SOLAR, SOLAR_START
 
 
 def main() -> None:
@@ -32,7 +31,7 @@ def main() -> None:
     ap.add_argument("--calls", type=int, default=10)
     a = ap.parse_args()
 
-    th = paths.VULCAN_THERMO
+    th = paths.vulcan_thermo()
     net = VulcanNetwork(f"{th}/{a.network}", f"{th}/NASA9")
     sp = list(net.species)
     dev = torch.device("cuda")
@@ -54,8 +53,6 @@ def main() -> None:
     torch.cuda.synchronize()
     res = {
         "gpu": torch.cuda.get_device_name(0),
-        "torch": torch.__version__,
-        "network": a.network,
         "species": len(sp),
         "cells": B,
         "relaxed_unfinished": int(torch.logical_not(done.bool()).sum()),
@@ -86,6 +83,7 @@ def main() -> None:
             "unfinished": unfinished,
             "counts": counts,
         }
+    res["run"] = run_record(th / a.network, th / "NASA9", sp, solver.drift, a)
     print(json.dumps(res))
 
 

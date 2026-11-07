@@ -1,75 +1,81 @@
 """Data locations of the checks and benches, under one root.
 
-Public names: ``DATA`` and the paths below it, ``VULCAN_THERMO``, ``need``. The solver reads only the network files it
-is given. CHEM_DATA sets the root (default: data/ in a checkout). VULCAN_THERMO is the folder with the VULCAN networks
-and NASA9/; reading it while the variable is unset raises. README.md lists the data. Each name reads its environment
-variable when it is used, not at import.
+The solver reads only the network files it is given. Each function reads its environment variable when it is called,
+not at import. README.md lists the data. A check whose data are missing fails through ``need``.
 """
 
 import os
 from pathlib import Path
 
-_UNDER_DATA = {
-    "QUAL": "truth_v2/qual_ncho",  # VULCAN truth paths on NCHO_photo (QC, QCs, QL, ...)
-    "BOXES": "truth_v2/boxes_ncho",  # VULCAN truth boxes on NCHO_photo (Sobol design, shards)
-    "DESIGNS": "benches/designs",  # test designs: decision/P (panel P's rows, starts and forcing)
-    "YARD": "benches/yardstick",  # yardstick design (design/: recorded starts, rows, saved states)
-    "LIBREF": "benches/kincuda/libref8.npz",  # the torch reference call's outputs on the checks' inputs, NCHO_photo
-    "LIBREF_S": "benches/kincuda/libref9_SNCHO25.npz",  # the same for the sulfur network SNCHO_photo_network_2025
-    "JREF_S": "benches/kincuda/jref_SNCHO25.npz",  # J of a 1-D WASP-39b model's layers on that network (lines, J)
-    "AD_BOXES": "truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz",  # input states of the derivative checks
-}
 __all__ = [
-    "AD_BOXES",
-    "BOXES",
-    "DATA",
-    "DESIGNS",
-    "JREF_S",
-    "LIBREF",
-    "LIBREF_S",
-    "QUAL",
-    "VULCAN_THERMO",
-    "YARD",
+    "ad_boxes",
+    "boxes",
+    "data",
+    "designs",
+    "jref_sulfur",
+    "libref",
+    "libref_sulfur",
     "need",
+    "qual",
+    "vulcan_thermo",
+    "yard",
 ]
-# Served by __getattr__.
-AD_BOXES: Path
-BOXES: Path
-DATA: Path
-DESIGNS: Path
-JREF_S: Path
-LIBREF: Path
-LIBREF_S: Path
-QUAL: Path
-VULCAN_THERMO: Path
-YARD: Path
 
 
-def _data_root() -> Path:
+def data() -> Path:
     """Return the data root: CHEM_DATA, or data/ beside this package (empty counts as unset)."""
     return Path(os.environ.get("CHEM_DATA") or Path(__file__).resolve().parents[1] / "data")
 
 
-def __getattr__(name: str) -> Path:
-    """Serve the data locations when they are read."""
-    if name == "DATA":
-        return _data_root()
-    if name in _UNDER_DATA:
-        return _data_root() / _UNDER_DATA[name]
-    if name == "VULCAN_THERMO":
-        value = os.environ.get("VULCAN_THERMO")
-        if not value:
-            raise RuntimeError(
-                "VULCAN_THERMO is not set: point it to VULCAN-JAX's src/vulcan3/thermo (the VULCAN "
-                "networks and NASA9/; README.md, Requirements)"
-            )
-        return Path(value)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def qual() -> Path:
+    """Return the VULCAN truth paths on NCHO_photo (QC, QCs, QL, ...)."""
+    return data() / "truth_v2/qual_ncho"
 
 
-def __dir__() -> list[str]:
-    """List the public names."""
-    return sorted(__all__)
+def boxes() -> Path:
+    """Return the VULCAN truth boxes on NCHO_photo (Sobol design, shards)."""
+    return data() / "truth_v2/boxes_ncho"
+
+
+def designs() -> Path:
+    """Return the test designs: decision/P holds panel P's rows, starts and forcing."""
+    return data() / "benches/designs"
+
+
+def yard() -> Path:
+    """Return the yardstick design (design/: recorded starts, rows, saved states)."""
+    return data() / "benches/yardstick"
+
+
+def libref() -> Path:
+    """Return the torch reference call's outputs on the checks' inputs, NCHO_photo."""
+    return data() / "benches/kincuda/libref8.npz"
+
+
+def libref_sulfur() -> Path:
+    """Return the torch reference call's outputs on the checks' inputs, SNCHO_photo_network_2025."""
+    return data() / "benches/kincuda/libref9_SNCHO25.npz"
+
+
+def jref_sulfur() -> Path:
+    """Return J of a 1-D WASP-39b model's layers on SNCHO_photo_network_2025 (lines, J)."""
+    return data() / "benches/kincuda/jref_SNCHO25.npz"
+
+
+def ad_boxes() -> Path:
+    """Return the input states of the derivative checks."""
+    return data() / "truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz"
+
+
+def vulcan_thermo() -> Path:
+    """Return VULCAN_THERMO, the folder with the VULCAN networks and NASA9/; raise RuntimeError if it is unset."""
+    value = os.environ.get("VULCAN_THERMO")
+    if not value:
+        raise RuntimeError(
+            "VULCAN_THERMO is not set: point it to VULCAN-JAX's src/vulcan3/thermo (the VULCAN "
+            "networks and NASA9/; README.md, Requirements)"
+        )
+    return Path(value)
 
 
 def need(*files: str | Path) -> None:

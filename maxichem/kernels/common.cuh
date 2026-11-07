@@ -19,15 +19,14 @@ constexpr double SECANT_MIN_ORDER = 0.05;  // below this fitted order of err in 
 constexpr double SECANT_MAX_ORDER = 3.0;   // the method's error order: the largest order the fit may use
 constexpr double SECANT_TARGET = 0.5;      // the err a secant shrink aims at
 constexpr double PIVTAU = 0.1;             // recovery: exchange rows only below this share of the column's largest
-constexpr double ELEMENT_PIVOT_MIN = 1e-10;  // the guard leaves out an element whose pivot falls below this share
-constexpr double NASA_SPLIT_T = 1000.0;      // K: where the NASA-9 fits change range
+constexpr double ELEMENT_PIVOT_MIN = 1e-10;      // the guard leaves out an element whose pivot falls below this share
+constexpr double NASA_SPLIT_T = NASA_SPLIT_T_K;  // K: where the NASA-9 fits change range (kinvulcan.NASA_SPLIT_T)
 // The Troe factor's published coefficients (Venot et al. 2012, eq. C.2-C.5).
 constexpr double TROE_C0 = 0.4;
 constexpr double TROE_C1 = 0.67;
 constexpr double TROE_N0 = 0.75;
 constexpr double TROE_N1 = 1.27;
 constexpr double TROE_D = 0.14;
-#define RSN (2 * NS + NNZ)  // the copy of F, u and -Jn kept for the try after a rejection (doubles per cell)
 #define FULL 0xffffffffu
 constexpr double GMAX = 1e-3;  // the element-share correction changes a species by at most this, relative
 #define DNAN __longlong_as_double(0x7ff8000000000000ll)  // poisons the bad-input sum; a failed cell's derivatives
@@ -46,10 +45,13 @@ typedef unsigned long long u64;
 #define J_OR_NULL nullptr
 #endif
 
-struct Tab {                         // small tables, copied to shared memory once per block
-  const u16 *smap, *rowptr, *diag;   // slot of (row, col) or NO_SLOT; first leading slot of each row; diagonal slots
-  const u8 *colof, *rx, *xp, *blen;  // column of each leading slot; species of each reaction (3 + 3, pad NS); pieces;
-};  // pivot batches
+// The small tables, copied to shared memory once per block. smap: slot of (row, col) or NO_SLOT; rowptr: first leading
+// slot of each row; diag: diagonal slots; colof: column of each leading slot; rx: species of each reaction (3 + 3, pad
+// NS); xp: each row's extra S v pieces; blen: pivot batches.
+struct Tab {
+  const u16 *smap, *rowptr, *diag;
+  const u8 *colof, *rx, *xp, *blen;
+};
 
 // Copies the small tables to shared memory (tb32, after the block's work arrays) and returns where they are.
 __device__ __forceinline__ Tab load_tab(unsigned* tb32, const unsigned* __restrict__ blob) {
@@ -157,6 +159,9 @@ __device__ __forceinline__ void gibbs_rt(double* g, const double* __restrict__ n
   }
 }
 
+// Molecules on the reverse side minus the forward side, from a reaction's flags.
+__device__ __forceinline__ double reaction_dmu(int fl) { return (double)(((fl >> FL_DMU_SHIFT) & 7) - 4); }
+
 // Thermal reaction r's rate coefficients before the collision limit: three-body ones times nd; the reverse from the
 // species' G / RT g.
 __device__ __forceinline__ void rate_pair(int r, int fl, const double* __restrict__ rc, const u8* x, const double* g,
@@ -166,7 +171,7 @@ __device__ __forceinline__ void rate_pair(int r, int fl, const double* __restric
   const double dg = g[x[3]] + g[x[4]] + g[x[5]] - g[x[0]] - g[x[1]] - g[x[2]];
   const double c3 = (fl & FL_THREE_BODY) ? nd : 1.0;
   kf = k * c3;
-  kr = (k * exp(dg + (double)(((fl >> FL_DMU_SHIFT) & 7) - 4) * lKT)) * c3;
+  kr = (k * exp(dg + reaction_dmu(fl) * lKT)) * c3;
 }
 
 // Rate coefficients of a cell across the cell's lanes (grp: its named barrier); photolysis rows kf = J, kr = 0.

@@ -132,8 +132,8 @@ stress cases (recorded starts and their scrambles to 2 dex, at dt up to 500 s).
 `ADSolver` gives a tangent (JVP) and an adjoint (VJP) of one call. Each also returns the call's result, bitwise that of
 `CudaSolver`.
 
-Differentiated inputs: the state x, T, P, dt, the starting step size h, per-cell log rate multipliers lm [B, R], the Arrhenius
-columns of the rate table rc [R, 9] and the photolysis rates J [B, branches]. A multiplier scales a reaction's forward and
+Differentiated inputs: the state x, T, P, dt, the starting step size h, per-cell log rate multipliers lm [B, R], the nine Arrhenius
+columns of the rate table rc [R, 9 or 14] (its tangent and cotangent are [R, 9]) and the photolysis rates J [B, branches]. A multiplier scales a reaction's forward and
 reverse coefficients together, after the collision limit; a photolysis row has $k_f = J e^{lm}$. Derivatives in J are in J
 itself, so they hold at J = 0. The Troe parameters and efficiencies are not differentiated.
 

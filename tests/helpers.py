@@ -5,20 +5,15 @@ from typing import Any
 
 import libref
 import numpy as np
-import pytest
 import torch
 
-from maxichem import kincuda, kinvulcan, paths
+from maxichem import _checks, kincuda, kinvulcan, paths
 
-GASES = ["H2O", "CO", "CO2", "CH4", "NH3", "HCN", "C2H2", "H", "OH", "O", "H2", "N2"]  # the 12 scored gases
-FLOORS = [1e-10] * 7 + [1e-8] * 3 + [1e-6] * 2  # mole fraction: below this a gas is not scored, per GASES
 SULFUR_GASES = ["H2S", "SO2", "COS", "S2"]  # also scored on a sulfur network
 SULFUR_FLOOR = 1e-10
-SOLAR_START = {"H2": 0.84, "He": 0.16, "H2O": 9e-4, "CO": 5e-4, "CH4": 1e-5, "N2": 6e-5, "NH3": 1e-6}
-H2S_PER_H2_SOLAR = 1.41e-5  # the sulfur of a solar gas, for starts made here
 H2S_PER_H2_RECORDED = 2.7e-5  # the sulfur the stored references' recorded starts were made with; part of their digest
 
-REFERENCES = {"NCHO_photo_network.txt": "LIBREF", "SNCHO_photo_network_2025.txt": "LIBREF_S"}
+REFERENCES = {"NCHO_photo_network.txt": paths.libref, "SNCHO_photo_network_2025.txt": paths.libref_sulfur}
 CHAIN_PATHS = 256
 CHAIN_OFFSET = 1500  # forcing rows between the four offsets of each path
 
@@ -29,22 +24,6 @@ OVER_TOL_SHARE = 1e-5  # the share of cell-calls allowed above TOL, at least one
 STEP_MISMATCH_SHARE = 1e-4  # the share of cell-calls whose accepted steps may differ, for the same reason
 
 
-def require_data(*files: Any) -> None:
-    """Skip the test, with the missing files named, when reference data are not on this machine."""
-    try:
-        paths.need(*files)
-    except FileNotFoundError as error:
-        pytest.skip(str(error))
-
-
-def thermo_folder() -> Any:
-    """Return VULCAN_THERMO, or skip the test when it is not set."""
-    try:
-        return paths.VULCAN_THERMO
-    except RuntimeError as error:
-        pytest.skip(str(error))
-
-
 def tensor(values: Any, device: Any) -> torch.Tensor:
     """Return an array as a float64 tensor."""
     return torch.tensor(np.asarray(values), dtype=torch.float64, device=device)
@@ -53,6 +32,21 @@ def tensor(values: Any, device: Any) -> torch.Tensor:
 def full(cells: int, value: float, device: Any) -> torch.Tensor:
     """Return a float64 tensor of this many cells filled with value."""
     return torch.full((cells,), value, dtype=torch.float64, device=device)
+
+
+def state(net: Any, cells: int, device: Any, **fractions: float) -> torch.Tensor:
+    """Return mole fractions [cells, species] with the given species and the rest zero."""
+    x = torch.zeros(cells, len(net.species), dtype=torch.float64, device=device)
+    for name, value in fractions.items():
+        x[:, net.species.index(name)] = value
+    return x / x.sum(1, keepdim=True)
+
+
+def decay_answer(t: Any) -> tuple[Any, Any]:
+    """Return the mole fractions of A and B for A -> 2 B at constant pressure, from pure A, at J t."""
+    survive = np.exp(-t)
+    total = 2.0 - survive
+    return survive / total, 2.0 * (1.0 - survive) / total
 
 
 @dataclass
@@ -143,12 +137,12 @@ class Parity:
     """A network with its reference, solvers and recorded starts."""
 
     def __init__(self, name: str, device: Any) -> None:
-        thermo = thermo_folder()
-        reference = getattr(paths, REFERENCES[name])
-        self.yard, self.panel = paths.YARD / "design", paths.DESIGNS / "decision/P"
-        require_data(self.yard, self.panel, reference)
+        thermo = paths.vulcan_thermo()
+        reference = REFERENCES[name]()
+        self.yard, self.panel = paths.yard() / "design", paths.designs() / "decision/P"
+        paths.need(self.yard, self.panel, reference)
         net = kinvulcan.VulcanNetwork(thermo / name, thermo / "NASA9")
-        gases, floors = list(GASES), list(FLOORS)
+        gases, floors = list(_checks.GASES), list(_checks.FLOORS)
         if "S" in net.elements:
             gases += SULFUR_GASES
             floors += [SULFUR_FLOOR] * len(SULFUR_GASES)

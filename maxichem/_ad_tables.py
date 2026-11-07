@@ -7,120 +7,64 @@ import numpy as np
 from ._tables import balance_lanes
 from .kinvulcan import VulcanNetwork
 
-# per-warp work arrays of each kernel (name, length in units of NS unless given) and the arrays sharing their space
-# (free while they are used); names a kernel does not use sit at offset 0.
+# Each kernel's per-warp work arrays (name, length in units of NS unless layout says otherwise), and the arrays sharing
+# their space (free while they are used).
 _LAYOUT = {
     "jvp": (
-        [
-            "M",
-            "DINV",
-            "N0",
-            "N1",
-            "V",
-            "PART",
-            "NN",
-            "Y",
-            "F",
-            "SV",
-            "U",
-            "K1",
-            "K2",
-            "K3",
-            "K4",
-            "ND",
-            "YD",
-            "SV1N",
-            "KD1",
-            "KD2",
-            "KD3",
-            "KD4",
-            "YS",
-            "YDS",
-        ],
+        ("M", "DINV", "N0", "N1", "V", "PART", "NN", "Y", "F", "SV", "U", "K1", "K2", "K3", "K4",
+         "ND", "YD", "SV1N", "KD1", "KD2", "KD3", "KD4", "YS", "YDS"),
         {"FD": "F", "SVN": "SV", "T1": "YS", "T2": "YDS", "N2": "YD", "N12": "F"},
     ),
     "vjp": (
-        [
-            "M",
-            "DINV",
-            "N0",
-            "N1",
-            "V",
-            "PART",
-            "NN",
-            "Y",
-            "F",
-            "SV",
-            "U",
-            "K1",
-            "K2",
-            "K3",
-            "K4",
-            "NB",
-            "KB1",
-            "KB2",
-            "KB3",
-            "Z",
-            "YB",
-            "YB2",
-            "NBD",
-        ],
+        ("M", "DINV", "N0", "N1", "V", "PART", "NN", "Y", "F", "SV", "U", "K1", "K2", "K3", "K4",
+         "NB", "KB1", "KB2", "KB3", "Z", "YB", "YB2", "NBD"),
         {"YS": "F"},
     ),
+}  # fmt: skip
+# A name its kernel does not use sits at offset 0, so one header compiles and lints both kernels' files (tools/).
+_ALL_NAMES = sorted({name for names, aliases in _LAYOUT.values() for name in (*names, *aliases)})
+
+
+# The transposed Jacobian's words: rate (12 bits), species a and b (7 each), piece (9), end of piece, used.
+_GT_A, _GT_B, _GT_PIECE, _GT_END, _GT_USED = 12, 19, 26, 35, 37
+_MAX_RATES, _MAX_SPECIES_SLOTS, _MAX_PIECES = 1 << 12, 1 << 7, 1 << 9
+_MAX_LEADING_ROWS = 64  # the row masks of the transposed solves are 64-bit words
+GATHER_FIELDS = {
+    "GT_A": _GT_A,
+    "GT_B": _GT_B,
+    "GT_PIECE": _GT_PIECE,
+    "GT_END": _GT_END,
+    "GT_USED": _GT_USED,
+    "GT_RATE_MASK": f"{_MAX_RATES - 1}ull",
+    "GT_SPECIES_MASK": f"{_MAX_SPECIES_SLOTS - 1}ull",
+    "GT_PIECE_MASK": f"{_MAX_PIECES - 1}ull",
 }
-NAMES = (
-    "M",
-    "DINV",
-    "N0",
-    "N1",
-    "N2",
-    "N12",
-    "V",
-    "PART",
-    "NN",
-    "Y",
-    "F",
-    "SV",
-    "U",
-    "K1",
-    "K2",
-    "K3",
-    "K4",
-    "ND",
-    "YD",
-    "FD",
-    "SVN",
-    "SV1N",
-    "KD1",
-    "KD2",
-    "KD3",
-    "KD4",
-    "YS",
-    "YDS",
-    "T1",
-    "T2",
-    "NB",
-    "KB1",
-    "KB2",
-    "KB3",
-    "Z",
-    "YB",
-    "YB2",
-    "NBD",
-)
 
 
 def supported(tab: dict[str, Any]) -> None:
-    """Raise NotImplementedError unless the derivative kernels take the network of these tables.
-
-    At most 64 leading rows (with the 32-row trailing block: at most 96 species), at most 2,047 reactions (photolysis
-    branches included).
-    """
-    if tab["k0"] > 64 or 2 * tab["nr"] >= 4096:
+    """Raise NotImplementedError unless the derivative kernels take the network of these tables."""
+    if tab["k0"] > _MAX_LEADING_ROWS or 2 * tab["nr"] >= _MAX_RATES:
         raise NotImplementedError(
-            "the derivative kernels take networks of at most 96 species (64 leading rows) "
-            "and at most 2,047 reactions (photolysis branches included)"
+            f"the derivative kernels take at most {_MAX_LEADING_ROWS} leading rows and {_MAX_RATES // 2 - 1} reactions "
+            f"(photolysis branches included): this network has {tab['k0']} and {tab['nr']}"
         )
+
+
+def scratch_sizes(tab: dict[str, Any], cap: int) -> dict[str, int]:
+    """Return the global scratch of the derivative kernels, in doubles, by the name the kernels read it.
+
+    VJP_STRIDE, per warp: rates, their cotangents and rho. JVP_STRIDE and JVP_DIRECTION_STRIDE, per warp and per
+    direction: rates and limit weights; the rate and state tangents. REC, one stored attempt: N, h, t, accepted, then
+    the previous attempt's error, size and rejection. CAPR: attempts stored per recovered cell, enough for its tries.
+    """
+    ns, nr = tab["ns"], tab["nr"]
+    return {
+        "VJP_STRIDE": 14 * nr + 2,
+        "JVP_STRIDE": 5 * nr + 2,
+        "JVP_DIRECTION_STRIDE": 2 * nr + ns,
+        "REC": ns + 6,
+        "CAPR": 2 * cap,
+    }
 
 
 def ad_tables(net: VulcanNetwork, tab: dict[str, Any]) -> dict[str, Any]:
@@ -158,8 +102,10 @@ def ad_tables(net: VulcanNetwork, tab: dict[str, Any]) -> dict[str, Any]:
             nx += c > 0
         xg.append(nx)
     npg = ns + nx
-    if npg > 511:
-        raise ValueError("too many gather pieces")
+    if npg >= _MAX_PIECES:
+        raise ValueError(
+            f"too many gather pieces: {npg}, below {_MAX_PIECES}; this network is too large for the adjoint"
+        )
     lanes, ground = balance_lanes(range(len(pieces)), lambda q: len(pieces[q][1]), 32)
     gt = np.zeros((ground, 32), np.uint64)
     for l_, its in enumerate(lanes):
@@ -167,7 +113,8 @@ def ad_tables(net: VulcanNetwork, tab: dict[str, Any]) -> dict[str, Any]:
         for it in its:
             dst, terms = pieces[it]
             for e, (k, a, b) in enumerate(terms):
-                gt[q, l_] = int(k) | a << 12 | b << 19 | dst << 26 | int(e == len(terms) - 1) << 35 | 1 << 37
+                end = int(e == len(terms) - 1)
+                gt[q, l_] = int(k) | a << _GT_A | b << _GT_B | dst << _GT_PIECE | end << _GT_END | 1 << _GT_USED
                 q += 1
     urow = sum(1 << k for k in range(k0) if any((k, j) in pattern for j in range(k + 1, ns)))
     lrow = sum(1 << k for k in range(k0) if any((k, j) in pattern for j in range(k)))
@@ -191,7 +138,7 @@ def layout(tab: dict[str, Any], ext: dict[str, Any], kind: str) -> tuple[dict[st
         "PART": 2 * tab["npart"] if kind == "jvp" else max(tab["npart"], ext["npg"]),
     }
     names, alias = _LAYOUT[kind]
-    off, o = dict.fromkeys(NAMES, 0), 0
+    off, o = dict.fromkeys(_ALL_NAMES, 0), 0
     for k in names:
         off[k] = o
         o += size.get(k, ns)

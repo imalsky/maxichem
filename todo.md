@@ -1,6 +1,6 @@
 # To do
 
-Tasks Isaac put off and wants to return to, with the date deferred.
+Tasks put off to return to, with the date deferred.
 
 - 2026-11-03. Reduced advected tracers for the current networks (notes.md, "Reduced tracers").
   - Idea: advect fewer tracers than species and rebuild the rest in each call. The removed call did this with 31
@@ -41,5 +41,3 @@ Tasks Isaac put off and wants to return to, with the date deferred.
   - Needed: refit both ranges with a physical Cp, starting from `experiments/2026-11-06_tih_thermo/direct_stat_mech.py`; decide
     where the corrected file lives, since it departs from VULCAN; update the test that expects the refusal. The dissociation
     energy's error still leaves TiH uncertain by about 0.5 dex at 1000 K.
-- 2026-11-06. For the final cleanup: replace `__getattr__`, `__dir__` and the stubs in `maxichem/paths.py` with plain
-  functions (about 45 uses), and rename `kincuda.checked_drift` with a leading `_`. Prove with the cleanup's usual checks.

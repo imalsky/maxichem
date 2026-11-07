@@ -1,7 +1,6 @@
 // The adjoint kernels: the call and the cotangents of its inputs.
 
-// ---------------------------------------------------------------------------------------------------------- adjoint
-// tsolve's U^T: y_j -= U_kj w_k (j > k) over the sparse rows, then the dense rows.
+// solve_w_transposed's U^T: y_j -= U_kj w_k (j > k) over the sparse rows, then the dense rows.
 __device__ __forceinline__ void transposed_upper(const double* M, const u16* smap, const bool (&hp)[RP],
                                                  const double (&d0)[RP], double d1, int lane, double (&a0)[RP],
                                                  double& a1) {
@@ -30,7 +29,7 @@ __device__ __forceinline__ void transposed_upper(const double* M, const u16* sma
   }
 }
 
-// tsolve's L^T: w_j -= L_kj x_k (j < k) over the dense rows, then the sparse rows.
+// solve_w_transposed's L^T: w_j -= L_kj x_k (j < k) over the dense rows, then the sparse rows.
 __device__ __forceinline__ void transposed_lower(const double* M, const u16* smap, const bool (&hp)[RP], int lane,
                                                  double (&a0)[RP], double& a1) {
   const bool ht = lane < NT;
@@ -62,8 +61,8 @@ __device__ __forceinline__ void transposed_lower(const double* M, const u16* sma
 
 // y <- W^-T y = M0^-T (y + c0 (u . y) 1) (W = M0 - w 1^T, u = M0^-1 w): U^T then L^T with every factor read from M (the
 // dense block's factors written back), lane l holding the leading entries l + 32 p (< K0) and K0 + l.
-__device__ __forceinline__ void tsolve(const double* M, const double* dinv, double* y, const double* u, double c0,
-                                       const u16* smap, int lane) {
+__device__ __forceinline__ void solve_w_transposed(const double* M, const double* dinv, double* y, const double* u,
+                                                   double c0, const u16* smap, int lane) {
   const bool ht = lane < NT;
   bool hp[RP];
   double a0[RP], d0[RP];
@@ -97,7 +96,8 @@ __device__ __forceinline__ void tsolve(const double* M, const double* dinv, doub
 
 // y <- W^-T y with dense_lu's factors (W = P^T L U, P the row order pr): U^T, then L^T, then the rows back to their
 // original order. Lane l holds rows l + 32 p.
-__device__ __forceinline__ void dense_tsolve(const double* A, const double* dinv, const int* pr, double* y, int lane) {
+__device__ __forceinline__ void dense_solve_transposed(const double* A, const double* dinv, const int* pr, double* y,
+                                                       int lane) {
   double a[RPD];
 #pragma unroll
   for (int p = 0; p < RPD; p++) a[p] = lane + 32 * p < NS ? y[lane + 32 * p] : 0.0;
@@ -129,14 +129,14 @@ __device__ __forceinline__ void dense_tsolve(const double* A, const double* dinv
   __syncwarp();
 }
 
-// y <- W^-T y with the attempt's factors (xsolve's two cases).
+// y <- W^-T y with the attempt's factors (solve_attempt's two cases).
 template <bool DN>
-__device__ __forceinline__ void xtsolve(double* work, const double* Wd, double c0, double* y, const u16* smap,
-                                        int lane) {
+__device__ __forceinline__ void solve_attempt_transposed(double* work, const double* Wd, double c0, double* y,
+                                                         const u16* smap, int lane) {
   if (DN)
-    dense_tsolve(Wd, work + A_DINV, (const int*)(work + A_M), y, lane);
+    dense_solve_transposed(Wd, work + A_DINV, (const int*)(work + A_M), y, lane);
   else
-    tsolve(work + A_M, work + A_DINV, y, work + A_U, c0, smap, lane);
+    solve_w_transposed(work + A_M, work + A_DINV, y, work + A_U, c0, smap, lane);
 }
 
 // Reverse of F = (n_tot / nd) S v(n), n = nd Y / n_tot, at Y for the cotangent Fb (rate coefficients fixed): Yb +=
@@ -186,10 +186,11 @@ __device__ __forceinline__ void rhs_vjp(double* work, const double* Y, const dou
     double acc = 0.0;
     for (int qq = 0; qq < ground; qq++) {
       const u64 word = __ldg(gt + qq * 32 + lane);
-      if ((word >> 37) & 1ull) {
-        acc = fma(rho[word & 4095ull], n[(word >> 12) & 127ull] * n[(word >> 19) & 127ull], acc);
-        if ((word >> 35) & 1ull) {
-          part[(word >> 26) & 511ull] = acc;
+      if ((word >> GT_USED) & 1ull) {
+        acc = fma(rho[word & GT_RATE_MASK], n[(word >> GT_A) & GT_SPECIES_MASK] * n[(word >> GT_B) & GT_SPECIES_MASK],
+                  acc);
+        if ((word >> GT_END) & 1ull) {
+          part[(word >> GT_PIECE) & GT_PIECE_MASK] = acc;
           acc = 0.0;
         }
       }
@@ -263,8 +264,9 @@ __device__ __forceinline__ void reverse_gather(const double* work, const double*
   double acc = 0.0;
   for (int qq = 0; qq < ground; qq++) {
     const u64 word = __ldg(gt + qq * 32 + lane);
-    if ((word >> 37) & 1ull) {
-      const int k = (int)(word & 4095ull), ia = (int)((word >> 12) & 127ull), ib = (int)((word >> 19) & 127ull);
+    if ((word >> GT_USED) & 1ull) {
+      const int k = (int)(word & GT_RATE_MASK), ia = (int)((word >> GT_A) & GT_SPECIES_MASK),
+                ib = (int)((word >> GT_B) & GT_SPECIES_MASK);
       const double na = n[ia], nb = n[ib], r0 = rho[k], r1 = rho[2 * NR + k];
       acc = fma(r0 + r1, na * nb, acc);
 #pragma unroll
@@ -272,8 +274,8 @@ __device__ __forceinline__ void reverse_gather(const double* work, const double*
         const double* d = work + ON1[s];
         acc = fma(s == 0 ? r0 : (s == 1 ? r1 : rho[s * 2 * NR + k]), d[ia] * nb + na * d[ib], acc);
       }
-      if ((word >> 35) & 1ull) {
-        part[(word >> 26) & 511ull] = acc;
+      if ((word >> GT_END) & 1ull) {
+        part[(word >> GT_PIECE) & GT_PIECE_MASK] = acc;
         acc = 0.0;
       }
     }
@@ -347,10 +349,10 @@ __device__ __forceinline__ void rhs_vjp_n(double* work, double* lbk, double* rho
 // cotangents; returns the cotangent of the step size (adapt) or 0. The stages' W^-T solves come first (z4 in z, z3..z1
 // in place of Kb3..Kb1), with the reverse of F at Y4 and Y3 between them; the terms at N follow in one pass.
 template <bool DN>
-__device__ __forceinline__ double sadj(double* work, const double* Wd, double ha, double c0, int adapt,
-                                       const double* kf, const double* kr, double* lbk, double* rho, double& lbnd,
-                                       double nd, const Tab& tab, const u64* __restrict__ gt,
-                                       const int* __restrict__ xg, int ground, int lane) {
+__device__ __forceinline__ double reverse_stages(double* work, const double* Wd, double ha, double c0, int adapt,
+                                                 const double* kf, const double* kr, double* lbk, double* rho,
+                                                 double& lbnd, double nd, const Tab& tab, const u64* __restrict__ gt,
+                                                 const int* __restrict__ xg, int ground, int lane) {
   double *N = work + A_NN, *Nb = work + A_NB, *Yb = work + A_YB, *Yb2 = work + A_YB2, *z = work + A_Z,
          *Ys = work + A_YS, *K1 = work + A_K1, *K2 = work + A_K2, *K3 = work + A_K3, *K4 = work + A_K4,
          *Kb1 = work + A_KB1, *Kb2 = work + A_KB2, *Kb3 = work + A_KB3;
@@ -366,7 +368,7 @@ __device__ __forceinline__ double sadj(double* work, const double* Wd, double ha
   }
   __syncwarp();
   // stage 4: K4 = W^-1 (F(Y4) + (K1 - K2 - 8/3 K3) / h), Y4 = N + 2 K1 + K3
-  xtsolve<DN>(work, Wd, c0, z, tab.smap, lane);
+  solve_attempt_transposed<DN>(work, Wd, c0, z, tab.smap, lane);
   for (int i = lane; i < NS; i += 32) {
     Kb1[i] += ih * z[i];
     Kb2[i] -= ih * z[i];
@@ -385,7 +387,7 @@ __device__ __forceinline__ double sadj(double* work, const double* Wd, double ha
   }
   __syncwarp();
   // stage 3: K3 = W^-1 (F(Y3) + (K1 - K2) / h), Y3 = N + 2 K1
-  xtsolve<DN>(work, Wd, c0, Kb3, tab.smap, lane);
+  solve_attempt_transposed<DN>(work, Wd, c0, Kb3, tab.smap, lane);
   for (int i = lane; i < NS; i += 32) {
     Kb1[i] += ih * Kb3[i];
     Kb2[i] -= ih * Kb3[i];
@@ -402,7 +404,7 @@ __device__ __forceinline__ double sadj(double* work, const double* Wd, double ha
   }
   __syncwarp();
   // stage 2: K2 = W^-1 (F(N) + 4 K1 / h)
-  xtsolve<DN>(work, Wd, c0, Kb2, tab.smap, lane);
+  solve_attempt_transposed<DN>(work, Wd, c0, Kb2, tab.smap, lane);
   for (int i = lane; i < NS; i += 32) {
     Kb1[i] += RODAS_C21 * ih * Kb2[i];
     ihb += RODAS_C21 * Kb2[i] * K1[i];
@@ -410,7 +412,7 @@ __device__ __forceinline__ double sadj(double* work, const double* Wd, double ha
   }
   __syncwarp();
   // stage 1: K1 = W^-1 F(N)
-  xtsolve<DN>(work, Wd, c0, Kb1, tab.smap, lane);
+  solve_attempt_transposed<DN>(work, Wd, c0, Kb1, tab.smap, lane);
   for (int i = lane; i < NS; i += 32) ighb -= Kb1[i] * K1[i];
   __syncwarp();
   rhs_vjp_n(work, lbk, rho, lbnd, kf, kr, nd, tab, gt, xg, ground, lane);
@@ -418,8 +420,9 @@ __device__ __forceinline__ double sadj(double* work, const double* Wd, double ha
   return -(wsum(ihb) + 2.0 * wsum(ighb)) / (ha * ha);
 }
 
-__device__ __forceinline__ void save(double* rp, const double* N, double h, double t, bool prej, double pen, double pha,
-                                     int lane) {
+// One stored attempt (REC): the state before it and the step control's history.
+__device__ __forceinline__ void save_attempt(double* rp, const double* N, double h, double t, bool prej, double pen,
+                                             double pha, int lane) {
   for (int i = lane; i < NS; i += 32) rp[i] = N[i];
   if (lane == 0) {
     rp[NS] = h;
@@ -466,13 +469,82 @@ __device__ __forceinline__ void nan_cotangents(double* __restrict__ gx0, double*
   }
 }
 
+// The reverse of the error of the attempt in place, for its cotangent enb: z = the cotangent of K4, and Nb, Yb += those
+// of N and Y. en = sqrt(mean q^2), q = K4 / sc, sc = atol + rtol max(|N|, |Y|); on a first try (t = 0 until a step is
+// accepted) max(that, max |q|): the selected norm, half each at a tie, the max-norm's cotangent shared evenly among the
+// species attaining it.
+__device__ __forceinline__ void error_cotangent(const double* N, const double* Y, const double* K4, double* Nb,
+                                                double* Yb, double* z, double en, double enb, bool first, double rtol,
+                                                double atol, int lane) {
+  double er = en, emx = 0.0, wr = 1.0, wm = 0.0;
+  if (first) {
+    double e2 = 0.0, em = 0.0, nt = 0.0;
+    for (int i = lane; i < NS; i += 32) {
+      const double qq = K4[i] / (atol + rtol * fmax(fabs(N[i]), fabs(Y[i])));
+      e2 += qq * qq;
+      em = fmax(em, fabs(qq));
+    }
+    er = sqrt(wsum(e2) / NS);
+    emx = wmax(em);
+    for (int i = lane; i < NS; i += 32)
+      nt += fabs(K4[i] / (atol + rtol * fmax(fabs(N[i]), fabs(Y[i])))) == emx ? 1.0 : 0.0;
+    wr = er > emx ? 1.0 : (er < emx ? 0.0 : 0.5);
+    wm = (1.0 - wr) / wsum(nt);
+  }
+  for (int i = lane; i < NS; i += 32) {
+    const double aN = fabs(N[i]), aY = fabs(Y[i]), sc = atol + rtol * fmax(aN, aY);
+    const double qq = K4[i] / sc;
+    const double qb =
+        !first ? enb * qq / (NS * en) : enb * (wr * qq / (NS * er) + (fabs(qq) == emx ? wm * sgn(qq) : 0.0));
+    const double scb = -rtol * qb * qq / sc;
+    z[i] = qb / sc;
+    const double wN = aN > aY ? 1.0 : (aN < aY ? 0.0 : 0.5);
+    Nb[i] += wN * scb * sgn(N[i]);
+    Yb[i] += (1.0 - wN) * scb * sgn(Y[i]);
+  }
+}
+
+// The rate cotangents lbk -> the log multipliers glm, J, gA (the forward coefficients before the limit, for arrh), and
+// this lane's parts of the cotangents of T (gTl) and ln nd (gnl).
+__device__ __forceinline__ void rate_cotangents(double* work, const double* lbk, const double* kf, const double* cw,
+                                                const double* lmc, const double* __restrict__ rc,
+                                                const int* __restrict__ rf, const double* __restrict__ nasa,
+                                                const Tab& tab, double Tc, double nd, int cell,
+                                                double* __restrict__ glm, double* __restrict__ gA,
+                                                double* __restrict__ gJ, double& gTl, double& gnl, int lane) {
+  const double lT = log(Tc), iT = 1.0 / Tc;
+  double* gTs = work + A_N1;
+  gibbs_dT(gTs, Tc, nasa, lane);
+  for (int r = lane; r < NR; r += 32) {
+    const double cot_k = lbk[r], lr = lbk[NR + r];  // ln k (forward and reverse together), ln kr alone
+    if (r >= NRT) {                                 // photolysis: cot_k = the cotangent of kf = J exp(lm)
+      glm[(size_t)cell * NR + r] = kf[r] * cot_k;
+      gA[(size_t)cell * NR + r] = 0.0;
+      gJ[(size_t)cell * NJ + r - NRT] = (lmc ? exp(lmc[r]) : 1.0) * cot_k;
+      continue;
+    }
+    glm[(size_t)cell * NR + r] = cot_k;
+    const int fl = rf[r];
+    double dT = 0.0, dn = 0.0, D[9];
+    rate_law_partials(rc + RCW * r, fl, Tc, lT, iT, nd, dT, dn, D);
+    const u8* x = tab.rx + 6 * r;
+    const double ddg = gTs[x[3]] + gTs[x[4]] + gTs[x[5]] - gTs[x[0]] - gTs[x[1]] - gTs[x[2]];
+    const double wA = cw[r], wG = cw[NR + r];
+    const double wE = collision_limit_nd_weight(fl, wA, wG);
+    const double Ab = (1.0 - wA) * cot_k, Gb = lr - wG * cot_k;  // the collision limit (rates_tan)
+    gA[(size_t)cell * NR + r] = Ab;
+    gTl += Ab * dT + Gb * (ddg + reaction_dmu(fl) * iT);
+    gnl += Ab * dn - wE * cot_k;
+  }
+}
+
 // The call and the cotangents of its inputs, one warp per cell. DN = false: every cell, the call kernel's attempts
-// (queue count[0]; CAP stored attempts per cell in rec). DN = true: the first count[COUNT_RECOMPUTED] cells of list,
-// the recover kernel's attempts (dense W in wscr; max_steps = the recovery's tries; CAPR stored attempts; queue
-// the recovery's queue); its result tested as the recover kernel tests it: redo = 1 and count[7], or redo = 2, count[8]
-// and NaN cotangents.
+// (COUNT_QUEUE; CAP stored attempts per cell in rec). DN = true: the first count[COUNT_RECOMPUTED] cells of list, the
+// recover kernel's attempts (dense W in wscr; max_steps = the recovery's tries; CAPR stored attempts;
+// COUNT_RECOVERY_QUEUE); its result tested as the recover kernel tests it: redo = 1 and COUNT_RECOVERED, or redo = 2,
+// COUNT_STILL_FAILED and NaN cotangents.
 template <bool DN>
-// size-limit-ok: one cell's state runs through every part: a further split passes 30 or more arguments per helper
+// size-limit-ok: the forward and reverse passes share one cell's state, which a split would pass by hand
 __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, double* wscr,
                                           const u16* __restrict__ didx, const double* __restrict__ atoms) {
   constexpr int CP = DN ? CAPR : CAP;
@@ -488,7 +560,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
   double *M = work + A_M, *N = work + A_NN, *Y = work + A_Y, *Nb = work + A_NB, *Yb = work + A_YB, *z = work + A_Z,
          *K4 = work + A_K4;
   const size_t wid = (size_t)blockIdx.x * WPB + wib;
-  double* kf = scratch + wid * (14 * NR + 2);
+  double* kf = scratch + wid * VJP_STRIDE;
   double *kr = kf + NR, *lbk = kr + NR + 2, *rho = lbk + 2 * NR, *cw = rho + 8 * NR;  // rho: 4 x 2 NR
   if (lane == 0) kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
   double* recA = rec + wid * 2 * CP * REC;
@@ -520,9 +592,9 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     double en_l = 0.0, c0_l = 0.0;  // the last attempt run (its stages are in place)
     // forward: the state before each of the first CP attempts (and whether it was accepted)
     while (run && na < max_steps && t < dt * CALL_END) {
-      if (na < CP) save(recA + na * REC, N, h, t, prej, pen, pha, lane);
-      const bool ok = fstep<DN>(work, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l, c0_l, tab,
-                                sst, jt, lu, optr, didx, sround, jround, lane, myt);
+      if (na < CP) save_attempt(recA + na * REC, N, h, t, prej, pen, pha, lane);
+      const bool ok = forward_step<DN>(work, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l, c0_l,
+                                       tab, sst, jt, lu, optr, didx, sround, jround, lane, myt);
       if (na < CP && lane == 0) recA[na * REC + NS + 2] = ok ? 1.0 : 0.0;
       na++;
     }
@@ -537,16 +609,8 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       noko[cell] = nok;
     }
     bool bad = false;
-    if (DN) {  // the recover kernel's test of the result
-      __syncwarp();
-      int b = 0;
-      if (lane == 0) {
-        b = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell J_ARG);
-        if (b) doneo[cell] = 0;  // done: finished and passing the guard
-        redo[cell] = b ? 2 : 1;
-        atomicAdd(count + (b ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
-      }
-      bad = __shfl_sync(FULL, b, 0) != 0;
+    if (DN) {
+      bad = recovery_fails(x0, Ta, Pa, dta, xout, doneo, redo, count, dn, nok, atoms, atol, cell, lane J_ARG);
       if (bad) na = 0;  // no reverse: NaN cotangents below
     }
     // reverse: x = N / sum N
@@ -566,9 +630,9 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       pen = 0.0;
       pha = 0.0;
       for (int j = 0; j < na; j++) {
-        if (j % st == 0) save(recA + (j / st) * REC, N, h, t, prej, pen, pha, lane);
-        fstep<DN>(work, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l, c0_l, tab, sst, jt, lu,
-                  optr, didx, sround, jround, lane, myt);
+        if (j % st == 0) save_attempt(recA + (j / st) * REC, N, h, t, prej, pen, pha, lane);
+        forward_step<DN>(work, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l, c0_l, tab, sst, jt,
+                         lu, optr, didx, sround, jround, lane, myt);
       }
     }
     const int seg = st > 1 ? st : na;  // attempts per reversed segment
@@ -585,9 +649,9 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
         prej = recA[g * REC + NS + 5] != 0.0;
         __syncwarp();
         for (int j = j0; j < j1; j++) {
-          save(recB + (j - j0) * REC, N, h, t, prej, pen, pha, lane);
-          const bool ok = fstep<DN>(work, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l, c0_l, tab,
-                                    sst, jt, lu, optr, didx, sround, jround, lane, myt);
+          save_attempt(recB + (j - j0) * REC, N, h, t, prej, pen, pha, lane);
+          const bool ok = forward_step<DN>(work, c, Wd, h, t, nok, prej, pen, pha, dt, kf, kr, nd, rtol, atol, en_l,
+                                           c0_l, tab, sst, jt, lu, optr, didx, sround, jround, lane, myt);
           if (lane == 0) recB[(j - j0) * REC + NS + 2] = ok ? 1.0 : 0.0;
         }
         rb = recB - j0 * REC;
@@ -602,13 +666,14 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
         double c0 = c0_l, en = en_l, dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
         bool ok = rp[NS + 2] != 0.0;
         if (j < j1 - 1)  // else the attempt just run, still in place
-          en = xattempt<DN>(work, c, Wd, ha, tj == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr, didx,
-                            sround, jround, lane, myt);
+          en = run_attempt<DN>(work, c, Wd, ha, tj == 0.0, kf, kr, nd, rtol, atol, c0, ok, tab, sst, jt, lu, optr, didx,
+                               sround, jround, lane, myt);
         if (!DN && myt >= 0) {  // the dense block's factors back into M
 #pragma unroll
           for (int k = 0; k < NT; k++) M[TB0 + myt * NT + k] = c[k];
         }
-        const double fac = factor(en, ok, rp[NS + 5] != 0.0, rp[NS + 3], rp[NS + 4], ha, dfe, dfh, dfp, dfq);
+        const double fac =
+            step_factor_partials(en, ok, rp[NS + 5] != 0.0, rp[NS + 3], rp[NS + 4], ha, dfe, dfh, dfp, dfq);
         double hab = adapt ? hb * fac + hb * ha * dfh + hac : 0.0;
         const double enb = adapt ? hb * ha * dfe + enc : 0.0;
         enc = adapt ? hb * ha * dfp : 0.0;  // to the previous attempt (the next one reversed)
@@ -622,38 +687,10 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
           z[i] = 0.0;
         }
         if (ok && adapt) hab += tb;
-        if (enb != 0.0 && en > 0.0) {    // en = sqrt(mean q^2), q = K4 / sc, sc = atol + rtol max(|N|, |Y|); on a
-          const bool first = tj == 0.0;  // first try max(that, max |q|) (t = 0 until a step is accepted)
-          double er = en, emx = 0.0, wr = 1.0, wm = 0.0;
-          if (first) {  // the selected norm (half each at a tie), the max-norm's cotangent shared
-            double e2 = 0.0, em = 0.0, nt = 0.0;  // evenly among the species attaining it
-            for (int i = lane; i < NS; i += 32) {
-              const double qq = K4[i] / (atol + rtol * fmax(fabs(N[i]), fabs(Y[i])));
-              e2 += qq * qq;
-              em = fmax(em, fabs(qq));
-            }
-            er = sqrt(wsum(e2) / NS);
-            emx = wmax(em);
-            for (int i = lane; i < NS; i += 32)
-              nt += fabs(K4[i] / (atol + rtol * fmax(fabs(N[i]), fabs(Y[i])))) == emx ? 1.0 : 0.0;
-            wr = er > emx ? 1.0 : (er < emx ? 0.0 : 0.5);
-            wm = (1.0 - wr) / wsum(nt);
-          }
-          for (int i = lane; i < NS; i += 32) {
-            const double aN = fabs(N[i]), aY = fabs(Y[i]), sc = atol + rtol * fmax(aN, aY);
-            const double qq = K4[i] / sc;
-            const double qb =
-                !first ? enb * qq / (NS * en) : enb * (wr * qq / (NS * er) + (fabs(qq) == emx ? wm * sgn(qq) : 0.0));
-            const double scb = -rtol * qb * qq / sc;
-            z[i] = qb / sc;
-            const double wN = aN > aY ? 1.0 : (aN < aY ? 0.0 : 0.5);
-            Nb[i] += wN * scb * sgn(N[i]);
-            Yb[i] += (1.0 - wN) * scb * sgn(Y[i]);
-          }
-        }
+        if (enb != 0.0 && en > 0.0) error_cotangent(N, Y, K4, Nb, Yb, z, en, enb, tj == 0.0, rtol, atol, lane);
         __syncwarp();
         if (ok || enb != 0.0)
-          hab += sadj<DN>(work, Wd, ha, c0, adapt, kf, kr, lbk, rho, lbnd, nd, tab, gt, xg, ground, lane);
+          hab += reverse_stages<DN>(work, Wd, ha, c0, adapt, kf, kr, lbk, rho, lbnd, nd, tab, gt, xg, ground, lane);
         if (adapt) {  // ha = min(h, dt - t)
           const double wh = hj < rem ? 1.0 : (hj > rem ? 0.0 : 0.5);
           hb = wh * hab;
@@ -664,7 +701,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       }
     }
     __syncwarp();
-    // h0 = max(min(hin, dt), 1e-12)
+    // h0 = max(min(hin, dt), H_MIN)
     {
       const double wm = m0 > H_MIN ? 1.0 : (m0 < H_MIN ? 0.0 : 0.5);
       const double wh = !hfin ? 0.0 : (hi < dt ? 1.0 : (hi > dt ? 0.0 : 0.5));
@@ -675,34 +712,9 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       }
     }
     for (int i = lane; i < NS; i += 32) gx0[(size_t)cell * NS + perm[i]] = Nb[i];
-    // rate cotangents -> T, P, the log multipliers, J and (gA, for arrh) the forward coefficients before the limit
     double gTl = 0.0, gnl = 0.0;
     if (run) {
-      const double lT = log(Tc), iT = 1.0 / Tc;
-      double* gTs = work + A_N1;
-      gibbs_dT(gTs, Tc, nasa, lane);
-      for (int r = lane; r < NR; r += 32) {
-        const double cot_k = lbk[r], lr = lbk[NR + r];  // ln k (forward and reverse together), ln kr alone
-        if (r >= NRT) {                                 // photolysis: cot_k = the cotangent of kf = J exp(cot_k)
-          glm[(size_t)cell * NR + r] = kf[r] * cot_k;
-          gA[(size_t)cell * NR + r] = 0.0;
-          gJ[(size_t)cell * NJ + r - NRT] = (lmc ? exp(lmc[r]) : 1.0) * cot_k;
-          continue;
-        }
-        glm[(size_t)cell * NR + r] = cot_k;
-        const int fl = rf[r];
-        double dT = 0.0, dn = 0.0, D[9];
-        kpart(rc + RCW * r, fl, Tc, lT, iT, nd, dT, dn, D);
-        const u8* x = tab.rx + 6 * r;
-        const double ddg = gTs[x[3]] + gTs[x[4]] + gTs[x[5]] - gTs[x[0]] - gTs[x[1]] - gTs[x[2]];
-        const double wA = cw[r], wG = cw[NR + r];
-        const double wE = (wA - wG) * (((fl >> FL_FORWARD_SHIFT) & 3) == 3 ? 1.0 : 0.0) +
-                          wG * (((fl >> FL_REVERSE_SHIFT) & 3) == 3 ? 1.0 : 0.0);
-        const double Ab = (1.0 - wA) * cot_k, Gb = lr - wG * cot_k;  // the collision limit (rates_tan)
-        gA[(size_t)cell * NR + r] = Ab;
-        gTl += Ab * dT + Gb * (ddg + (double)(((fl >> FL_DMU_SHIFT) & 7) - 4) * iT);
-        gnl += Ab * dn - wE * cot_k;
-      }
+      rate_cotangents(work, lbk, kf, cw, lmc, rc, rf, nasa, tab, Tc, nd, cell, glm, gA, gJ, gTl, gnl, lane);
     } else {
       for (int r = lane; r < NR; r += 32) {
         glm[(size_t)cell * NR + r] = 0.0;
@@ -716,10 +728,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       gP[cell] = run ? lnd / Pc : 0.0;
     }
     if (DN && bad) nan_cotangents(gx0, gT, gP, gdt, ghin, glm, gJ, gA, cell, lane);  // still failed after the recovery
-    int nxt = 0;
-    if (lane == 0) nxt = gridDim.x * WPB + atomicAdd(count + (DN ? COUNT_RECOVERY_QUEUE : COUNT_QUEUE), 1);
-    q = __shfl_sync(FULL, nxt, 0);
-    __syncwarp();
+    q = next_queued<DN>(count, lane);
   }
 }
 
@@ -742,24 +751,24 @@ extern "C" __global__ void __launch_bounds__(32 * WPB)
 extern "C" __global__ void arrh(const double* __restrict__ gA, const double* __restrict__ Ta,
                                 const double* __restrict__ Pa, const double* __restrict__ rc,
                                 const int* __restrict__ rf, double* __restrict__ grc, int B) {
-  __shared__ double red[9][256];
+  __shared__ double red[9][ARRH_BLOCK_THREADS];
   const int r = (int)blockIdx.x, tid = (int)threadIdx.x, fl = rf[r];
   double acc[9];
 #pragma unroll
   for (int j = 0; j < 9; j++) acc[j] = 0.0;
-  for (int cell = tid; cell < B && r < NRT; cell += 256) {
+  for (int cell = tid; cell < B && r < NRT; cell += ARRH_BLOCK_THREADS) {
     const double g = gA[(size_t)cell * NR + r];
     if (g == 0.0) continue;
     const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
     double dT = 0.0, dn = 0.0, D[9];
-    kpart(rc + RCW * r, fl, Tc, log(Tc), 1.0 / Tc, nd, dT, dn, D);
+    rate_law_partials(rc + RCW * r, fl, Tc, log(Tc), 1.0 / Tc, nd, dT, dn, D);
 #pragma unroll
     for (int j = 0; j < 9; j++) acc[j] += g * D[j];
   }
 #pragma unroll
   for (int j = 0; j < 9; j++) red[j][tid] = acc[j];
   __syncthreads();
-  for (int s = 128; s > 0; s >>= 1) {
+  for (int s = ARRH_BLOCK_THREADS / 2; s > 0; s >>= 1) {
     if (tid < s) {
 #pragma unroll
       for (int j = 0; j < 9; j++) red[j][tid] += red[j][tid + s];

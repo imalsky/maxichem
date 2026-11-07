@@ -2,25 +2,26 @@
 
 ```bash
 pytest -m "not slow and not gpu"      # the CPU tests: what CI runs
+pytest -m "slow and not gpu"          # the slow CPU tests: VULCAN's own files (needs VULCAN_THERMO), the derivative kernels' compile, the wheel
 pytest -m gpu -s                      # the GPU tests, with each case's numbers
 ```
 
-CI runs the CPU tests and compiles every kernel with NVRTC, with no GPU. The GPU tests stay local. A GPU test skips, and says why,
-when `VULCAN_THERMO` is unset or its reference data are missing (README.md lists them).
+CI runs the CPU tests and compiles every kernel with NVRTC, with no GPU. The GPU tests stay local, and skip only where there is no GPU.
+A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA toolkit is missing fails, and its message names what is missing.
 
 | File | What it tests | Needs |
 | --- | --- | --- |
-| `test_reader.py` | The reader on invented networks: every rate law, atoms, refusals of reactions, headings and NASA-9 files | CPU |
-| `test_tables_source.py` | The term streams hold the stoichiometry, on a small network too; the header selects the rate-law forms; the argument table matches every kernel's signature; `drift`, `cap` and the export's format and count slots | CPU |
+| `test_reader.py` | The reader on invented networks: every rate law, atoms, refusals of reactions, repeated species, headings and NASA-9 files; on VULCAN's own files, only TiSNCHO refused | CPU; the VULCAN files: `VULCAN_THERMO`, marked slow |
+| `test_tables_source.py` | The term streams hold the stoichiometry, on a small network too; the header selects the rate-law forms; the argument table matches every kernel's signature; a hand-built reverse law, `drift`, `cap` and a constructor that fails | CPU |
 | `test_kernels_compile.py` | Every form of the kernels compiles, including forms no real network reaches | CPU |
 | `test_paths.py` | Data locations follow the environment; missing data give a clear error | CPU |
 | `test_packaging.py` | The built wheel holds the kernels and assembles them without the checkout | CPU, slow |
 | `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation; a small network in every kernel | GPU |
 | `test_order.py` | Rodas3's order of accuracy | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
-| `test_guard.py` | The guard and recovery, bad inputs, independence from the batch | GPU, data |
+| `test_guard.py` | The guard and recovery, bad inputs, independence from the batch, what a closed solver refuses and releases | GPU, data |
 | `test_ad.py` | Derivatives against finite differences and against each other | GPU, data, slow |
-| `test_export_cpp.py` | The C++ caller, bit for bit | GPU, CUDA toolkit, slow |
+| `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses another export format | GPU, CUDA toolkit, slow |
 | `test_vulcan_truth.py` | `bench/kintest.py quick` against VULCAN-0D | GPU, data, slow |
 
 `tests/data` holds invented networks with constant-Cp NASA-9 data, so a test can state its answer in closed form. Their `N_i`
@@ -34,6 +35,9 @@ multipliers are lm = 0.1 N(0, 1) per reaction unless named lm = 0.
 
 - **Primal.** The tangent and adjoint kernels' results are bitwise `CudaSolver.launch`'s: settled gas at dt 100 s, box starts at dt
   500 s, cold boxes (T < 650 K, where the collision limit acts) at dt 100 s.
+- **Non-finite derivatives.** Any cell whose tangents or finite differences are not finite fails its case, unless the guard flagged it 2;
+  the errors below cannot judge such a cell, since its scale S is not finite. These cases run at the default max_steps, where any cell with
+  flag 2 fails its case too.
 - **Tangents against central differences.** Per input class x, T, P, J, lm, rc, one random direction each. Per cell and step e in
   1e-4..1e-7: err_e = the largest difference over species (x > 1e-20) divided by S, the larger side's largest value. A plateau is where
   the steps agree: the same accepted-step count both sides, and two consecutive e within 1e-2 of S. The best err over the plateau counts.
@@ -53,7 +57,7 @@ The limits, and why each is what it is, are at the top of `test_ad.py`.
 
 Every panel is a block of cells with its own forcing (T, P, dt per call), mixes (x <- (1 - f) x + f y before a call), kick-twin starts
 and VULCAN truth. One loop of ticks: a block's call j runs on tick j * stride, and all scheduled cells go to the solver in one call per
-tick. Counters stay on the GPU and are read back every 1,000 ticks. Per path they hold the worst floored error against VULCAN over the
+tick. Counters stay on the GPU and are read back every 1,000 ticks; the guard's counts come from `solver.total`. Per path they hold the worst floored error against VULCAN over the
 12 scored gases with its call and gas, stored states with a miss (> 0.1 dex) or a large miss (> 1 dex), unfinished calls, non-finite and
 negative states, the largest change of an element ratio (to H) on paths without mixes, accepted steps and the guard's counts.
 

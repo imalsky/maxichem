@@ -1,9 +1,9 @@
-"""Stored outputs of the torch reference solver for the checks (paths.LIBREF).
+"""Stored outputs of the torch reference solver for the checks (paths.libref()).
 
-Stored outputs of the torch reference solver for the checks (paths.LIBREF): the call computed by batched fp64 Rodas3
-in torch (rate coefficients, exact Jacobian, LU without row exchanges, the call kernel's step control), written once
-on exactly the checks' inputs. Every entry carries the sha256 of the inputs it was computed from (the network's
-reaction list and NASA-9 files, the inputs, max_steps); a check computes the same digest and refuses a mismatch.
+The call computed by batched fp64 Rodas3 in torch (rate coefficients, exact Jacobian, LU without row exchanges, the call
+kernel's step control), written once on exactly the checks' inputs. Every entry carries the sha256 of the inputs it was
+computed from (the network's reaction list and NASA-9 files, the inputs, max_steps); a check computes the same digest
+and refuses a mismatch.
 """
 
 import hashlib
@@ -39,7 +39,7 @@ def netsig(network_file, nasa_dir, species):
 
 def load(path=None):
     """Return the stored arrays (an open npz, loaded once per path)."""
-    path = Path(path or paths.LIBREF)
+    path = Path(path or paths.libref())
     if path not in _D:
         paths.need(path)
         _D[path] = np.load(path)
@@ -60,7 +60,7 @@ def entry(key, *inputs, path=None):
     """Return arrays(key) after checking the digest of the inputs against key/sha."""
     stored = load(path)
     if f"{key}/sha" not in stored.files:
-        raise KeyError(f"{key}: not in {path or paths.LIBREF}")
+        raise KeyError(f"{key}: not in {path or paths.libref()}")
     if str(stored[f"{key}/sha"]) != digest(*inputs):
         raise ValueError(f"{key}: the inputs differ from those the stored reference was written for")
     return arrays(key, path)

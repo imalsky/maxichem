@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from helpers import H2S_PER_H2_SOLAR, SOLAR_START
 
 from maxichem import CudaSolver, VulcanNetwork, paths
+from maxichem._checks import H2S_PER_H2_SOLAR, SOLAR_START
 
 
 def main() -> None:
@@ -29,7 +29,7 @@ def main() -> None:
     photo = bool(int(sys.argv[3])) if len(sys.argv) > 3 else True
     max_steps = int(sys.argv[4]) if len(sys.argv) > 4 else 4000
     network = sys.argv[5] if len(sys.argv) > 5 else "NCHO_photo_network.txt"
-    th = paths.VULCAN_THERMO
+    th = paths.vulcan_thermo()
     net = VulcanNetwork(f"{th}/{network}", f"{th}/NASA9")
     sp = list(net.species)
     dev = torch.device("cuda")

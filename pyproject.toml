@@ -83,6 +83,9 @@ ignore = [
   "TRY003",   # long message at the raise: the rules want messages that say what to fix
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["maxichem"]  # so a lint of a copy without the package sorts imports the same
+
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
@@ -111,7 +114,7 @@ filterwarnings = ["error"]  # list any allowed warning here, with its reason
 log_level = "INFO"
 testpaths = ["tests"]
 markers = [
-  "slow: takes more than a few seconds; outside the default CI run",
+  "slow: takes long or needs data CI does not have; outside the default CI run",
   "gpu: needs a GPU; runs locally, never in CI",
 ]
 

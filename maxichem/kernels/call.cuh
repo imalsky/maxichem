@@ -22,10 +22,11 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
   double* M = smem + grp * PERC;  // M0 by slot, then its LU factors (leading slots, then the block)
   double *dinv = M + NNZ, *n = dinv + NS + 1, *N = n + NS + 1, *Y = N + NS, *F = Y + NS, *u = F + NS, *K1 = u + NS,
          *K2 = K1 + NS, *K3 = K2 + NS, *K4 = K3 + NS;
-  double *v = M + VOFF, *part = v + NR;  // in the trailing block's slots while that block is in registers if
-                                         // they fit there (VOFF = TB0), else after the other arrays
+  // v and part sit in the trailing block's slots, free while that block is in registers, if they fit there (VOFF =
+  // TB0), else after the other arrays
+  double *v = M + VOFF, *part = v + NR;
   int* nextc = (int*)(K4 + NS);
-  double* kf = scratch + ((size_t)blockIdx.x * CPB + grp) * (2 * NR + 2 + RSN);  // per cell slot: rates, the copy
+  double* kf = scratch + ((size_t)blockIdx.x * CPB + grp) * CALL_STRIDE;  // per cell slot: rates, the copy
   double* kr = kf + NR;
   double* rsc = kf + 2 * NR + 2;  // F, u, -Jn of the last fresh evaluation (a retry at the same state)
   if (cl == 0) kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
@@ -49,12 +50,14 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
     int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;  // no step for non-finite inputs or cold gas
     while (it < max_steps && t < dt * CALL_END) {
       const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
-      if (prej) {  // the rejected try's state: its F, u and -Jn (all slots: v and the
+      if (prej) {
+        // the rejected try's state: its F, u and -Jn, all slots, since v and the S v pieces overwrote the trailing
+        // block's
         for (int i = cl; i < NS; i += NL) {
           F[i] = rsc[i];
           u[i] = rsc[NS + i];
-        }  // S v pieces overwrite the
-        for (int s = cl; s < NNZ; s += NL) M[s] = rsc[2 * NS + s];  // trailing block's slots)
+        }
+        for (int s = cl; s < NNZ; s += NL) M[s] = rsc[2 * NS + s];
       } else {
         const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, tab, sst, sround, lane, cl, grp);
         for (int s = cl; s < NNZ; s += NL) M[s] = 0.0;

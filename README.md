@@ -21,7 +21,7 @@ are compiled for the network and run over many cells at once.
   for example from the GCM's radiative transfer. maxichem does not compute actinic fluxes. At night, J = 0.
 - **Integrator.** Rodas3 (order 3, L-stable) with the exact Jacobian and a sparse LU factorization. Adaptive steps
   (rtol 1e-3, atol 1e-25 in mole fraction). Each cell keeps its step size from one call to the next.
-- **Robustness.** After each call, a guard kernel flags cells with a non-finite state, an unfinished call or a change
+- **Guard.** After each call, a guard kernel flags cells with a non-finite state, an unfinished call or a change
   in their element shares. A recovery kernel redoes those cells on the GPU with pivoting and ten times the step budget.
   The host never waits during a call. The counts are read on demand.
 
@@ -172,7 +172,7 @@ Limits of the sulfur result:
 The NCHO truth keeps VULCAN-0D's default tolerance: 255 of 256 sampled boxes, rerun with the 1e-28 cutoff, change by at
 most 0.003 dex (the other one stopped at the step cap).
 
-The guard recomputed none of the cell-calls in these tests, NCHO or sulfur.
+The guard recomputed 2 of the 6,160,384 cell-calls of the NCHO boxes, both recovered, and none in the other tests.
 
 ## Speed
 
@@ -220,7 +220,7 @@ The package also holds tangent and adjoint kernels of a call (`ADSolver`). They 
 x and h with respect to x, T, P, dt, h, the photolysis rates J, per-cell rate multipliers and the Arrhenius
 parameters, with the step sizes frozen or with the step control differentiated. They repeat the call's arithmetic, so
 their primal result is bitwise the call's. They take networks up to 96 species with photolysis, the Troe factor and the
-collision limit (every VULCAN-JAX network).
+collision limit (every VULCAN-JAX network the reader accepts).
 
 `tests/test_ad.py` checks them against finite differences of the call and by dot products between the two
 kernels. Every case passes on CHO_photo, NCHO_photo and SNCHO_photo_2025 (on the sulfur network the
@@ -231,7 +231,8 @@ reference for these derivatives on the current networks.
 
 ## Tests and the data they need
 
-`pytest -m "not slow and not gpu"` runs the CPU tests. `pytest -m gpu -s` runs the GPU tests and prints each case's numbers.
+`pytest -m "not slow and not gpu"` runs the CPU tests, and `pytest -m "slow and not gpu"` the slow ones. `pytest -m gpu -s` runs the
+GPU tests and prints each case's numbers.
 [docs/testing.md](docs/testing.md) lists what each test verifies.
 
 The checks and benches read stored references and truth data that are not part of this repository. They are found

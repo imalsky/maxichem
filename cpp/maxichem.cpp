@@ -17,10 +17,9 @@ namespace maxichem {
 
 namespace {
 
-// These three match maxichem/_constants.py: EXPORT_FORMAT, COUNT_SLOTS and GUARD_BLOCK_THREADS.
-constexpr int kExportFormat = 3;
-constexpr int64_t kCountSlots = 11;
-constexpr int kGuardBlockThreads = 128;
+constexpr int kExportFormat = 3;              // EXPORT_FORMAT in maxichem/_constants.py: any other export is refused
+constexpr int kGuardBlockThreads = 128;       // any size works; this one packs cells densely
+constexpr size_t kCountSlotsAroundNames = 2;  // the two cell queues around the export's "counts" names
 
 void check(CUresult r, char const* what) {
   if (r != CUDA_SUCCESS) {
@@ -46,11 +45,11 @@ torch::Dtype dtype_of(std::string const& name) {
   throw std::runtime_error("maxichem: table dtype " + name);
 }
 
-// meta.txt: "key value..." per line, with the tables, the kernels' arguments and the names apart.
+// meta.txt: "key value..." per line, with the tables, the kernels' arguments and the name lists apart.
 void read_meta(std::string const& path, std::map<std::string, std::string>& meta,
                std::vector<std::vector<std::string>>& tables,
-               std::map<std::string, std::vector<std::string>>& arguments, std::vector<std::string>& species,
-               std::vector<std::string>& elements) {
+               std::map<std::string, std::vector<std::string>>& arguments,
+               std::map<std::string, std::vector<std::string>>& lists) {
   std::istringstream lines(read_file(path));
   for (std::string line; std::getline(lines, line);) {
     std::istringstream ws(line);
@@ -61,8 +60,8 @@ void read_meta(std::string const& path, std::map<std::string, std::string>& meta
       tables.push_back(tok);
     } else if (tok[0] == "args") {
       arguments[tok[1]].assign(tok.begin() + 2, tok.end());
-    } else if (tok[0] == "species" || tok[0] == "elements") {
-      (tok[0] == "species" ? species : elements).assign(tok.begin() + 1, tok.end());
+    } else if (tok[0] == "species" || tok[0] == "elements" || tok[0] == "counts") {
+      lists[tok[0]].assign(tok.begin() + 1, tok.end());
     } else if (tok.size() >= 2) {
       meta[tok[0]] = tok[1];
     }
@@ -88,7 +87,9 @@ int blocks_per_multiprocessor(CUfunction fn, int threads, int smem) {
   int blocks = 0;
   check(cuFuncSetAttribute(fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem), "shared memory");
   check(cuOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, fn, threads, smem), "occupancy");
-  if (blocks < 1) throw std::runtime_error("maxichem: the kernel does not fit on this device");
+  if (blocks < 1)
+    throw std::runtime_error("maxichem: a kernel of " + std::to_string(threads) + " threads and " +
+                             std::to_string(smem) + " B of shared memory does not fit on this device");
   return blocks;
 }
 
@@ -99,7 +100,8 @@ torch::Tensor read_table(std::string const& folder, std::vector<std::string> con
   auto cpu = torch::empty(shape, torch::TensorOptions().dtype(dtype_of(line[2])));
   std::string bytes = read_file(folder + "/tables/" + line[1] + ".bin");
   if (bytes.size() != static_cast<size_t>(cpu.nbytes()))
-    throw std::runtime_error("maxichem: table " + line[1] + " has the wrong size");
+    throw std::runtime_error("maxichem: table " + line[1] + " has " + std::to_string(bytes.size()) +
+                             " bytes, its shape " + "and dtype in meta.txt need " + std::to_string(cpu.nbytes()));
   std::memcpy(cpu.data_ptr(), bytes.data(), bytes.size());
   return cpu;
 }
@@ -115,7 +117,10 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
 
   std::map<std::string, std::string> meta;
   std::vector<std::vector<std::string>> tables;
-  read_meta(folder + "/meta.txt", meta, tables, arguments_, species, elements);
+  std::map<std::string, std::vector<std::string>> lists;
+  read_meta(folder + "/meta.txt", meta, tables, arguments_, lists);
+  species = lists["species"];
+  elements = lists["elements"];
   auto geti = [&](char const* k) {
     auto it = meta.find(k);
     if (it == meta.end()) throw std::runtime_error(std::string("maxichem: meta.txt lacks ") + k);
@@ -160,8 +165,9 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
     auto f64 = torch::TensorOptions().dtype(torch::kFloat64).device(device);
     scratch_ = torch::empty({max_blocks_ * cpb_ * stride_}, f64);
     scratch_rec_ = torch::empty({rec_blocks_ * stride_rec_}, f64);
-    count = torch::zeros({kCountSlots}, torch::TensorOptions().dtype(torch::kInt32).device(device));
-    total = torch::zeros({kCountSlots}, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    const int64_t slots = static_cast<int64_t>(lists["counts"].size() + kCountSlotsAroundNames);
+    count = torch::zeros({slots}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    total = torch::zeros({slots}, torch::TensorOptions().dtype(torch::kInt64).device(device));
   } catch (...) {
     cuModuleUnload(mod);
     module_ = nullptr;
@@ -178,13 +184,17 @@ Solver::~Solver() {
 std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T, torch::Tensor P, torch::Tensor dt,
                                                 torch::Tensor h, torch::Tensor J, double rtol, double atol,
                                                 int max_steps) {
-  for (auto const* a : {&x, &T, &P, &dt, &h})
-    TORCH_CHECK(a->device() == device_ && a->scalar_type() == torch::kFloat64,
-                "maxichem: x, T, P, dt, h: float64 on the solver's device");
-  TORCH_CHECK(x.dim() == 2 && x.size(1) == ns, "maxichem: x [B, ", ns, "]");
-  TORCH_CHECK(x.size(0) <= std::numeric_limits<int>::max(), "maxichem: at most 2^31 - 1 cells per call");
-  for (auto const* a : {&T, &P, &dt, &h})
-    TORCH_CHECK(a->dim() == 1 && a->size(0) == x.size(0), "maxichem: T, P, dt, h [B] with B = ", x.size(0));
+  std::array<std::pair<char const*, torch::Tensor const*>, 5> given{
+      {{"x", &x}, {"T", &T}, {"P", &P}, {"dt", &dt}, {"h", &h}}};
+  for (auto const& [name, a] : given)
+    TORCH_CHECK(a->device() == device_ && a->scalar_type() == torch::kFloat64, "maxichem: ", name, ": float64 on ",
+                device_, " expected, got ", a->scalar_type(), " on ", a->device());
+  TORCH_CHECK(x.dim() == 2 && x.size(1) == ns, "maxichem: x: [B, ", ns, "] expected, got ", x.sizes());
+  TORCH_CHECK(x.size(0) <= std::numeric_limits<int>::max(), "maxichem: at most 2^31 - 1 cells per call, got ",
+              x.size(0));
+  for (auto const& [name, a] : given)
+    TORCH_CHECK(a == &x || (a->dim() == 1 && a->size(0) == x.size(0)), "maxichem: ", name, ": [", x.size(0),
+                "] expected, got ", a->sizes());
   if (atol < 0) atol = default_atol;
   TORCH_CHECK(std::isfinite(rtol) && rtol > 0 && std::isfinite(atol) && atol > 0,
               "maxichem: rtol and atol finite and positive");
@@ -203,7 +213,8 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
     TORCH_CHECK(J.defined(), "maxichem: J [B, ", nj, "] is required for a network exported with photo=True");
     TORCH_CHECK(J.device() == device_ && J.scalar_type() == torch::kFloat64 && J.dim() == 2 && J.size(0) == B &&
                     J.size(1) == nj,
-                "maxichem: J [B, ", nj, "] float64 on the solver's device");
+                "maxichem: J: float64 [", B, ", ", nj, "] on ", device_, " expected, got ", J.scalar_type(), " ",
+                J.sizes(), " on ", J.device());
     J = J.contiguous();
   }
   auto xo = torch::empty_like(x);

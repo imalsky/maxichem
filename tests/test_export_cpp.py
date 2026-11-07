@@ -3,28 +3,24 @@
 Needs a CUDA toolkit: set CUDAToolkit_ROOT (CMake reads it) if CMake does not find one.
 """
 
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-import helpers
 import pytest
+
+from maxichem import _constants, paths
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
 ROOT = Path(__file__).parents[1]
 CELLS = 4096
-DEFAULT_TRIES = 4000
 FORCED_TRIES = 2  # a small budget: most cells are unfinished, and the recovery recomputes them
 
 
 @pytest.fixture(scope="module")
-def test_export(tmp_path_factory, gpu):
+def export_program(tmp_path_factory, gpu):  # noqa: ARG001  # without a GPU it skips here, before building
     """Build the C++ caller and return its test program."""
-    assert gpu is not None
-    if shutil.which("cmake") is None:
-        pytest.skip("cmake is needed to build the C++ caller")
     build = tmp_path_factory.mktemp("cpp_build")
     configured = subprocess.run(
         ["cmake", "-S", ROOT / "cpp", "-B", build, f"-DPython3_EXECUTABLE={sys.executable}"],
@@ -32,8 +28,6 @@ def test_export(tmp_path_factory, gpu):
         capture_output=True,
         text=True,
     )
-    if configured.returncode != 0 and "CUDAToolkit" in configured.stderr:
-        pytest.skip("no CUDA toolkit: set CUDAToolkit_ROOT")
     assert configured.returncode == 0, configured.stderr
     subprocess.run(["make", "-C", build, "-j8"], check=True, capture_output=True)
     return build / "test_export"
@@ -42,16 +36,32 @@ def test_export(tmp_path_factory, gpu):
 @pytest.mark.parametrize("network", ["NCHO_photo_network.txt", "SNCHO_photo_network_2025.txt"])
 @pytest.mark.parametrize(
     ("photo", "tries"),
-    [(1, DEFAULT_TRIES), (0, DEFAULT_TRIES), (1, FORCED_TRIES)],
+    [(1, _constants.DEFAULT_MAX_STEPS), (0, _constants.DEFAULT_MAX_STEPS), (1, FORCED_TRIES)],
     ids=["photolysis", "thermal", "recovery"],
 )
-def test_cpp_call_is_the_python_call(test_export, tmp_path, network, photo, tries):
-    helpers.thermo_folder()
+def test_cpp_call_is_the_python_call(export_program, tmp_path, network, photo, tries):
+    paths.need(paths.vulcan_thermo())
     case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, CELLS, photo, tries, network]
     subprocess.run([str(q) for q in case], check=True, capture_output=True)
     result = subprocess.run(
-        [test_export, tmp_path / "export", tmp_path / "case"], check=False, capture_output=True, text=True
+        [export_program, tmp_path / "export", tmp_path / "case"], check=False, capture_output=True, text=True
     )
     print(result.stdout, flush=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "bitwise identical" in result.stdout
+    assert ("(default arguments)" in result.stdout) == (tries == _constants.DEFAULT_MAX_STEPS)
+
+
+def test_cpp_refuses_another_export_format(export_program, tmp_path):
+    paths.need(paths.vulcan_thermo())
+    case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, 64, 1, FORCED_TRIES]
+    subprocess.run([str(q) for q in case], check=True, capture_output=True)
+    meta = tmp_path / "export" / "meta.txt"
+    written = f"export_format {_constants.EXPORT_FORMAT}\n"
+    assert written in meta.read_text()
+    meta.write_text(meta.read_text().replace(written, f"export_format {_constants.EXPORT_FORMAT + 1}\n"))
+    result = subprocess.run(
+        [export_program, tmp_path / "export", tmp_path / "case"], check=False, capture_output=True, text=True
+    )
+    assert result.returncode != 0
+    assert "export format" in result.stderr
