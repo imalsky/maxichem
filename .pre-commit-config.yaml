@@ -73,12 +73,12 @@ repos:
         name: size limits
         language: system
         entry: python3 tools/check_size_limits.py
-        types_or: [python, c, c++, cuda]
+        types_or: [python, pyi, c, c++, cuda]
       - id: no-sys-path-edits
         name: no sys.path edits
         language: pygrep
         entry: 'sys\.path\.(insert|append|extend)|sys\.path\s*='
-        types: [python]
+        types_or: [python, pyi]
         exclude: ^experiments/
       - id: suppression-has-reason
         name: every noqa or type ignore has a reason on the same line

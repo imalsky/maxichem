@@ -659,6 +659,16 @@ def test_failed_cell_is_left_out_of_the_rate_table(checks, verdict):
         )
 
 
+def test_a_nan_from_a_passing_cell_reaches_the_rate_table(checks):
+    """Only a failed cell is left out of the sum: a NaN from a cell that passed the guard must stay visible."""
+    s = _directions(checks)
+    bad = s.c.clone()
+    bad[0, 0] = float("nan")
+    cotangents = checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, bad, lm=s.lm, J=s.J)[4]
+    assert checks.ad.fallback["still_failed"] == 0
+    assert bool(cotangents["rc"].isnan().any())
+
+
 def test_missing_j_is_refused(checks):
     s = _directions(checks)
     with pytest.raises(ValueError, match="required"):
