@@ -63,7 +63,13 @@ a `launch` makes `check()` raise.
 | `close()` | As `CudaSolver` |
 
 A non-finite log multiplier in `lm` takes no try: its cell comes back with done 0, flag 2 and NaN derivatives, counted as unfinished,
-recomputed and still failed. `cap` is a positive integer; `drift`, in both solvers, is finite and at least 0.
+recomputed and still failed.
+
+A cell with flag 2 has NaN in its own tangents and in its cotangents x, T, P, dt, h, lm and J. The rate-table cotangent `rc` is a sum over the
+batch, so it leaves such a cell out and stays the sum over the other cells: read `fallback["still_failed"]` before using it, since it counts
+the cells left out.
+
+`cap` is a positive integer; `drift`, in both solvers, is finite and at least 0.
 
 With a leading axis of at most `DMAX` directions on every tangent, the directions share one call. See
 [method.md](method.md#derivatives) for `adapt`.

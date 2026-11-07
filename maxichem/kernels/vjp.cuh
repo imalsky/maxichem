@@ -450,7 +450,8 @@ __device__ __forceinline__ void save_attempt(double* rp, const double* N, double
       max_steps, adapt, perm, blob, rf, nasa, scratch, rec, sst, jt, lu, optr, gt, xg, sround, jround, ground, Jin, \
       gJ, gA
 
-// The cotangents of a failed cell's inputs: NaN.
+// The cotangents of a failed cell's inputs: NaN. Its gA is 0, which leaves it out of arrh's sum over the batch, so one
+// failed cell does not spoil the other cells' rate table; COUNT_STILL_FAILED counts the cells left out.
 __device__ __forceinline__ void nan_cotangents(double* __restrict__ gx0, double* __restrict__ gT,
                                                double* __restrict__ gP, double* __restrict__ gdt,
                                                double* __restrict__ ghin, double* __restrict__ glm,
@@ -458,7 +459,7 @@ __device__ __forceinline__ void nan_cotangents(double* __restrict__ gx0, double*
   for (int i = lane; i < NS; i += 32) gx0[(size_t)cell * NS + i] = DNAN;
   for (int r = lane; r < NR; r += 32) {
     glm[(size_t)cell * NR + r] = DNAN;
-    gA[(size_t)cell * NR + r] = DNAN;
+    gA[(size_t)cell * NR + r] = 0.0;
   }
   for (int b = lane; b < NJ; b += 32) gJ[(size_t)cell * NJ + b] = DNAN;
   if (lane == 0) {
@@ -746,8 +747,8 @@ extern "C" __global__ void __launch_bounds__(32 * WPB)
 }
 
 // Cotangent of the Arrhenius table (its nine Arrhenius columns): grc[r, j] = sum over cells of gA[cell, r] d A_r /
-// d rc[r, j] (gA: the cotangent of the forward coefficient's log before the collision limit; 0 for photolysis rows),
-// one block per reaction, a fixed summation order.
+// d rc[r, j] (gA: the cotangent of the forward coefficient's log before the collision limit; 0 for photolysis rows and
+// failed cells), one block per reaction, a fixed summation order.
 extern "C" __global__ void arrh(const double* __restrict__ gA, const double* __restrict__ Ta,
                                 const double* __restrict__ Pa, const double* __restrict__ rc,
                                 const int* __restrict__ rf, double* __restrict__ grc, int B) {

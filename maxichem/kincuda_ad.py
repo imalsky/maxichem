@@ -374,7 +374,8 @@ class ADSolver(Solver):
         -------
         tuple
             x, h, done, accepted steps, and a dict of the cotangents x, T, P, dt, h, lm [B, R], rc [R, 9] and, with
-            ``photo=True``, J [B, branches].
+            ``photo=True``, J [B, branches]. A cell with flag 2 has NaN in its own cotangents and is left out of the
+            sum that rc is; ``fallback["still_failed"]`` counts the cells left out.
         """
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         check_tensor("gx", gx, (B, self.ns), self.dev)

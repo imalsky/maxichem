@@ -50,6 +50,8 @@ multipliers are lm = 0.1 N(0, 1) per reaction unless named lm = 0.
   0 and 1, NaN on flag 2.
 - **The rc batch dot product**, several directions in one call, determinism, a non-finite starting step, a negative x, a NaN log
   multiplier and a missing J.
+- **A failed cell in a batch**, by a NaN log multiplier and by running out of tries: every other cell's results and the `rc` cotangent are
+  bitwise those of the batch without it, its own cotangents are NaN, and `still_failed` is 1.
 
 The limits, and why each is what it is, are at the top of `test_ad.py`.
 

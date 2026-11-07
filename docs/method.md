@@ -168,7 +168,8 @@ in a fixed order. No atomics enter the arithmetic, only the cell queue, so the s
 
 **Recovered cells.** After each kernel, the call's guard lists the cells `CudaSolver` would recompute. A second kernel redoes
 each on the recovery's path and differentiates that path, with the dense pivoted factors and up to `2 CAP` stored attempts. A
-result that passes the guard's test has flag 1. One that does not has flag 2, and its tangents and cotangents are NaN.
+result that passes the guard's test has flag 1. One that does not has flag 2, and its tangents and per-cell cotangents are NaN. The rate-table cotangent, a sum over the batch, leaves
+such a cell out, and the `still_failed` count says how many were left out: it is then the rate table's cotangent of the other cells alone.
 
 ## References
 

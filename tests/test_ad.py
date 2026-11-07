@@ -630,6 +630,35 @@ def test_nan_log_multiplier_takes_no_tries(checks, verdict):
     )
 
 
+def test_failed_cell_is_left_out_of_the_rate_table(checks, verdict):
+    # The failed cell comes last: the others keep their places and the rate table's sum its order, so bitwise equal.
+    s = _directions(checks)
+    lm_bad = s.lm.clone()
+    lm_bad[-1, 0] = float("nan")
+    short = torch.full_like(s.T, 1e-12)
+    far = short.clone()
+    far[-1] = 1e8
+    for name, lm, d, h, tries in (
+        ("NaN log multiplier", lm_bad, s.d, 2.0 * s.d, {}),
+        ("out of tries", s.lm, far, short, {"max_steps": 2}),
+    ):
+        failed = checks.ad.vjp(s.x, s.T, s.P, d, h, s.c, lm=lm, J=s.J, **tries)
+        flag, counts = checks.ad.flag.clone(), checks.ad.fallback
+        alone = checks.ad.vjp(s.x[:-1], s.T[:-1], s.P[:-1], d[:-1], h[:-1], s.c[:-1], lm=lm[:-1], J=s.J[:-1], **tries)
+        cotangents = failed[4]
+        others_equal = all(torch.equal(a[:-1], b) for a, b in zip(failed[:4], alone[:4], strict=True)) and all(
+            torch.equal(cotangents[k][:-1], alone[4][k]) for k in cotangents if k != "rc"
+        )
+        rc_equal = torch.equal(cotangents["rc"], alone[4]["rc"]) and bool(cotangents["rc"].isfinite().all())
+        own_nan = all(bool(cotangents[k][-1].isnan().all()) for k in cotangents if k != "rc")
+        verdict(
+            f"failed cell, {name}",
+            int(flag[-1]) == 2 and counts["still_failed"] == 1 and others_equal and rc_equal and own_nan,
+            f"flag {int(flag[-1])}, still failed {counts['still_failed']}; bitwise the batch without it: others "
+            f"{others_equal}, rc {rc_equal}; its own cotangents NaN {own_nan}",
+        )
+
+
 def test_missing_j_is_refused(checks):
     s = _directions(checks)
     with pytest.raises(ValueError, match="required"):
