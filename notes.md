@@ -733,6 +733,8 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
 - 2026-11-04 ~22:10, the author: keep atol 1e-25 as the default, and expose atol as a setting in maxichem (a call
   argument in Python and C++, as it was) and in the snapy coupling (the drivers' --atol; the future snapy chemistry
   step reads it from the deck).
+- 2026-11-04, the author, on the GCM-side work: do not ask; investigate, post findings and results in the snapy group's
+  thread, and keep working. Still ask before an upstream PR or marking one ready.
 
 ## Log
 

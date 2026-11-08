@@ -9,10 +9,8 @@ over a batch, stay stable when it runs autoregressively for long stretches, matc
 and work for every VULCAN network, not only NCHO. A feature that works only for NCHO is not finished yet. Wide,
 realistic coverage beats polishing a narrow case; flag any rule or decision that over-focuses the project.
 
-The code solves VULCAN networks as a physical 0-D solver in CUDA kernels, batched on the GPU (one call per cell per GCM
-step). It also gives derivatives of every call (CUDA tangent and adjoint kernels). The reduced-tracer call (commit
-399a347) and the JAX layer were removed; notes.md keeps their records. `README.md` is the public front page. The earlier
-neural-network code is in github.com/imalsky/Autoregressive-Chemulator (tag `paper-v1` is the published paper's code).
+What the code does: `docs/architecture.md` and notes.md "Current state". Removed and retired code: notes.md "Reduced
+tracers" and "Neural-network emulator". `README.md` is the public front page.
 
 ## Every response
 - Start every message to Isaac, status updates included, with "Isaac": a canary that this file is still in context.
@@ -39,7 +37,7 @@ and maxichem as an editable install), `../vulcan-truth` (the VULCAN-0D truth-dat
 repository), `../reference` (the torch reference generator) and `../snapy` (the GCM).
 `VULCAN_THERMO` is VULCAN-JAX's `src/vulcan3/thermo` folder (the networks and `NASA9/`; no default). The two default
 networks are its newest NCHO and newest sulfur network: `NCHO_photo_network.txt` (69 species, photolysis) and, whenever
-sulfur is asked for, `SNCHO_photo_network_2025.txt` (91 species; Isaac, 2026-11-04). The older
+sulfur is asked for, `SNCHO_photo_network_2025.txt` (91 species; Isaac's decision). The older
 `SNCHO_photo_network.txt` is not a default. Results on the older file are superseded. If upstream adds a newer network, ask before switching. `CHEM_DATA` is the data root (default `data/` in the checkout,
 gitignored); it holds the truth sets, benches, the checks' references and the caches. `maxichem/paths.py` reads both.
 
@@ -70,19 +68,20 @@ gitignored); it holds the truth sets, benches, the checks' references and the ca
 
 ## GCM-side work (snapy)
 Speed work on snapy happens in `../snapy` on branch `isaac/maxichem-coupling`, pushed to Isaac's fork. On this work
-Isaac said (2026-11-04): don't ask; investigate, post findings and results in the Lumine thread, and keep working.
-Still ask before an upstream PR (or marking one ready). The acceptance rules are in notes.md, "Decisions in force"
-(2026-11-03 night and 2026-11-04): default path bit-for-bit, opt-in fused path at round-off, deterministic, the 0.01
-dex bound for fp32 or cheaper schemes, C64x100 with 69 tracers for speed numbers; coupled tests on a Cartesian box
+Isaac said: don't ask; investigate, post findings and results in the Lumine thread, and keep working. Still ask before
+an upstream PR (or marking one ready). The acceptance rules are in notes.md, "Decisions in force": default path
+bit-for-bit, opt-in fused path at round-off, deterministic, the 0.01 dex bound for fp32 or cheaper schemes, C64x100
+with 69 tracers for speed numbers; coupled tests on a Cartesian box
 with a single passive-tracer convergence check, element totals and guard counts; the main path is fused CUDA called
 from snapy's C++ loop (a Python driver only for tests); J from kintera. Development build: `../.venv-snapdev` (snapy built
 from source with `../.cuda`); the shared `../.venv` keeps the released snapy wheel.
 Rules for any coupling, C++ included: a driver that writes `scalar_s` or `hydro_u` after `Mesh.forward`'s stages calls
 `exchange_ghost_zones` before the next step, as kScalar for scalars, and re-applies the walls. A frozen source is added as
 `dt*wght2(stage)`. On the sphere, heat = -(F_top - F_bot) / dz with plane-parallel fluxes; the area-weighted form gives a false
-2F/r. The fused implicit-transfer kernel takes the donor limit of e3100503 when that merges. atol 1e-25 stays the default and is a
-setting: the snapy chemistry hook reads atol and rtol from the YAML deck. Every sphere result before the heating fix carries that
-bug, so decide the lid from the rerun in todo.md, not the old numbers.
+2F/r. The fused implicit-transfer kernel takes the snapy group's donor limit when that fix merges (notes.md, log entry
+"2026-11-04 03:13 to 05:01"). atol 1e-25 stays the default and is a setting: the snapy chemistry hook reads atol and
+rtol from the YAML deck. Every sphere result before the heating fix carries that bug, so decide the lid from the rerun
+in todo.md, not the old numbers.
 
 ## Science and engineering rules
 - Speed target: under about 1 us per cell-call in the GCM. Simple code beats small speed gains: a GPU-specific
