@@ -1394,6 +1394,21 @@ Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
 - The sponge scan on the 140-layer lid (no sponge; tau 3e3, 1e4, 3e4 s over 600 and 900 km) runs on the snapy group's RTX 4000s from the
   bundle in this folder (bundle/sponge_scan.tar.gz); his probe measured 1.09 s per step and 4.2 GB.
 
+### 2026-11-08 02:57: the 140-layer twin; #336's donor cap on the box (experiments/2026-11-07_lid, experiments/2026-11-08_pr336_donor)
+- Decision in force from the snapy group: 140 layers is the working baseline, not final. Rule: if the twin floor at 0.1-1 bar is
+  at least 2.8 K, 140 passes on T (u likewise against its own floor); under about 1 K, move to 160 layers with a sponge.
+- Twin: eq140 again with the starting pressure times (1 + 6.7e-10 N(0, 1)), about 1e-6 K, and an unperturbed rerun (`twin.sh`,
+  `twin_compare.py`, twin_compare.json). The rerun equals eq140 bit for bit at days 1 and 2. eq140 against the twin, rms at
+  0.1-1 bar: day 1 1.7e-7 K, 3.6e-7 m/s; day 2 6.6e-6 K, 5.0e-5 m/s (max 1.1e-3 K); above 0.02 bar 1.6e-4 K at day 2.
+- So the floor is under 1 K by about five orders: the day-2 gaps (140 vs 160 5.6 K / 34 m/s; sponge tau 1e4 vs 3e4 6.8 K
+  / 45 m/s) are not round-off growth. By the rule this points to 160 layers with a sponge. Untested: whether a finite
+  difference of about 1 K seeded near the top by day 1 grows to the day-2 gaps as weather; a twin seeded with about 1 K would
+  separate that.
+- Donor cap: the 2026-11-07 dark NCHO box (69 tracers, fusion off, 300 steps of 70 s, radiation every 600 s) on snapy #336
+  d5b3adb merged locally with #334 1aa427b (not pushed): negative tracer entries 4,730 -> 0; guard counts 0 in both; solver
+  steps 1.60 vs 1.61 per call (max 39 in both); element change per cell at most 2.6e-15 and the radiation column check 4.1e-16
+  in both. No timing (the GPU was shared with the twin).
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
