@@ -1372,6 +1372,8 @@ Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
   4.1e-16 on 34 radiation calls; 1.61 solver steps per call (max 39), 0.52 us per cell-call; 1.10 s flow and tracers per step
   default, 0.34 s fused. 4,730 negative tracer entries clamped, the same with fusion on. Lit SNCHO 2025, 91 tracers, J from the
   WASP-39b reference: the same zeros, 1.99 steps per call, 1.33 us per cell-call, 0 negative entries, 19 GB peak.
+  The same 300 dark steps fused with radiation every 3600 s (as 2026-11-04): 0 negative entries, guard counts 0. So the 4,730
+  come with the 600 s radiation step, not the merge or the fused path (cause not tested; S178 in #336 caps the transfer).
 - Single-tracer convergence, default path: the numbers of 2026-11-04 to the last digit (vertical orders 2.09, 1.24, 0.58; horizontal
   4.04, 4.32, 0.60), so the q-bar / rho-bar cap found in review is still there on main; #336's S177 is the planned fix.
 - maxichem: max-args 12 enforced (jvp and vjp keep theirs, with a reason); numpydoc parameters for jvp, vjp and export.
