@@ -78,7 +78,8 @@ select = [
   # "PD",   # pandas-vet: add only where pandas is used
 ]
 ignore = [
-  "PLR09",    # too many <...>: tools/check_size_limits.py covers size
+  # too many <...>: tools/check_size_limits.py covers size. PLR0913 stays on: a long argument list is a helper's shape, not its size.
+  "PLR0904", "PLR0911", "PLR0912", "PLR0914", "PLR0915", "PLR0916", "PLR0917",
   "PLR2004",  # magic value in comparison: noisy in numerical code
   "TRY003",   # long message at the raise: the rules want messages that say what to fix
 ]
@@ -92,13 +93,16 @@ convention = "numpy"
 [tool.ruff.lint.mccabe]
 max-complexity = 15
 
+[tool.ruff.lint.pylint]
+max-args = 12
+
 [tool.ruff.lint.pep8-naming]
 # Math symbols allowed by N. List only names that match a published equation and are in the project's glossary.
 extend-ignore-names = ["T", "P", "K", "J", "S", "M", "N", "B", "D", "dT", "dP", "dJ", "Sp"]
 
 [tool.ruff.lint.per-file-ignores]
 # Scripts and command-line tools may print. Edit: add the project's script folders.
-"tests/**" = ["T20"]
+"tests/**" = ["T20", "PLR0913"]  # a test's arguments are its fixtures
 "tests/test_*.py" = ["D103"]  # a test's name says what it proves
 "tools/**" = ["T20"]
 "bench/**" = ["T20"]

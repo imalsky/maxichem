@@ -273,7 +273,7 @@ class ADSolver(Solver):
         return directions
 
     @on_device
-    def jvp(
+    def jvp(  # noqa: PLR0913  launch's inputs, lm, rc, adapt and a tangent for each input
         self,
         x: torch.Tensor,
         T: torch.Tensor,
@@ -348,7 +348,7 @@ class ADSolver(Solver):
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
     @on_device
-    def vjp(
+    def vjp(  # noqa: PLR0913  launch's inputs, lm, rc, adapt and the outputs' cotangents, as jvp
         self,
         x: torch.Tensor,
         T: torch.Tensor,
