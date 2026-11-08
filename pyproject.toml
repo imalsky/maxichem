@@ -117,6 +117,7 @@ xfail_strict = true
 filterwarnings = ["error"]  # list any allowed warning here, with its reason
 log_level = "INFO"
 testpaths = ["tests"]
+pythonpath = ["."]  # coupling/ is a top-level folder beside the package
 markers = [
   "slow: takes long or needs data CI does not have; outside the default CI run",
   "gpu: needs a GPU; runs locally, never in CI",

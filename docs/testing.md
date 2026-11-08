@@ -15,6 +15,7 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_tables_source.py` | The term streams hold the stoichiometry, on a small network too; the header selects the rate-law forms; the argument table matches every kernel's signature; a hand-built reverse law, `drift`, `cap` and a constructor that fails | CPU |
 | `test_kernels_compile.py` | Every form of the kernels compiles, including forms no real network reaches | CPU |
 | `test_paths.py` | Data locations follow the environment; missing data give a clear error | CPU |
+| `test_coupling_radiation.py` | The column heating: none from a height-constant flux on a sphere, where the area-weighted form gives some; cooling where the net upward flux grows; each column's budget to round-off | CPU |
 | `test_packaging.py` | The built wheel holds the kernels and assembles them without the checkout | CPU, slow |
 | `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation; a small network in every kernel | GPU |
 | `test_order.py` | Rodas3's order of accuracy | GPU |

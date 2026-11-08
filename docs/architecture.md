@@ -21,6 +21,10 @@ How the code is laid out, and why the kernels look as they do. [method.md](metho
 | `paths.py` | Data locations of the checks and benches |
 | `_checks.py` | What the checks and benches share: the scored gases and their floors, the start gas |
 
+Outside the package, `coupling/` holds the tested pieces of the snapy coupling drivers: `radiation.py` turns two-stream
+fluxes into the heating of each layer, $-\partial(F_\uparrow - F_\downarrow)/\partial z$ per unit volume, also on a sphere, and checks
+each column's energy budget. Weighting plane-parallel fluxes by face areas would add a false $2F/r$.
+
 ## From a network to a kernel
 
 The kernel files never change with the network. `_kernel_header.py` writes sizes, offsets, masks and rate-law switches as macros
