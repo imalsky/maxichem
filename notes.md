@@ -1378,6 +1378,22 @@ Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
   4.04, 4.32, 0.60), so the q-bar / rho-bar cap found in review is still there on main; #336's S177 is the planned fix.
 - maxichem: max-args 12 enforced (jvp and vjp keep theirs, with a reason); numpydoc parameters for jvp, vjp and export.
 
+### 2026-11-07 23:38: the lid comparison with the corrected heating (experiments/2026-11-07_lid)
+- Setup: C48 hot Jupiter, flow only, 60 km layers, 70 s steps, radiation every 300 s, heating through `coupling.radiation`
+  (column check at most 4.4e-16 on every call), snapy main 21a3e8a + #334; 100, 120, 140 and 160 layers, each from radiative
+  equilibrium (eq, `re_start.py --mu 2.016e-3`; it reproduces re140_start.npz exactly) and from 1500 K (rest), 2 model days.
+  Comparison: `lid_compare.py`, on the shared bottom layers by the lower lid's pressure bands (lid_compare.txt, .json).
+- 100, 120, 140 layers: all six reach day 2 (140 crashed within 3 h with the area heating). Coldest cell 683-867 K. Lid tops at
+  day 2 (eq / rest): 12.7 / 8.5, 1.8 / 1.2, 0.24 / 0.15 mbar. 160 layers: eq reaches day 2 (coldest 502 K, top layer, 0.003 mbar,
+  night); rest stops at cycle 1,598 (day 1.3) at the density floor (top 0.002 mbar, T_max 2,310 K, CFL step 56 s).
+- 0.1-1 bar rms differences, eq / rest: 100 vs 140 day 1 21.7 / 15.9 K, day 2 29.6 / 24.0 K and 147 / 124 m/s; 120 vs 140 day 1
+  3.4 / 2.8 K, day 2 11.1 / 9.0 K and 70 / 57 m/s; 140 vs 160 day 1 1.0 / 0.9 K, day 2 (eq) 5.6 K and 34 m/s. Above 1 bar, 140 vs 160:
+  0.2 K at day 1, 1.3 K at day 2. Each 20 layers higher about halves the day-2 change at 0.1-1 bar; every gap grows from day 1 to 2.
+- Proposed: 140 layers (lid near 0.2 mbar) as the baseline; the snapy group's tolerance at 0.1-1 bar decides. Not separated: the lid's part
+  of each day-2 gap against the flows' own divergence (the 6e-5 K chaos floor of 2026-11-05 was measured with the old heating).
+- The sponge scan on the 140-layer lid (no sponge; tau 3e3, 1e4, 3e4 s over 600 and 900 km) runs on the snapy group's RTX 4000s from the
+  bundle in this folder (bundle/sponge_scan.tar.gz); his probe measured 1.09 s per step and 4.2 GB.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
