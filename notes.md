@@ -1347,6 +1347,35 @@ Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
 - `test_failed_cell_is_left_out_of_the_rate_table` fails with `gA` back at NaN ("rc False", all 3 networks), and with a failed cell's x cotangent 0 ("its own cotangents NaN False").
 - `pytest -m gpu -s`, which holds test_ad, C++, parity, guard and truth: 131 passed in 36 min 20 s, 0 FAIL lines; CPU 64 passed.
 
+### 2026-11-07 21:49: snapy main 21a3e8a, #334 rebased, the coupling branch merged, the column heating tested (experiments/2026-11-07_pr334_rebase, experiments/2026-11-07_live_box)
+- snapy main moved 2d9fa41 to 21a3e8a (#335, stretched x1, Cartesian stage 1). #336 (draft, on 21a3e8a) changes the default scalar
+  transport: scalar mass and density reconstructed separately then divided (S177), donor positivity after the upper-bound blend, an
+  implicit-transfer donor cap with a column sweep (S178) and spherical x1 volume rows, installed on every spherical WENO5 / cp5 deck.
+  Once it merges, no fused-equals-default statement below holds. To match it the fused path needs: S177 in its reconstruction, the
+  limiter order, the S178 sweep in its implicit transfer, and the x1 rows (or the default path) on the sphere.
+- #334 rebased onto 21a3e8a (force-push of that branch only, a one-time exception): range-diff `=` on the reviewed commit. #335's
+  stretched-x1 launch had the same cap, measured: 58, 90 fp64 and 116 fp32 variables on 106-cell lines (90 on 70-cell lines) fail with
+  invalid argument; 57 passes. One more commit splits it the same way; the count per launch moved next to `stencil_kernel`. The many-
+  variable test now checks right faces too, and a stretched twin fails before that commit and passes after. C64x100, 10 steps: 0, 16
+  and 57 tracers bitwise main; main fails at 69 and 88; the head's 69 and 88 keep the 57-tracer flow and first 57 tracers bitwise.
+  C++ ctest 109 of 110 (test_straka: no `ncrcat` here; torchrun tests collide on port 29500 under -j 24 and pass serially). Head
+  1aa427b; CI waits for a maintainer's approval (action_required).
+- isaac/maxichem-coupling: main merged (no force-push), pushed at 5be2af0. On a stretched x1 grid x1 takes the default path with
+  per-face rows. The fused WENO5 guard checks cp as well as cm (found in review): its test fails with the cp check removed. Fused
+  parity, 9 decks: WENO5 cases within 5.8e-16 of the local largest value, PLM bitwise; the new x1rat 1.1 box case fails at 1.7e-10 if
+  the fused x1 kernel runs there. Fusion off, C64x100: 0, 16, 57 tracers bitwise main 21a3e8a; 69 and 88 bitwise the #334 head.
+- `coupling/radiation.py`: heating -d(F_up - F_down)/dz and the per-column budget, tested (a height-constant flux on the sphere gives
+  none; the area form gives some; the tests fail on the area form and on a sign flip). The three experiment drivers use it and log
+  the worst column budget error. gcm_box.py also took `paths.vulcan_thermo()`, which the cleanup renamed.
+- Box on the merged branch, from the 1-day spin-up, 300 steps of 70 s, radiation every 600 s: misses not scored (no VULCAN truth for
+  these runs). Dark NCHO, 69 tracers: no unfinished cell, all guard counts 0, element budgets within 9.3e-16, column budget within
+  4.1e-16 on 34 radiation calls; 1.61 solver steps per call (max 39), 0.52 us per cell-call; 1.10 s flow and tracers per step
+  default, 0.34 s fused. 4,730 negative tracer entries clamped, the same with fusion on. Lit SNCHO 2025, 91 tracers, J from the
+  WASP-39b reference: the same zeros, 1.99 steps per call, 1.33 us per cell-call, 0 negative entries, 19 GB peak.
+- Single-tracer convergence, default path: the numbers of 2026-11-04 to the last digit (vertical orders 2.09, 1.24, 0.58; horizontal
+  4.04, 4.32, 0.60), so the q-bar / rho-bar cap found in review is still there on main; #336's S177 is the planned fix.
+- maxichem: max-args 12 enforced (jvp and vjp keep theirs, with a reason); numpydoc parameters for jvp, vjp and export.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
