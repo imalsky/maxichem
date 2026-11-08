@@ -266,6 +266,13 @@ class CudaSolver(Solver):
         return xo, ho, done, nok
 
     def export(self, folder: str | Path) -> None:
-        """Write what a caller without Python needs to run this solver's kernels (cpp/maxichem.hpp loads it)."""
+        """Write what a caller without Python needs to run this solver's kernels.
+
+        Parameters
+        ----------
+        folder : str or Path
+            Made if missing; it gets the kernels' source, their cubin for this device, their tables and ``meta.txt``,
+            which ``cpp/maxichem.hpp`` loads. A cubin is for one GPU architecture: export on the machine that runs it.
+        """
         self._require_open()
         write_export(self, folder)

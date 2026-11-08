@@ -298,10 +298,30 @@ class ADSolver(Solver):
     ) -> tuple[torch.Tensor, ...]:
         """Run the call and its tangent.
 
-        Inputs are those of ``CudaSolver.launch``, plus lm [B, R] (log rate multipliers), rc [R, W] (the rate table),
-        adapt (the contract) and the tangents dx [B, S], dT (K), dP (dyn cm^-2), ddt (s), dh (s) [B], dlm [B, R], drc
-        [R, 9], dJ [B, branches] (s^-1); dlm, drc and dJ are optional. With a leading axis of D <= ``DMAX`` directions
-        on every tangent, the D tangents share one call.
+        Parameters
+        ----------
+        x, T, P, dt, h : torch.Tensor
+            As ``CudaSolver.launch``: mole fractions [B, S], temperature (K), pressure (dyn cm^-2), call length (s)
+            and starting step (s) [B]; float64.
+        dx, dT, dP, ddt, dh : torch.Tensor
+            Their tangents, in the same units and shapes, or with a leading axis of D <= ``DMAX`` directions on
+            every tangent, which then share one call.
+        lm : torch.Tensor, optional
+            Log rate multipliers [B, R]; none applied if None.
+        dlm : torch.Tensor, optional
+            Their tangent [B, R] (or [D, B, R]).
+        rc : torch.Tensor, optional
+            The rate table [R, W]; ``rc0`` if None.
+        drc : torch.Tensor, optional
+            The tangent of its nine Arrhenius columns [R, 9] (or [D, R, 9]).
+        adapt : bool
+            Differentiate the step control too (docs/method.md, "Derivatives"); False holds the accepted steps fixed.
+        rtol, atol, max_steps
+            As ``CudaSolver.launch``.
+        J : torch.Tensor, optional
+            Photolysis rates [B, branches], s^-1, as ``CudaSolver.launch``.
+        dJ : torch.Tensor, optional
+            Their tangent [B, branches] (or [D, B, branches]), s^-1.
 
         Returns
         -------
@@ -367,8 +387,25 @@ class ADSolver(Solver):
     ) -> tuple[Any, ...]:
         """Run the call and the cotangents of its inputs.
 
-        Inputs are those of ``CudaSolver.launch``, plus gx [B, S] and gh [B] (the cotangents of x_out and h_out; gh is
-        optional), lm [B, R], rc [R, W] and adapt.
+        Parameters
+        ----------
+        x, T, P, dt, h : torch.Tensor
+            As ``CudaSolver.launch``: mole fractions [B, S], temperature (K), pressure (dyn cm^-2), call length (s)
+            and starting step (s) [B]; float64.
+        gx : torch.Tensor
+            The cotangent of the output x [B, S].
+        gh : torch.Tensor, optional
+            The cotangent of the output h [B].
+        lm : torch.Tensor, optional
+            Log rate multipliers [B, R]; none applied if None.
+        rc : torch.Tensor, optional
+            The rate table [R, W]; ``rc0`` if None.
+        adapt : bool
+            Differentiate the step control too (docs/method.md, "Derivatives"); False holds the accepted steps fixed.
+        rtol, atol, max_steps
+            As ``CudaSolver.launch``.
+        J : torch.Tensor, optional
+            Photolysis rates [B, branches], s^-1, as ``CudaSolver.launch``.
 
         Returns
         -------
