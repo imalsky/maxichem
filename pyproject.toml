@@ -161,4 +161,4 @@ ignore_missing_imports = true
 follow_imports = "skip"
 
 [tool.codespell]
-ignore-words-list = "nd,fo,mis,emac,wit"  # nd: number density; fo: forcing offset; mis: step mismatches; the rest: names in notes.md
+ignore-words-list = "nd,fo,mis,emac,wit,bais"  # nd: number density; fo: forcing offset; mis: step mismatches; the rest: names in notes.md
