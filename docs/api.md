@@ -112,8 +112,9 @@ Loads an export from `cpp/maxichem.hpp`. `chem(x, T, P, dt, h, J, rtol, atol, ma
 step sizes, done and the accepted steps. A negative `atol` takes the export's default. It refuses the cells `CudaSolver` refuses,
 with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits. A defined J must be float64
 [B, `nj()`] on the device; an export without photolysis (`nj()` 0) takes an undefined J or an empty [B, 0] one, and refuses any
-other. The constructor refuses an export whose kernels name an argument the call does not supply, naming the kernel and the
-argument.
+other. Before any CUDA work, the constructor checks each kernel's argument list in `meta.txt` against the one the call passes
+(`KERNEL_ARGUMENTS`, with J last for call and recover with photolysis): an unknown, missing, repeated or misplaced name, or J on
+the guard, is refused as `std::runtime_error` naming the kernel and the argument.
 
 | Member | Meaning |
 | --- | --- |
@@ -122,6 +123,9 @@ argument.
 | `default_atol()` | The export's atol, mole fraction |
 | `atoms()` | [species, elements] on the device, a copy |
 | `count()`, `total()` | The last call's counts (int32) and their sum since construction (int64), copies on the device |
+
+Each tensor accessor (`atoms()`, `count()`, `total()`) makes a device copy and launches a kernel to do it, so keep its result rather
+than calling it in a hot loop.
 
 Interface change: these were public data members (`chem.ns`, `chem.nj`, `chem.species`, `chem.elements`, `chem.default_atol`,
 `chem.count`, `chem.total`); write them with `()`. The call trusts them and its kernels write to the counts, so a caller can no

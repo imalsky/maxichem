@@ -7,7 +7,8 @@
 // default max_steps it uses the default arguments, so they answer for the Python defaults too. If the case holds
 // refused.txt, the Python call refused it: the C++ call must throw std::invalid_argument with that message and the
 // same counts. A thermal export is also called with an empty [B, 0] J, which must give the same bits, and with a
-// [B, 1] J, which must be refused.
+// [B, 1] J, which must be refused. Then the tensors the accessors return are changed in place, and a further call must
+// still give the same bits and the solver's own totals and atoms table.
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -38,6 +39,7 @@ int main(int argc, char** argv) {
   std::string ex = argv[1], cs = argv[2];
   torch::Device dev(torch::kCUDA, 0);
   maxichem::Solver chem(ex, dev);
+  std::cout << "export loaded; " << std::flush;  // an export the constructor refuses never gets here
   int64_t B = 0;
   if (!(std::ifstream(cs + "/B.txt") >> B) || B < 1) throw std::runtime_error("cannot read " + cs + "/B.txt");
   auto f64 = torch::kFloat64;
@@ -104,6 +106,16 @@ int main(int argc, char** argv) {
     std::cout << "J [B, 0] " << (same_empty ? "gives the same bits" : "DIFFERENT") << ", J [B, 1] "
               << (refused ? "refused" : "NOT REFUSED") << "; ";
   }
+  // what the accessors return is the caller's to change: the solver's counts and tables stay as they were
+  auto const total_before = chem.total().cpu(), atoms_before = chem.atoms().cpu();
+  chem.count().resize_({1});
+  chem.total().zero_();
+  chem.atoms().zero_();
+  auto r4 = call();
+  bool const own = torch::equal(chem.total().cpu(), total_before + co.to(torch::kInt64)) &&
+                   torch::equal(chem.atoms().cpu(), atoms_before) && all_same(r4, chem.count().cpu());
+  ok = ok && own;
+  std::cout << (own ? "accessors return copies" : "ACCESSORS SHARE THE SOLVER'S TENSORS") << "; ";
   std::cout << "cells " << B << ", species " << chem.ns() << ", branches " << chem.nj() << ": C++ call "
             << (ok ? "bitwise identical to the Python call" : "DIFFERENT") << "; second call " << ms << " ms ("
             << 1e3 * ms / B << " us per cell)"

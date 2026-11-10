@@ -51,6 +51,7 @@ def test_cpp_call_is_the_python_call(export_program, tmp_path, network, photo, t
     assert "bitwise identical" in result.stdout
     assert ("(default arguments)" in result.stdout) == (tries == _constants.DEFAULT_MAX_STEPS)
     assert ("J [B, 0] gives the same bits, J [B, 1] refused" in result.stdout) == (photo == 0)
+    assert "accessors return copies" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -96,19 +97,34 @@ def test_cpp_refuses_another_export_format(export_program, tmp_path):
     assert "export format" in result.stderr
 
 
-def test_cpp_refuses_an_unknown_kernel_argument(export_program, tmp_path):
-    # the recovery is the last kernel a call launches: a name only it takes was found missing after the call kernel ran
+# edits of one kernel's argument list in meta.txt (on a photolysis export), and the refusal each must give
+CONTRACT_EDITS = {
+    "unknown": ("recover", " didx ", " didx_renamed ", "kernel recover takes argument didx_renamed, which this caller"),
+    "missing": ("recover", " didx ", " ", "kernel recover lacks argument didx"),
+    "repeated": ("guard", " atol ", " atol atol ", "kernel guard lists argument atol twice"),
+    "J on the guard": ("guard", " atol ", " atol Jin ", "kernel guard takes argument Jin, which this caller"),
+    "out of order": ("call", " Ta Pa ", " Pa Ta ", "kernel call has argument Pa at position 1, where this caller"),
+}
+
+
+@pytest.mark.parametrize("edit", CONTRACT_EDITS)
+def test_cpp_refuses_another_kernel_contract_at_construction(export_program, tmp_path, edit):
+    # before, a name only the recovery takes was found missing after the call kernel had run, and a repeated, missing
+    # or misplaced known name, or J on the guard, was not found at all
     paths.need(paths.vulcan_thermo())
+    kernel, old, new, message = CONTRACT_EDITS[edit]
     case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, 64, 1, FORCED_TRIES]
     subprocess.run([str(q) for q in case], check=True, capture_output=True)
     meta = tmp_path / "export" / "meta.txt"
     lines = meta.read_text().splitlines()
-    (i,) = (k for k, line in enumerate(lines) if line.startswith("args recover "))
-    assert " didx " in lines[i]
-    lines[i] = lines[i].replace(" didx ", " didx_renamed ")
+    (i,) = (k for k, line in enumerate(lines) if line.startswith(f"args {kernel} "))
+    padded = lines[i] + " "
+    assert old in padded
+    lines[i] = padded.replace(old, new, 1).rstrip()
     meta.write_text("\n".join(lines) + "\n")
     result = subprocess.run(
         [export_program, tmp_path / "export", tmp_path / "case"], check=False, capture_output=True, text=True
     )
     assert result.returncode != 0
-    assert "kernel recover takes argument didx_renamed, which this caller does not supply" in result.stderr
+    assert message in result.stderr
+    assert "export loaded" not in result.stdout  # refused by the constructor, before any call

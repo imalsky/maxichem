@@ -21,12 +21,32 @@ constexpr int kExportFormat = 6;              // EXPORT_FORMAT in maxichem/_cons
 constexpr int kGuardBlockThreads = 128;       // any size works; this one packs cells densely
 constexpr size_t kCountSlotsAroundNames = 2;  // the two cell queues around the export's "counts" names
 constexpr char const* kPhotolysisArgument = "Jin";  // PHOTOLYSIS_ARGUMENT in maxichem/_constants.py
-// The kernel parameters a call supplies besides the export's tables and J; the constructor refuses an export that
-// names any other, so a call never stops between two kernels. operator() fills exactly these.
+// The kernel parameters a call supplies besides the export's tables and J; operator() fills exactly these.
 constexpr std::array<char const*, 20> kCallArguments{"x0",    "Ta",   "Pa",        "dta",     "hin",    "hio",   "xout",
                                                      "doneo", "noko", "status",    "redo",    "list",   "count", "B",
                                                      "rtol",  "atol", "max_steps", "scratch", "sround", "jround"};
-constexpr std::array<char const*, 3> kKernels{"call", "guard", "recover"};
+// Each kernel's parameters in order, as KERNEL_ARGUMENTS in maxichem/_constants.py, so that an export with another
+// contract is refused before anything runs; call and recover take J last with photolysis. Kept here as well because
+// the caller must know what it can supply; every test_export_cpp case exports from Python and loads it here, so a
+// difference between the two lists fails them all.
+struct KernelArguments {
+  char const* kernel;
+  std::vector<char const*> names;
+  bool photolysis;
+};
+std::array<KernelArguments, 3> const kKernelArguments{{
+    {"call",
+     {"x0",    "Ta",      "Pa",   "dta",  "hio",       "xout", "doneo",  "noko",  "status",
+      "count", "B",       "rtol", "atol", "max_steps", "perm", "blob",   "rc",    "rf",
+      "nasa",  "scratch", "sst",  "jt",   "lu",        "optr", "sround", "jround"},
+     true},
+    {"guard", {"x0", "xout", "doneo", "noko", "status", "atoms", "redo", "list", "count", "B", "atol"}, false},
+    {"recover",
+     {"x0",   "Ta",   "Pa",      "dta",  "hin",  "xout",      "hio",   "doneo",  "noko",
+      "redo", "list", "count",   "rtol", "atol", "max_steps", "perm",  "blob",   "rc",
+      "rf",   "nasa", "scratch", "sst",  "jt",   "didx",      "atoms", "sround", "jround"},
+     true},
+}};
 
 void check(CUresult r, char const* what) {
   if (r != CUDA_SUCCESS) {
@@ -113,22 +133,36 @@ torch::Tensor read_table(std::string const& folder, std::vector<std::string> con
   return cpu;
 }
 
-// Refuse an export whose kernels take an argument a call does not supply, naming the kernel and the argument.
+// Refuse an export whose kernel argument lists differ from the ones this caller supplies (each name once, in order,
+// J only where a kernel takes it, every table listed), naming the kernel and the argument.
 void check_arguments(std::map<std::string, std::vector<std::string>> const& arguments,
                      std::vector<std::vector<std::string>> const& tables, bool photolysis) {
-  for (char const* kernel : kKernels) {
+  auto refuse = [](std::string const& kernel, std::string const& what) {
+    throw std::runtime_error("maxichem: kernel " + kernel + " " + what + "; export again with this version");
+  };
+  for (auto const& [kernel, names, takes_j] : kKernelArguments) {
+    std::vector<std::string> want(names.begin(), names.end());
+    if (takes_j && photolysis) want.emplace_back(kPhotolysisArgument);
     auto it = arguments.find(kernel);
-    if (it == arguments.end())
-      throw std::runtime_error(std::string("maxichem: meta.txt has no args line for kernel ") + kernel +
-                               "; export again with this version");
-    for (auto const& name : it->second) {
-      bool const known =
+    if (it == arguments.end()) refuse(kernel, "has no args line in meta.txt");
+    auto const& got = it->second;
+    for (auto const& name : got) {
+      if (std::find(want.begin(), want.end(), name) == want.end())
+        refuse(kernel, "takes argument " + name + ", which this caller does not supply");
+      if (std::count(got.begin(), got.end(), name) > 1) refuse(kernel, "lists argument " + name + " twice");
+    }
+    for (auto const& name : want)
+      if (std::find(got.begin(), got.end(), name) == got.end()) refuse(kernel, "lacks argument " + name);
+    for (size_t i = 0; i < want.size(); ++i)
+      if (got[i] != want[i])
+        refuse(kernel, "has argument " + got[i] + " at position " + std::to_string(i) + ", where this caller passes " +
+                           want[i]);
+    for (auto const& name : want) {
+      bool const supplied =
+          name == kPhotolysisArgument ||
           std::find(kCallArguments.begin(), kCallArguments.end(), name) != kCallArguments.end() ||
-          std::any_of(tables.begin(), tables.end(), [&](auto const& t) { return t.size() > 1 && t[1] == name; }) ||
-          (photolysis && name == kPhotolysisArgument);
-      if (!known)
-        throw std::runtime_error(std::string("maxichem: kernel ") + kernel + " takes argument " + name +
-                                 ", which this caller does not supply; export again with this version");
+          std::any_of(tables.begin(), tables.end(), [&](auto const& t) { return t.size() > 1 && t[1] == name; });
+      if (!supplied) refuse(kernel, "takes table " + name + ", which meta.txt does not list");
     }
   }
 }
@@ -137,11 +171,7 @@ void check_arguments(std::map<std::string, std::vector<std::string>> const& argu
 
 Solver::Solver(std::string const& folder, torch::Device device) : device_(device) {
   TORCH_CHECK(device.is_cuda(), "maxichem::Solver: a CUDA device");
-  c10::cuda::CUDAGuard guard(device);
-  device_ = torch::Device(torch::kCUDA, guard.current_device().index());  // "cuda": the current one
-  device = device_;
-  torch::zeros({1}, torch::TensorOptions().device(device));  // torch's context is current
-
+  // every check of meta.txt comes before any CUDA work
   std::map<std::string, std::string> meta;
   std::vector<std::vector<std::string>> tables;
   std::map<std::string, std::vector<std::string>> lists;
@@ -185,6 +215,10 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
                              std::to_string(ns_));
   check_arguments(arguments_, tables, nj_ > 0);
 
+  c10::cuda::CUDAGuard guard(device);
+  device_ = torch::Device(torch::kCUDA, guard.current_device().index());  // "cuda": the current one
+  device = device_;
+  torch::zeros({1}, torch::TensorOptions().device(device));  // torch's context is current
   int sms = multiprocessors_on(device_.index(), meta.at("arch"));
 
   std::string cubin = read_file(folder + "/kernel.cubin");
