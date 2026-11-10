@@ -257,12 +257,11 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
     cell_rates(a.v, a.kf, a.kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, 0);
     CSYNC(0);
     const double h0 = isfinite(hin[cell]) ? hin[cell] : dt;  // a non-finite h acts as dt (the call kernel counted it)
-    double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
-    bool prej = false;
+    StepState s = {fmax(fmin(h0, dt), H_MIN), 0.0, 0.0, 0.0, 0.0, false};
     int it = dt > 0.0 ? 0 : max_steps;
-    while (it < max_steps && t < dt * CALL_END) {
-      const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
-      if (prej)
+    while (it < max_steps && s.t < dt * CALL_END) {
+      const double ha = fmin(s.h, dt - s.t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
+      if (s.prej)
         restore_dense_try(a, didx, cl);
       else
         fresh_dense_try(a, nd, tab, sst, jt, didx, sround, jround, lane, cl);
@@ -273,28 +272,21 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
       dense_stages(a, pr, ih, nd, tab, sst, sround, lane, cl);
       // step control (docs/method.md); every warp reaches the same decision
       bool ok = false;
-      const double en = try_error(N, a.K1, a.K3, a.K4, a.Y, cl < 32, t == 0.0, rtol, atol, lane, ok);
+      const double en = try_error(N, a.K1, a.K3, a.K4, a.Y, cl < 32, s.t == 0.0, rtol, atol, lane, ok);
       CSYNC(0);
-      if (ok) {
-        for (int i = cl; i < NS; i += NL) N[i] = fmax(a.Y[i], 0.0);
-        t += ha;
-        nok += 1.0;
-      }
+      accept_try(s, N, a.Y, ok, ha, cl, NL);
       CSYNC(0);
-      h = ha * step_factor(en, ok, prej, pen, pha, ha);
-      prej = !ok;
-      pen = en;
-      pha = ha;
+      next_try(s, step_factor(en, ok, s.prej, s.pen, s.pha, ha), ok, en, ha);
       it++;
     }
     write_state(N, xout + (size_t)cell * NS, perm, lane, cl, NL);
-    const int dn = (t >= dt * CALL_END) ? 1 : 0;
+    const int dn = (s.t >= dt * CALL_END) ? 1 : 0;
     CSYNC(0);
     if (cl == 0) {
-      const int c = check_cell(x0, xout, dn, nok, atoms, atol, cell);
-      hio[cell] = h;
+      const int c = check_cell(x0, xout, dn, s.nok, atoms, atol, cell);
+      hio[cell] = s.h;
       doneo[cell] = c ? 0 : dn;  // done: finished and passing the guard
-      noko[cell] = nok;
+      noko[cell] = s.nok;
       redo[cell] = c ? 2 : 1;
       atomicAdd(count + (c ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
       *nextq = (int)(gridDim.x + atomicAdd(count + COUNT_RECOVERY_QUEUE, 1));

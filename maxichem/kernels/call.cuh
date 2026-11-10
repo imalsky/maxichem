@@ -161,6 +161,7 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
       bool ok = false;
       const double en = try_error(N, K1, K3, K4, Y, w0, t == 0.0, rtol, atol, lane, ok);
       CSYNC(grp);
+      // accept_try and next_try written out: with them the call's compiled code changes in every variant
       if (ok) {
         for (int i = cl; i < NS; i += NL) N[i] = fmax(Y[i], 0.0);
         t += ha;

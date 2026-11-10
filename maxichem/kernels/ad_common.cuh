@@ -33,13 +33,6 @@ struct Attempt {
   bool ok;
 };
 
-// The step control's state over a call: the next try's size h and the time reached t (s), the accepted steps nok, and
-// the previous try's error pen, size pha (s) and rejection prej.
-struct StepState {
-  double h, t, nok, pen, pha;
-  bool prej;
-};
-
 __device__ __forceinline__ double sgn(double a) { return a > 0.0 ? 1.0 : (a < 0.0 ? -1.0 : 0.0); }
 
 // A non-finite log multiplier makes the bad-input sum NaN, so its cell takes no try; a finite one leaves the sum's
@@ -535,15 +528,8 @@ __device__ __forceinline__ Attempt forward_step(double* work, double (&c)[NT], d
   double *N = work + A_NN, *Y = work + A_Y;
   const double ha = fmin(s.h, dt - s.t);
   const Attempt a = run_attempt<DN>(work, c, Wd, ha, s.t == 0.0, k, tol, tab, st, lane, myt);
-  if (a.ok) {
-    for (int i = lane; i < NS; i += 32) N[i] = fmax(Y[i], 0.0);
-    s.t += ha;
-    s.nok += 1.0;
-  }
+  accept_try(s, N, Y, a.ok, ha, lane, 32);
   __syncwarp();
-  s.h = ha * step_factor(a.en, a.ok, s.prej, s.pen, s.pha, ha);
-  s.prej = !a.ok;
-  s.pen = a.en;
-  s.pha = ha;
+  next_try(s, step_factor(a.en, a.ok, s.prej, s.pen, s.pha, ha), a.ok, a.en, ha);
   return a;
 }

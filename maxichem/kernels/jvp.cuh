@@ -237,6 +237,8 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
   const int nc = DN ? count[COUNT_RECOMPUTED] : B;
   int q = (int)(blockIdx.x * WPB + wib);
   while (q < nc) {
+    // the cell's setup, as vjp_cells' (a shared helper would take 19 arguments); test_kernel_copies.py holds the
+    // kernels' copies to the same bits
     const int cell = DN ? list[q] : q;
     const double Tc = Ta[cell], dt = dta[cell], Pc = Pa[cell], nd = Pc / (KBOLTZ * Tc);
     double p = 0.0, pm = 0.0;
@@ -273,16 +275,16 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
     }
     __syncwarp();
     const Rates coef = {kf, kr, nd};
-    double h = fmax(m, H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
-    bool prej = false;
+    StepState step = {fmax(m, H_MIN), 0.0, 0.0, 0.0, 0.0, false};
     int it = (dt > 0.0 && run) ? 0 : max_steps;
-    while (it < max_steps && t < dt * CALL_END) {
-      const double rem = dt - t, ha = fmin(h, rem);
+    while (it < max_steps && step.t < dt * CALL_END) {
+      const double rem = dt - step.t, ha = fmin(step.h, rem), h = step.h;
+      const bool first = step.t == 0.0;
       double dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
-      const Attempt a = run_attempt<DN>(work, c, Wd, ha, t == 0.0, coef, tol, tab, streams, lane, myt);
+      const Attempt a = run_attempt<DN>(work, c, Wd, ha, first, coef, tol, tab, streams, lane, myt);
       const bool ok = a.ok;
       const double en = a.en;
-      const double fac = step_factor_partials(en, ok, prej, pen, pha, ha, dfe, dfh, dfp, dfq);
+      const double fac = step_factor_partials(en, ok, step.prej, step.pen, step.pha, ha, dfe, dfh, dfp, dfq);
       // the error's tangent where this factor depends on it, or the next attempt's secant may (a rejection, err > 1)
       const bool wte = ok || (adapt && (dfe != 0.0 || (!ok && isfinite(en) && en > 1.0)));
       for (int d = 0; d < D; d++) {  // each direction's tangent on the attempt in place
@@ -293,7 +295,7 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
           double* ng = Ng + d * NS;
           for (int i = lane; i < NS; i += 32) Nd[i] = ng[i];
           __syncwarp();
-          end = tangent_step<DN>(work, c, Wd, a, ha, t == 0.0, had, adapt, coef, dk + 2 * NR * d, dlnd[d], va, tol, tab,
+          end = tangent_step<DN>(work, c, Wd, a, ha, first, had, adapt, coef, dk + 2 * NR * d, dlnd[d], va, tol, tab,
                                  streams, lane, myt);
           if (ok)
             for (int i = lane; i < NS; i += 32) ng[i] = Y[i] >= 0.0 ? Yd[i] : 0.0;
@@ -304,16 +306,9 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
         pend[d] = end;
         phad[d] = had;
       }
-      if (ok) {
-        for (int i = lane; i < NS; i += 32) N[i] = fmax(Y[i], 0.0);
-        t += ha;
-        nok += 1.0;
-      }
+      accept_try(step, N, Y, ok, ha, lane, 32);
       __syncwarp();
-      h = ha * fac;
-      prej = !ok;
-      pen = en;
-      pha = ha;
+      next_try(step, fac, ok, en, ha);
       it++;
     }
     const double s = write_state(N, xout + (size_t)cell * NS, perm, lane, lane, 32);
@@ -325,13 +320,13 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
       for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + perm[i]] = (ng[i] - N[i] / s * sd) / s;
       if (lane == 0) dhout[(size_t)d * B + cell] = hd[d];
     }
-    const int dn = (run && t >= dt * CALL_END) ? 1 : 0;
+    const int dn = (run && step.t >= dt * CALL_END) ? 1 : 0;
     if (lane == 0) {
-      hout[cell] = h;
+      hout[cell] = step.h;
       doneo[cell] = dn;
-      noko[cell] = nok;
+      noko[cell] = step.nok;
     }
-    if (DN && recovery_fails(x0, xout, doneo, redo, count, dn, nok, atoms, atol, cell, lane))
+    if (DN && recovery_fails(x0, xout, doneo, redo, count, dn, step.nok, atoms, atol, cell, lane))
       for (int d = 0; d < D; d++) {
         for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + i] = DNAN;
         if (lane == 0) dhout[(size_t)d * B + cell] = DNAN;

@@ -572,6 +572,8 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
   const int nc = DN ? count[COUNT_RECOMPUTED] : B;
   int q = (int)(blockIdx.x * WPB + wib);
   while (q < nc) {
+    // the cell's setup, as jvp_cells' (a shared helper would take 19 arguments); test_kernel_copies.py holds the
+    // kernels' copies to the same bits
     const int cell = DN ? list[q] : q;
     const double Tc = Ta[cell], dt = dta[cell], Pc = Pa[cell], nd = Pc / (KBOLTZ * Tc);
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
