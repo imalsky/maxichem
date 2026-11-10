@@ -50,6 +50,7 @@ def test_cpp_call_is_the_python_call(export_program, tmp_path, network, photo, t
     assert result.returncode == 0, result.stdout + result.stderr
     assert "bitwise identical" in result.stdout
     assert ("(default arguments)" in result.stdout) == (tries == _constants.DEFAULT_MAX_STEPS)
+    assert ("J [B, 0] gives the same bits, J [B, 1] refused" in result.stdout) == (photo == 0)
 
 
 @pytest.mark.parametrize(
@@ -93,3 +94,21 @@ def test_cpp_refuses_another_export_format(export_program, tmp_path):
     )
     assert result.returncode != 0
     assert "export format" in result.stderr
+
+
+def test_cpp_refuses_an_unknown_kernel_argument(export_program, tmp_path):
+    # the recovery is the last kernel a call launches: a name only it takes was found missing after the call kernel ran
+    paths.need(paths.vulcan_thermo())
+    case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, 64, 1, FORCED_TRIES]
+    subprocess.run([str(q) for q in case], check=True, capture_output=True)
+    meta = tmp_path / "export" / "meta.txt"
+    lines = meta.read_text().splitlines()
+    (i,) = (k for k, line in enumerate(lines) if line.startswith("args recover "))
+    assert " didx " in lines[i]
+    lines[i] = lines[i].replace(" didx ", " didx_renamed ")
+    meta.write_text("\n".join(lines) + "\n")
+    result = subprocess.run(
+        [export_program, tmp_path / "export", tmp_path / "case"], check=False, capture_output=True, text=True
+    )
+    assert result.returncode != 0
+    assert "kernel recover takes argument didx_renamed, which this caller does not supply" in result.stderr

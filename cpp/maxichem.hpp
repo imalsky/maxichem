@@ -7,14 +7,16 @@
 //   auto [x1, h1, done, steps] = chem(x, T, P, dt, h, J);
 //
 // x [B, ns] mole fractions in the network's species order, T [B] K, P [B] dyn cm^-2, dt [B] s, h [B] the
-// starting step sizes (all float64 on the solver's device); J [B, nj] s^-1, required for a network exported with
-// photo=True (zeros for dark cells). Returns the new mole fractions, the next step sizes, done (bool) and the accepted
-// steps per cell (float64). `count` holds the call's counts on the device (int32: queue, then bad_input, cold, hot,
-// nonfinite, unfinished, drift, recomputed, recovered, still_failed, nonfinite_h, then the recovery's queue) and
-// `total` their sum since construction (int64). The call reads the counts back (its one host sync) and throws
+// starting step sizes (all float64 on the solver's device); J [B, nj] s^-1 (float64 on the device), required for a
+// network exported with photo=True (zeros for dark cells). A network without photolysis (nj() == 0) takes no J: an
+// undefined tensor, or an empty [B, 0] one. Returns the new mole fractions, the next step sizes, done (bool) and the
+// accepted steps per cell (float64). `count()` copies the call's counts on the device (int32: queue, then bad_input,
+// cold, hot, nonfinite, unfinished, drift, recomputed, recovered, still_failed, nonfinite_h, then the recovery's queue)
+// and `total()` their sum since construction (int64). The call reads the counts back (its one host sync) and throws
 // std::invalid_argument if it refused a cell: bad input (x negative or non-finite, |sum(x) - 1| above the export's
 // x_sum_tol, no x above 0, T non-finite, P <= 0, dt negative or non-finite, J negative or non-finite) or T outside
 // [t_min, t_max]. The message names the counts, the limits and the first such cell; the counts stay readable.
+// The constructor throws std::runtime_error if the export names a kernel argument this caller does not supply.
 //
 // The cubin is for one GPU architecture (meta.txt "arch"): export on the machine that runs it.
 // Calls share the scratch and the counts, so they run one at a time: on one stream, or synchronize before
@@ -45,15 +47,22 @@ class Solver {
                                           double rtol = kDefaultRtol, double atol = -1.0,
                                           int max_steps = kDefaultMaxSteps);
 
-  int ns = 0;                                  // species
-  std::vector<std::string> species, elements;  // names; the atoms table is species x elements
-  int nj = 0;                                  // photolysis branches (0: thermal network)
-  double default_atol = 0.0;
+  // Read only: the call trusts these, and the kernels write to the counts' memory, so the tensors come back as copies.
+  int ns() const { return ns_; }                                          // species
+  int nj() const { return nj_; }                                          // photolysis branches (0: thermal network)
+  std::vector<std::string> const& species() const { return species_; }    // names, in x's column order
+  std::vector<std::string> const& elements() const { return elements_; }  // names, in atoms()' column order
+  double default_atol() const { return default_atol_; }                   // mole fraction
   //! species x elements (float64, on the device): atoms of each element in each species
-  torch::Tensor atoms() const { return tab_.at("atoms"); }
-  torch::Tensor count, total;
+  torch::Tensor atoms() const { return tab_.at("atoms").clone(); }
+  torch::Tensor count() const { return count_.clone(); }  // the last call's counts (int32, on the device)
+  torch::Tensor total() const { return total_.clone(); }  // their sum since construction (int64, on the device)
 
  private:
+  int ns_ = 0, nj_ = 0;
+  std::vector<std::string> species_, elements_;
+  double default_atol_ = 0.0;
+  torch::Tensor count_, total_;
   torch::Device device_;
   int w_ = 0, cpb_ = 0, smem_ = 0, smem_rec_ = 0, sround_ = 0, jround_ = 0;
   int rec_steps_ = 0;

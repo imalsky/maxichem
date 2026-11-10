@@ -108,4 +108,19 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 
 Loads an export from `cpp/maxichem.hpp`. `chem(x, T, P, dt, h, J, rtol, atol, max_steps)` returns the new mole fractions, the next
 step sizes, done and the accepted steps. A negative `atol` takes the export's default. It refuses the cells `CudaSolver` refuses,
-with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits.
+with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits. A defined J must be float64
+[B, `nj()`] on the device; an export without photolysis (`nj()` 0) takes an undefined J or an empty [B, 0] one, and refuses any
+other. The constructor refuses an export whose kernels name an argument the call does not supply, naming the kernel and the
+argument.
+
+| Member | Meaning |
+| --- | --- |
+| `ns()`, `nj()` | Species and photolysis branches |
+| `species()`, `elements()` | Names (const references) |
+| `default_atol()` | The export's atol, mole fraction |
+| `atoms()` | [species, elements] on the device, a copy |
+| `count()`, `total()` | The last call's counts (int32) and their sum since construction (int64), copies on the device |
+
+Interface change: these were public data members (`chem.ns`, `chem.nj`, `chem.species`, `chem.elements`, `chem.default_atol`,
+`chem.count`, `chem.total`); write them with `()`. The call trusts them and its kernels write to the counts, so a caller can no
+longer rebind or resize them.

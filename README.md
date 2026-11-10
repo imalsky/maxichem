@@ -125,7 +125,9 @@ counts = solver.check()  # guard counts; raises if a cell was outside 300-3000 K
   the export and launches the same kernels with the same arguments, so a call gives the same bits as in Python.
   Export on the machine that runs it (a cubin is for one GPU architecture). Build: `cmake -S cpp -B cpp/build
   -DPython3_EXECUTABLE=<python with torch> -DCUDAToolkit_ROOT=<CUDA toolkit>`. Check: `tests/test_export_cpp.py` writes
-  an export and one call, and compares the C++ call with it bit for bit.
+  an export and one call, and compares the C++ call with it bit for bit. Interface change: the C++ solver's sizes,
+  names and counts are read-only accessors now (`chem.ns()`, `chem.nj()`, `chem.species()`, `chem.count()`, ...; the
+  tensors come back as copies), and an export without photolysis takes no J or an empty [B, 0] one.
 
 ## Accuracy
 
