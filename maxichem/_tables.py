@@ -5,11 +5,23 @@ from typing import Any
 
 import numpy as np
 
-from ._constants import NO_SLOT, RATE_LAW_FLAGS, RATE_LAW_SHIFTS
+from ._constants import (
+    ARRHENIUS_COLUMNS,
+    DOUBLE_BYTES,
+    FALLOFF_KINDS,
+    KIND_TWO_BODY,
+    NO_SLOT,
+    RATE_LAW_FLAGS,
+    RATE_LAW_SHIFTS,
+    RATE_ROW_COLUMNS,
+    THREE_BODY_KINDS,
+    WARP_LANES,
+)
 from .kinvulcan import VulcanNetwork
 
 MAX_SPECIES = 254  # species slots are uint8, with one value left for the padding
 NTAIL = 32  # rows of the trailing block factored in registers (at most 32)
+_UINT8_MAX = int(np.iinfo(np.uint8).max)  # the largest extra-piece offset (xp) and pivot batch (blen): both uint8
 
 
 def warps_per_cell(fit: int) -> int:
@@ -64,12 +76,12 @@ def _law(r: dict[str, Any]) -> tuple[list[float], int]:
     def ln(a: float) -> float:
         return np.log(a) if a > 0 else -np.inf
 
-    if r["kind"] == 2:
+    if r["kind"] == KIND_TWO_BODY:
         a0, a1, ai = (r["A"], r["B"], r["C"]), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0)
     else:
         a0 = (r["A0"], r["B0"], r["C0"])
         a1 = (r["A1"], r["B1"], r["C1"]) if "A1" in r else (0.0, 0.0, 0.0)
-        ai = (r["Ai"], r["Bi"], r["Ci"]) if r["kind"] in (3, 6) else (1.0, 0.0, 0.0)
+        ai = (r["Ai"], r["Bi"], r["Ci"]) if r["kind"] in FALLOFF_KINDS else (1.0, 0.0, 0.0)
     if min(a0[0], a1[0], ai[0]) < 0:
         raise ValueError(f"negative Arrhenius prefactor in {r['eq']}: the kernel takes ln A")
     row = [
@@ -86,7 +98,7 @@ def _law(r: dict[str, Any]) -> tuple[list[float], int]:
         r.get("eff", 1.0),
     ]
     fl = (
-        int(r["kind"] in (3, 6)) * RATE_LAW_FLAGS["FL_FALLOFF"]
+        int(r["kind"] in FALLOFF_KINDS) * RATE_LAW_FLAGS["FL_FALLOFF"]
         | int("A1" in r) * RATE_LAW_FLAGS["FL_SECOND_K0"]
         | int("troe" in r) * RATE_LAW_FLAGS["FL_TROE"]
         | int("eff" in r) * RATE_LAW_FLAGS["FL_EFF"]
@@ -166,7 +178,7 @@ def _reaction_tables(
     """Return the reactions' species slots (padding ns: n[ns] = 1, g[ns] = 0) and rate laws."""
     nr = len(reac)
     rx = np.full((nr, 6), ns, np.uint8)
-    rc = np.zeros((nr, 14), np.float64)
+    rc = np.zeros((nr, RATE_ROW_COLUMNS), np.float64)
     rf = np.zeros(nr, np.int32)
     for j, r in enumerate(reac):
         if "rev" in r:
@@ -180,14 +192,14 @@ def _reaction_tables(
         rx[j, 3 : 3 + len(products[j])] = [pos[q] for q in products[j]]
         rc[j], rf[j] = _law(r)
         rf[j] |= (
-            (r["kind"] in (3, 5, 6)) * RATE_LAW_FLAGS["FL_THREE_BODY"]
+            (r["kind"] in THREE_BODY_KINDS) * RATE_LAW_FLAGS["FL_THREE_BODY"]
             | (len(products[j]) - len(reactants[j]) + 4) << RATE_LAW_SHIFTS["FL_DMU_SHIFT"]
             | len(reactants[j]) << RATE_LAW_SHIFTS["FL_FORWARD_SHIFT"]
             | len(products[j]) << RATE_LAW_SHIFTS["FL_REVERSE_SHIFT"]
         )
     law = sorted({"troe" for r in reac if "troe" in r} | {"eff" for r in reac if "eff" in r})
     if not law:
-        rc = rc[:, :9]
+        rc = rc[:, :ARRHENIUS_COLUMNS]
     return rx, rc, rf, law
 
 
@@ -209,8 +221,8 @@ def _sv_stream(
             nx += c > 0
         xp.append(nx)
     npart = ns + nx
-    if nx > 255:
-        raise ValueError(f"too many S v pieces: {nx}, at most 255; the reaction terms are too unevenly spread")
+    if nx > _UINT8_MAX:
+        raise ValueError(f"too many S v pieces: {nx}, at most {_UINT8_MAX}; the reaction terms are too unevenly spread")
     widths["part"] = _bits(npart - 1)
     if widths["r"] + widths["part"] + 4 > 32 or widths["k"] + 2 * widths["s"] + 3 > 32 or 3 * widths["slot"] > 64:
         raise ValueError(f"descriptor widths {widths} do not fit their words: the network is too large")
@@ -316,7 +328,8 @@ def _jacobian_stream(
     for lane, its in enumerate(finished):
         per_lane[lane, : len(its)] = its
     packed = words.tobytes() + per_lane.tobytes() + np.array(extra, np.uint16).tobytes()
-    return np.frombuffer(packed + b"\0" * (-len(packed) % 8), np.uint64), rounds, most, len(extra)
+    word = np.dtype(np.uint64).itemsize
+    return np.frombuffer(packed + b"\0" * (-len(packed) % word), np.uint64), rounds, most, len(extra)
 
 
 def _lu_stream(
@@ -339,7 +352,7 @@ def _lu_stream(
     optr = np.cumsum([0] + [len(ops[k]) for k in range(k0)]).astype(np.int32)
     blen, cur = np.zeros(k0, np.uint8), None
     for k in range(k0):
-        if cur is None or blen[cur] == 255 or any((j, k) in pattern or (k, j) in pattern for j in range(cur, k)):
+        if cur is None or blen[cur] == _UINT8_MAX or any((j, k) in pattern or (k, j) in pattern for j in range(cur, k)):
             cur = k
         blen[cur] += 1
     return np.array(lu, np.uint64), optr, blen
@@ -373,7 +386,7 @@ def tables(net: VulcanNetwork, warps: int, photo: bool = False) -> dict[str, Any
         S = np.hstack([S, np.asarray(net.Sp, np.float64)])
     ns, nr = S.shape
     nrt = len(net.reac)
-    lanes = 32 * warps
+    lanes = WARP_LANES * warps
     reactants = [list(r["re"]) for r in reac]
     products = [list(r["pr"]) for r in reac]
     if ns > MAX_SPECIES or max(len(q) for q in reactants + products) > 3 or np.abs(S).max() > 2:
@@ -438,7 +451,7 @@ def tables_for_device(net: VulcanNetwork, photo: bool, shared_memory: int) -> di
     if cells_per_block(tab, shared_memory) < 1:
         blob = pack_small_tables(tab)[0]
         raise ValueError(
-            f"one cell needs {8 * shared_doubles_per_cell(tab) + len(blob)} B of shared memory per block; "
+            f"one cell needs {DOUBLE_BYTES * shared_doubles_per_cell(tab) + len(blob)} B of shared memory per block; "
             f"the device has {shared_memory}"
         )
     return tab
@@ -446,7 +459,7 @@ def tables_for_device(net: VulcanNetwork, photo: bool, shared_memory: int) -> di
 
 def cells_per_block(tab: dict[str, Any], shared_memory: int) -> int:
     """Return the cells per block the shared memory (bytes) holds."""
-    return int((shared_memory - len(pack_small_tables(tab)[0])) // (8 * shared_doubles_per_cell(tab)))
+    return int((shared_memory - len(pack_small_tables(tab)[0])) // (DOUBLE_BYTES * shared_doubles_per_cell(tab)))
 
 
 def pack_small_tables(tab: dict[str, Any]) -> tuple[bytes, dict[str, int]]:
@@ -456,7 +469,7 @@ def pack_small_tables(tab: dict[str, Any]) -> tuple[bytes, dict[str, int]]:
         blob += b"\0" * (-len(blob) % 2)
         offs[name] = len(blob)
         blob += np.ascontiguousarray(tab[name]).tobytes()
-    return blob + b"\0" * (-len(blob) % 8), offs
+    return blob + b"\0" * (-len(blob) % DOUBLE_BYTES), offs  # the doubles after it stay aligned
 
 
 def rates_fit_in_block(tab: dict[str, Any]) -> bool:

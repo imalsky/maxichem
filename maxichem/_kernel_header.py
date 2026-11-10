@@ -7,18 +7,21 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from . import kinvulcan
 from ._ad_tables import GATHER_FIELDS, layout, scratch_sizes
 from ._constants import (
     ARRH_BLOCK_THREADS,
     COUNT_SLOTS,
     DMAX,
     K_COLL,
+    KB,
+    NASA_SPLIT_T,
     NO_SLOT,
+    P0,
     RATE_LAW_FLAGS,
     RATE_LAW_SHIFTS,
     T_MAX,
     T_MIN,
+    WARP_LANES,
     X_SUM_TOL,
 )
 from ._tables import (
@@ -126,7 +129,7 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         "NPART": tab["npart"],
         "K0": tab["k0"],
         "NT": ns - tab["k0"],
-        "RP": max(1, -(-tab["k0"] // 32)),
+        "RP": max(1, -(-tab["k0"] // WARP_LANES)),
         "RCW": tab["rc"].shape[1],
         "CPB": cpb,
         "W": tab["warps"],
@@ -142,12 +145,12 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         "XSUMTOL": repr(X_SUM_TOL),
         "DRIFT": repr(float(drift)),
         "KCOLL": repr(K_COLL),
-        "KBOLTZ": repr(kinvulcan.KB),
-        "NASA_SPLIT_T_K": repr(kinvulcan.NASA_SPLIT_T),
-        "P0BAR": repr(kinvulcan.P0),
+        "KBOLTZ": repr(KB),
+        "NASA_SPLIT_T_K": repr(NASA_SPLIT_T),
+        "P0BAR": repr(P0),
         "WSH": int(wsh),
         "VR": max(tab["nr"], ns + 1),
-        "RPD": -(-ns // 32),
+        "RPD": -(-ns // WARP_LANES),
         "PERWR": shared_doubles_recover(tab, wsh),
         "HAS_TROE": int("troe" in law),
         "HAS_EFF": int("eff" in law),

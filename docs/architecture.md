@@ -84,9 +84,12 @@ is the call kernel's. They take networks up to 96 species (64 leading rows and t
 ## Tables shared by Python and the kernels
 
 Some facts must stay equal in Python, the kernels and the C++ caller. Each is held once, and reaches the kernels through `network.h`.
-`kinvulcan.py` holds `NASA_SPLIT_T`; `_tables.py` the call and recovery scratch (`scratch_strides`); `_ad_tables.py` the derivative
-kernels' scratch (`scratch_sizes`) and the fields of the adjoint's stream words (`GATHER_FIELDS`); and `_constants.py` the rest:
+`_tables.py` holds the call and recovery scratch (`scratch_strides`); `_ad_tables.py` the derivative kernels' scratch
+(`scratch_sizes`) and the fields of the adjoint's stream words (`GATHER_FIELDS`); and `_constants.py` the rest, in sections:
+the call settings, the physical constants (`KB`, `P0`, `NASA_SPLIT_T`, `K_COLL`) and the layout, among it:
 
+- `WARP_LANES`, `DOUBLE_BYTES`: the units of the launch sizes and the shared memory.
+- `KIND_*`: VULCAN's numbers for a reaction's law, which the reader's dicts hold.
 - `RATE_LAW_FLAGS`, `RATE_LAW_SHIFTS`: the bits of a reaction's flag word.
 - `COUNT_SLOTS`: the device's count array.
 - `KERNEL_ARGUMENTS`: each kernel's parameters, in order. `CudaSolver.launch`, `ADSolver` and the C++ caller build their launches

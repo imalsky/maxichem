@@ -1,5 +1,11 @@
-"""Settings shared by the solver modules, the kernels' header and the export."""
+"""The solver's settings and constants, by kind, each with its unit and its reason or source.
 
+The kernels get the call settings and the physical constants through their generated header (_kernel_header.py), so
+each value is written once, here. The method is in docs/method.md; a published formula's coefficients stay beside the
+formula in kernels/, and the checks' acceptance bars are in _checks.py.
+"""
+
+# Call settings: what a call accepts, and its defaults.
 T_MIN = 300.0  # K: the solver's domain starts here (colder cells are counted, not stepped, and the call raises)
 # K: the domain ends here, as hotter cells do. The NASA-9 fits run to 6000 K (McBride et al. 2002); accuracy against
 # VULCAN is checked only up to 3000 K, the edge of the truth sets
@@ -14,7 +20,33 @@ REC_STEPS = 10  # the recovery's tries, in units of the call's max_steps (40,000
 DEFAULT_RTOL = 1e-3  # relative tolerance of a call
 DEFAULT_MAX_STEPS = 4000  # tries per call before a cell is flagged as unfinished
 ATOL = 1e-25  # default absolute tolerance, in mole fraction (docs/method.md)
+# attempts stored per cell before the adjoint switches to segment checkpoints; a call may take max_steps up to
+# (2 CAP)^2 / REC_STEPS, 0.4 CAP^2, so this CAP's limit is DEFAULT_MAX_STEPS
+CAP = 100
+DMAX = 16  # tangent directions per jvp call
+
+# Physical constants.
+KB = 1.380649e-16  # erg K^-1: Boltzmann's constant (exact in the SI since 2019)
+P0 = 1.0e6  # dyn cm^-2 (1 bar): the standard pressure of the NASA-9 Gibbs energies (McBride et al. 2002)
+NASA_SPLIT_T = 1000.0  # K: where the NASA-9 fits change range (McBride et al. 2002)
 K_COLL = 1e-9  # cm3 s^-1: no thermal rate may exceed this as a bimolecular-equivalent rate (docs/method.md)
+
+# Layout: sizes and codes shared by the host code, the kernels, the export and cpp/.
+WARP_LANES = 32  # threads per warp on every CUDA GPU; the kernels write it as 32 (lane = threadIdx.x & 31)
+DOUBLE_BYTES = 8  # bytes per float64, the unit of the kernels' shared memory and scratch
+GUARD_BLOCK_THREADS = 128  # threads per block of the guard kernel; any size works, this one packs cells densely
+ARRH_BLOCK_THREADS = 256  # threads per block of the arrh kernel, a power of 2: its reduction halves it
+# Columns of a reaction's row in the rate table rc: ln A, B, C of k0, of the second k0 term and of k_inf (the Arrhenius
+# columns, the derivatives' rc), then Troe's a, T3, T1, T2 and the efficiency
+ARRHENIUS_COLUMNS = 9
+RATE_ROW_COLUMNS = 14
+# A reaction's law, as VULCAN's network files number them: a reader dict's "kind"
+KIND_TWO_BODY = 2
+KIND_FALLOFF = 3  # three-body with a high-pressure rate
+KIND_LOW_PRESSURE = 5  # three-body, low-pressure rate only
+KIND_SPECIAL = 6  # a law held in the code (kinvulcan.SPECIAL), with falloff
+FALLOFF_KINDS = (KIND_FALLOFF, KIND_SPECIAL)  # the laws with k_inf
+THREE_BODY_KINDS = (KIND_FALLOFF, KIND_LOW_PRESSURE, KIND_SPECIAL)  # the laws with M: times n_tot both ways
 # nonfinite_h: cells whose starting step was not finite, so it acted as dt
 COUNTS = (
     "bad_input",
@@ -29,10 +61,6 @@ COUNTS = (
     "nonfinite_h",
 )
 EXPORT_FORMAT = 6  # raised by a change the export's reader depends on; cpp/maxichem.cpp refuses any other
-# attempts stored per cell before the adjoint switches to segment checkpoints; a call may take max_steps up to
-# (2 CAP)^2 / REC_STEPS, 0.4 CAP^2, so this CAP's limit is DEFAULT_MAX_STEPS
-CAP = 100
-DMAX = 16  # tangent directions per jvp call
 COUNT_SLOTS = ("queue", *COUNTS, "recovery_queue")  # the device's count array: the two cell queues around COUNTS
 NO_SLOT = 0xFFFF  # marks a (row, column) with no slot in the kernels' uint16 map
 
@@ -85,6 +113,3 @@ KERNEL_ARGUMENTS = {
     "arrh": ("gA", "Ta", "Pa", "rc", "rf", "grc", "B"),
 }  # fmt: skip
 PHOTOLYSIS_ARGUMENT = "Jin"
-
-GUARD_BLOCK_THREADS = 128  # threads per block of the guard kernel; any size works, this one packs cells densely
-ARRH_BLOCK_THREADS = 256  # threads per block of the arrh kernel, a power of 2: its reduction halves it
