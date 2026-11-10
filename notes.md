@@ -1949,6 +1949,31 @@ repository.
   (above). Two test additions after the checks: each method setting's constexpr must read NAME_VALUE (fails on
   H_MIN = 1e-12 written back), and the names of docs/method.md are looked up in the kernels without their comments
   (fails on a GMAX left only in a comment).
+- After an independent review (supersedes this entry's 49152 B argument, and c5f4b5d's message where it says the
+  compiled kernels are unchanged without a size).
+  - The 49152 B proof. A shared PTX among samples does not exclude other outputs with changed arithmetic, so it proved
+    nothing; withdrawn. In its place, a compiler-independent check (tokens.py in the experiment's scratch): each
+    variant's sources through `cpp -P` into C tokens, old against new, after folding each of the 16 moved initialisers
+    to its binary64 bits (both sides), dropping the static_assert that holds SECANT_MAX_ORDER to 3 and putting the
+    derivative's asserted 3.0 back. 5a032ea against c5f4b5d, c665d02 and 3a04ef7's head: token streams equal in 117 of
+    117 variants each, the 40 at 49152 B included. It finds a one-ulp change of STEP_SAFETY and a wrong name in the
+    derivative. The reviewer reached the same on 100 variants by its own route.
+  - Found: NVRTC 12.8.93 is not deterministic at 49152 B. Of the 40 variants there (NCHO_photo and CHO_photo, dark and
+    lit, call at 1-4 cells with W in and out of shared memory, jvp, vjp), 21 gave 2 or 3 different cubins over 3
+    compiles of 5a032ea's unchanged sources, and 22 gave 2 to 5 different PTX over 6 compiles (8 at a time), so the
+    spread starts in the front end; the 16 call variants with W in global memory repeated in every compile. At 101376 B
+    and in the test forms no repeated compile differed. This contradicts the 2026-11-06 entries (cubins "deterministic",
+    and equal at 49152 B). Cause not found; whether bits of a 48 KiB build can differ between two compiles is not
+    known.
+  - Moved too: MAX_GIBBS_JUMP (from kinvulcan.py, still importable there), NTAIL and the warps per cell (2, or 4 when at
+    most 3 cells fit; from _tables.py) into _constants.py. Reader, table, size and header hashes equal (146 records),
+    function trees equal with the names replaced by their values. Left beside their code, with the reason: MAX_SPECIES
+    and the uint8 limit (follow from the tables' slot type), the adjoint's stream-word fields and limits (layout phase),
+    MAX_WARPS_PER_BLOCK (the derivative kernels' queue), CUDA's limits and attribute numbers, the NVRTC options, the
+    file formats (TROE_FIELDS, NASA_FILE_SIZES, SECTIONS), and coupling/'s constants (its own package for now).
+  - The constants test now checks that the kernels' constexpr names equal a classified list (header settings, formula
+    coefficients, kernel codes), over declarations wrapped onto several lines; shown on a new kernel-local
+    NEW_SETTING = 0.37 (fails), a 1e-3 in the guard (fails), RODAS_C43 wrapped over two lines (passes).
 
 ## References (by topic)
 
