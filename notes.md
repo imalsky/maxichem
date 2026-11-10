@@ -1568,6 +1568,61 @@ snapy's docs on tracers, and the papers below. One independent review of the sam
   12,896 J/kg/K: 6.1 % too high at 1,000 K, 5.1 % too low at 2,000 K, and cp/R is 1.1 % low. The four drivers and
   re_start.py (cp = 3.62 R) use it; the 2.65 of the entry above is superseded.
 
+### 2026-11-09 19:42 to 20:35: the drivers' shared code moved into coupling/, with tests; four driver bugs fixed (experiments/2026-11-09_coupling_package)
+- What moved (one copy each, raising with the value and the fix; no snapy or pyharp import): `coupling/composition.py`
+  (molar masses from pyharp's atomic weights, q to x and back keeping each cell's tracer mass, element moles, tracer
+  totals, the gas constant 8.314462618, the start gas), `radiation.py` (+ face temperatures, the budget check,
+  `RadiationClock`), `chemistry.py` (Pa to dyn cm^-2, `require_finished`), `flow_file.py` (flows and start columns that
+  record their gas and grid), `photolysis.py` (the --jref stand-in, counted). coupling/ joined mypy (strict, as maxichem:
+  0 findings; 0 cast, 0 type: ignore; `Any` only in the 7 annotations of the deck's geometry dict) and the coverage
+  source (100 % of its 224 statements on the CPU tier).
+- Bugs fixed in the drivers (gcm_box.py, gcm_chem.py, gcm10d.py, lid_run.py, re_start.py), each with a test that fails on
+  the old form in a scratch copy (every new test was shown to fail on a broken copy: proof_of_failure/, 15 breaks):
+  1. Radiation schedule: `next_rt = tsim + rt_dt` fired every 350 s at 70 s steps; now the first step at or after each
+     multiple of rt_dt (0, 350, 630, 910, 1260, ... s; mean 300 s). The test fails on the old form (700 s for 630 s).
+  2. The budget check kept `max(worst, residual)`, which drops a NaN; now a non-finite flux or heating raises with its
+     column, and a residual above 2 nl (nl + 3) eps of the column's largest flux (the telescoping sum's round-off bound;
+     measured 2.1e-16 to 2.2e-16) raises. The test fails on the old form (no raise).
+  3. The unfinished-cell stop always advised max_steps or --dt; it now names the counted cause: cold (no solver setting
+     helps), bad input (the driver's inputs), still failing after the recovery (a shorter --dt), with the call's counts.
+     The test fails on the old message.
+  4. Flows held only hydro_w and tsim, so a pure-H2 flow loaded into the H2 and He deck read about 16 % hotter. Flows now
+     record the deck's species entry (composition, cv_R), the EOS molar mass and the geometry; a different record, other
+     block shapes or no record is refused (re-spin). re_start.py's columns record the same, with the gas read from a
+     deck YAML (`--deck`, replacing `--mu`); lid_run.py refuses another. The test fails when the record is not checked.
+  Also: face temperatures (a linear T(z) is exact; the test fails on 2 T0 - T1; re_start.py's check used that old form
+  and now uses the package's); the start gas (element ratios equal the inputs to 2e-16 on NCHO_photo, SNCHO_photo_2025
+  and CHO_photo; a network with N but no N2 is refused, where the old `if "N2" in sp` dropped N silently; the test
+  fails on that form and on an H count without H2S); --jref counts the day-side cells beyond the table (the test fails
+  when not counted). The q, x round trip and element moles through a reaction are tested to 1e-13.
+- Start ratios: O, C, N, S now the solar file's rows (6.0618e-4, 2.7759e-4, 8.1846e-5, 1.4099e-5); the drivers had C
+  2.7761e-4 and N 8.1853e-5 from VULCAN-JAX's inactive default.yaml settings. He/H 0.09692 kept (author's decision;
+  the deck's He/H is 0.0952). Start gas on NCHO_photo: H2 0.8366, He 0.1623, H2O 5.50e-4, CO 4.65e-4, N2 6.85e-5,
+  2.36105 g/mol (start_check.py).
+- Differences between the copies: kept, with a comment at each site: the spin's step (fixed --dt in the box, the CFL step
+  on the sphere) and the start noise (1e-3 m/s seed 11 against 1e-6 m/s seed 5), reasons not recorded; the box and
+  gcm_chem.py stop below the CFL step while gcm10d.py substeps (its long-run role); --jref is box-only. Removed: qsum now
+  logged by the sphere drivers too.
+- Smoke tests (smoke.sh; snapy-pr48 build, GPU1; not science runs), all as expected:
+  - box: 20 spin steps, then 5 coupled steps, dark: start call 140 steps per cell on average, none unfinished; the first
+    coupled call 14.5 steps (its h restarts at 1e-10 s), later calls 1.14-1.22; 0 negative entries; sum(q) within 2.4e-7 of 1; column check 2.1e-16; peak 16.59 GB allocated, as the
+    pre-package driver's smoke test (2026-11-09_science_pass/smoke_box.json, 16.59 GB).
+  - The old flow runs/box/spin1d.pt: refused at load with the re-spin message (exit 1).
+  - gcm10d.py at C48x100, 69 tracers: 3 spin steps, then 3 coupled steps: none unfinished, 14.3 steps in the first coupled
+    call, then 1.21-1.32, column check 2.2e-16, peak 23.27 GB allocated (27.21 GB reserved). The main checkout's
+    unchanged gcm10d.py on the same flow: the same step counts and column check, peak 22.90 GB allocated (28.77 GB
+    reserved), so the package's checks add about 0.37 GB (1.6 %) at the peak.
+  - gcm_chem.py at C24x100: 2 spin steps, then 2 coupled steps: none unfinished.
+  - gcm_box.py --jref at nx 24 on SNCHO_photo_network_2025 with jref_SNCHO25.npz (10 spin steps, 2 coupled steps): none
+    unfinished; 12,672 of the 28,800 day-side cells lie deeper than the table's deepest layer (0.945 bar) and take its
+    J, none above its top (1.05e-5 bar), printed once and logged per cycle.
+  - lid_run.py: 3 steps from rest; re_start.py made a 100-layer column for that deck; lid_run.py took it for 2 steps; the
+    old runs/re100_start.npz was refused (exit 1).
+- Open: every saved flow and start column made before this entry is refused (23 run scripts under experiments/ pass
+  --load): re-spin under the deck first. A budget error names the column within its panel, not the panel. The drivers'
+  lint (ruff finds hundreds of style findings in each, as before; pyflakes clean). re_start.py repeats the deck's g, F
+  and opacities. The C++ box twin is unchanged.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
