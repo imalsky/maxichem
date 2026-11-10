@@ -120,13 +120,13 @@ class CudaSolver(Solver):
     device : torch.device or str
         A CUDA device; a bare "cuda" means the current one.
     drift : float, optional
-        The guard's element-drift allowance, relative; ``DRIFT`` if None.
+        The guard's element-drift allowance, relative; ``DRIFT`` if None. Keyword only, as photo.
     photo : bool
         The network's photolysis branches enter the call, which then takes J.
     """
 
     def __init__(
-        self, net: VulcanNetwork, device: torch.device | str, drift: float | None = None, photo: bool = False
+        self, net: VulcanNetwork, device: torch.device | str, *, drift: float | None = None, photo: bool = False
     ) -> None:
         super().__init__(net, device, drift, photo)
         self._setup(net, photo)
@@ -265,8 +265,10 @@ class CudaSolver(Solver):
         ------
         ValueError
             If a cell was bad input or outside [``T_MIN``, ``T_MAX``] (docs/api.md): the message gives the counts,
-            the limits and the first such cell. The counts stay readable in ``fallback``.
+            the limits and the first such cell. The counts stay readable in ``fallback``; ``self.flag`` is None, as
+            after any call that raises, since the guard gives a refused cell flag 0.
         """
+        self.flag = None  # set again only when the call returns
         self._require_open()
         B = check_inputs(self.dev, self.ns, x, T, P, dt, h, rtol, atol, max_steps)
         x, T, P, dt, h = (a.contiguous() for a in (x, T, P, dt, h))
@@ -310,8 +312,8 @@ class CudaSolver(Solver):
         arguments = self._arguments("recover", values)
         launch_kernel(self._recover_kernel, grid, 32 * self.w, self.smem_rec, stream, arguments)
         self.total += self.count
-        self.flag = redo
         self._refuse(x, T, P, dt, jx, status)
+        self.flag = redo
         return LaunchResult(xo, ho, done.bool(), nok, redo)
 
     def __call__(
@@ -327,7 +329,31 @@ class CudaSolver(Solver):
         max_steps: int = DEFAULT_MAX_STEPS,
         J: torch.Tensor | None = None,
     ) -> CallResult:
-        """Run the call: ``launch`` without the flag in its result (``self.flag`` holds it)."""
+        """Advance each cell by dt: ``launch`` without the flag in its result.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Mole fractions [B, S], float64, in the network's species order.
+        T, P, dt, h : torch.Tensor
+            Temperature (K), pressure (dyn cm^-2), call length (s), starting step (s): [B], float64.
+        rtol, atol : float
+            Tolerances, keyword only; atol is in mole fraction.
+        max_steps : int
+            Tries per call, keyword only; the recovery has ``REC_STEPS`` times as many.
+        J : torch.Tensor, optional
+            Photolysis rates [B, branches] in s^-1, keyword only: required with ``photo=True``, refused without it.
+
+        Returns
+        -------
+        CallResult
+            x [B, S], h [B] (s), done [B] (bool) and accepted steps [B]; ``self.flag`` holds the per-cell flag.
+
+        Raises
+        ------
+        ValueError
+            As ``launch``, which leaves ``self.flag`` None.
+        """
         r = self.launch(x, T, P, dt, h, rtol=rtol, atol=atol, max_steps=max_steps, J=J)
         return CallResult(r.x, r.h, r.done, r.steps)
 

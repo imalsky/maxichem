@@ -100,7 +100,7 @@ class ADSolver(Solver):
     device : torch.device or str
         A CUDA device; a bare "cuda" means the current one.
     cap : int
-        Attempts stored per cell before the adjoint switches to checkpoints.
+        Attempts stored per cell before the adjoint switches to checkpoints; keyword only, as drift and photo.
     drift : float, optional
         The guard's element-drift allowance, relative; ``DRIFT`` if None.
     photo : bool
@@ -111,6 +111,7 @@ class ADSolver(Solver):
         self,
         net: VulcanNetwork,
         device: torch.device | str,
+        *,
         cap: int = CAP,
         drift: float | None = None,
         photo: bool = False,
@@ -373,8 +374,10 @@ class ADSolver(Solver):
         Raises
         ------
         ValueError
-            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``].
+            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``]; ``self.flag`` is then
+            None.
         """
+        self.flag = None  # set again only when the call returns
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         tangents = {"dx": dx, "dT": dT, "dP": dP, "ddt": ddt, "dh": dh, "dlm": dlm, "drc": drc, "dJ": dJ}
         D = self._check_tangents(tangents, B)
@@ -412,8 +415,8 @@ class ADSolver(Solver):
         values |= {**flags, "max_steps": ctypes.c_int(REC_STEPS * max_steps)}
         launch_kernel(self._kernels["jvp_rec"], nb, block, self.smem["jvp"], stream, self._arguments("jvp_rec", values))
         self.total += self.count
-        self.flag = flags["redo"]
         self._refuse(x, T, P, dt, J, values["status"])
+        self.flag = flags["redo"]
         return JvpResult(xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho)
 
     @on_device
@@ -467,8 +470,10 @@ class ADSolver(Solver):
         Raises
         ------
         ValueError
-            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``].
+            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``]; ``self.flag`` is then
+            None.
         """
+        self.flag = None  # set again only when the call returns
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         check_tensor("gx", gx, (B, self.ns), self.dev)
         gx = gx.contiguous()
@@ -512,6 +517,6 @@ class ADSolver(Solver):
         launch_kernel(self._kernels["vjp_rec"], nb, block, self.smem["vjp"], stream, self._arguments("vjp_rec", values))
         launch_kernel(self._kernels["arrh"], self.nr, ARRH_BLOCK_THREADS, 0, stream, self._arguments("arrh", values))
         self.total += self.count
-        self.flag = flags["redo"]
         self._refuse(x, T, P, dt, J, values["status"])
+        self.flag = flags["redo"]
         return VjpResult(xo, ho, done.bool(), nok, g)

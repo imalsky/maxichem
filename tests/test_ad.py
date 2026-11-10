@@ -760,10 +760,19 @@ def test_negative_x_is_refused(checks, verdict, monkeypatch):
     xneg = s.x.clone()
     xneg[0, 0] = -1e-3
     refused = r"1 cells of bad input: .*\(first: cell 0: .*min\(x\) = -0.001,"
+    flags_after_raise = []  # None after each call that raised: a refused cell's flag 0 would read as passed
     with pytest.raises(ValueError, match=refused):
         checks.ad.jvp(xneg, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    flags_after_raise.append(checks.ad.flag)
+    checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
     with pytest.raises(ValueError, match=refused):
         checks.ad.vjp(xneg, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
+    flags_after_raise.append(checks.ad.flag)
+    checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
+    with pytest.raises(ValueError, match=r"^gx: "):  # refused on the host, before any launch
+        checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c[:-1], lm=s.lm, J=s.J)
+    flags_after_raise.append(checks.ad.flag)
+    assert all(flag is None for flag in flags_after_raise)
     with monkeypatch.context() as m:  # what the kernels returned: the other cells untouched
         m.setattr(checks.ad, "_refuse", lambda *_: None)
         jb = checks.ad.jvp(xneg, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)

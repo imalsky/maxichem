@@ -31,7 +31,7 @@ keep the law of the section above. Free text goes above the first heading or pas
 numbers (two to four ranges of 10; those past the second are unused), and G / RT may jump by at most `MAX_GIBBS_JUMP` at 1000 K. VULCAN's
 `TiH.txt` fails this, so `TiSNCHO_photo_network.txt` is refused until that file is corrected.
 
-## `CudaSolver(net, device, drift=None, photo=False)`
+## `CudaSolver(net, device, *, drift=None, photo=False)`
 
 Builds the kernels on the device. `drift` is the element-drift allowance (default `DRIFT`). With `photo=True`, the network's photolysis
 branches enter the call, which then takes J. Calls run one at a time on torch's current stream.
@@ -40,7 +40,7 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 | --- | --- |
 | `solver(x, T, P, dt, h, *, rtol, atol, max_steps, J)` | Returns a `CallResult` (x, h, done, steps); raises if it refused a cell |
 | `launch(...)` | The same, as a `LaunchResult` with the per-cell flag added: 0 passed the guard, 1 recomputed and passes, 2 recomputed and still fails |
-| `flag` | The last call's per-cell flag (int32 [B]); `launch` and a call both set it |
+| `flag` | The last call's per-cell flag (int32 [B]), set when `launch` or a call returns; None before the first call and after any call that raised (a refused cell has flag 0, so a flag of a refused call would read as passed) |
 | `fallback` | The last call's counts, as a dict |
 | `check()` | The counts since construction; raises if any cell was below `T_MIN` or above `T_MAX` |
 | `export(folder)` | Writes what `cpp/maxichem.hpp` loads |
@@ -60,7 +60,9 @@ The results are named tuples, so `x, h, done, steps = solver(...)` and indexing 
 
 Interface change: `rtol`, `atol`, `max_steps` and `J` are keyword only, in the call, `launch`, `jvp` and `vjp`. A call that passed
 them by position, as `solver(x, T, P, dt, h, 1e-3, 1e-25)`, now raises TypeError: write `solver(x, T, P, dt, h, rtol=1e-3,
-atol=1e-25)`. Before, swapping the two tolerances passed every check. Unpacking and indexing the results is unchanged.
+atol=1e-25)`. Before, swapping the two tolerances passed every check. Unpacking and indexing the results is unchanged. The
+constructors' optional arguments are keyword only too: `CudaSolver(net, device, True)` had set drift to 1 with photolysis off;
+write `drift=` and `photo=` (and `cap=` for `ADSolver`).
 
 A cell is refused when it is bad input (a negative or non-finite mole fraction, |sum(x) - 1| above `X_SUM_TOL`, no mole fraction
 above 0, a non-finite T, P <= 0, a negative or non-finite dt, or a negative or non-finite J) or outside [`T_MIN`, `T_MAX`] (counted
@@ -72,7 +74,7 @@ multiplier is not a refusal there (the cell fails, flag 2). Inputs of the wrong 
 
 A non-finite h acts as dt and is counted in `nonfinite_h`. `launch` and a call both add their counts to `total`, which `check()` reads.
 
-## `ADSolver(net, device, cap=CAP, drift=None, photo=False)`
+## `ADSolver(net, device, *, cap=CAP, drift=None, photo=False)`
 
 | Member | Meaning |
 | --- | --- |
