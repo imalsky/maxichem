@@ -1940,6 +1940,15 @@ repository.
   the export cases and a jvp and vjp on 256 solar starts for the 8 other networks that load), bitwise those of 5a032ea
   dumped today: 26,401,783 numbers, 0 differ; that 5a032ea dump is bitwise the one of 2a3daee made for the previous
   entry. No result moved.
+- Corrections to this entry. The inventory's sub-counts come from coarse rules: the A, B, C, D and F lines were read,
+  the 352 layout lines were classed by rule with a sample read, and some are mislabelled (_ad_tables' 2 npart as a kind
+  code, the header generator's 32 two-bit fields per word as a warp width, the tuple-assigned _GT_* and _MAX_* constants
+  as bare), so the layout sub-counts are approximate; the class totals stand. The 16 to 144 bytes of a named Rodas3
+  weight come from one pilot that also renamed the cube root's 3, not a measured cost of the weight alone. The kernel
+  commit's "compiled kernels unchanged" holds at 101376 B and in the test forms; at 49152 B it rests on shared PTX
+  (above). Two test additions after the checks: each method setting's constexpr must read NAME_VALUE (fails on
+  H_MIN = 1e-12 written back), and the names of docs/method.md are looked up in the kernels without their comments
+  (fails on a GMAX left only in a comment).
 
 ## References (by topic)
 
