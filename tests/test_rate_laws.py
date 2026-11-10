@@ -50,6 +50,19 @@ def troe_factor(T: float, pr: float, troe: tuple[float, ...], vm11: bool) -> flo
     return float(10.0 ** (lfc / (1.0 + f * f)))
 
 
+def troe_limit(T: float, troe: tuple[float, ...]) -> tuple[float, float]:
+    """Return Troe's F at Pr -> 0 or inf and d ln F / dT (K^-1).
+
+    With z = log10 Pr, the ratio (z + c) / (N - d (z + c)) tends to -1 / d, so log10 F = log10 Fc / (1 + 1 / d^2):
+    F = Fc^s with s = d^2 / (1 + d^2), and d ln F / dT = s Fc' / Fc.
+    """
+    a, t3, t1, t2 = troe
+    terms = ((1.0 - a) * np.exp(-T / t3), a * np.exp(-T / t1), np.exp(-t2 / T))
+    fc, slope = sum(terms), -terms[0] / t3 - terms[1] / t1 + terms[2] * t2 / T**2
+    s = TROE_D**2 / (1.0 + TROE_D**2)
+    return float(fc**s), float(s * slope / fc)
+
+
 def falloff(k0: float, k_inf: float, nd: float, T: float, troe: tuple[float, ...] | None, vm11: bool = False) -> float:
     """Return k = F k0 / (1 + Pr) with Pr = k0 n_tot / k_inf (M not folded in)."""
     pr = k0 * nd / k_inf
@@ -228,8 +241,8 @@ def test_forward_rate_coefficients(gpu, tmp_path, form):
 
 
 # The falloff law at the limits of Pr, where log10(Pr) is not finite: no rate where k0 = 0 (also with k_inf = 0, a
-# Pr of 0 / 0), the high-pressure rate 0 where k_inf = 0, and the low-pressure rate where k_inf overflows; the Troe
-# factor is 1 at both ends. The product isomers sit far below, so the reverse is negligible.
+# Pr of 0 / 0), the high-pressure rate 0 where k_inf = 0, and the low-pressure rate where k_inf overflows, times
+# Troe's limit (troe_limit). The product isomers sit far below, so the reverse is negligible.
 FAR_BELOW = -2.0e5  # K
 OVERFLOW = (1.0e300, 20.0, 0.0)  # A, B, C: ln k_inf above 709 at every T of the solver's range
 LIMITS = {
@@ -263,7 +276,8 @@ def test_falloff_at_the_limits_of_pr(gpu, tmp_path, form):
         for q, f in row.bath.items():
             x0[c, net.species.index(q)] = f
         nd = float(helpers.number_density(T, P))
-        lam[c] = row.rate(T, nd) * nd  # k_f with M folded in; the reverse is negligible
+        factor = troe_limit(T, TROE)[0] if form == "troe" else 1.0
+        lam[c] = row.rate(T, nd) * factor * nd  # k_f with M folded in; the reverse is negligible
     dt = np.where(lam > 0.0, 1.0 / np.where(lam > 0.0, lam, 1.0), 1.0)
     T, P = (helpers.tensor([case[i] for case in cases], gpu) for i in (2, 3))
     inputs = (helpers.tensor(x0, gpu), T, P, helpers.tensor(dt, gpu), helpers.tensor(1e-3 * dt, gpu))
@@ -278,10 +292,11 @@ def test_falloff_at_the_limits_of_pr(gpu, tmp_path, form):
     for c, (name, row, temperature, _) in enumerate(cases):
         i = net.species.index(row.reactant)
         seen, slope = float(called[0][c, i]), float(tangent[4][c, i])
-        # x = x0 exp(-k0 n_tot t) at fixed P: d ln x / dT = -t k0 n_tot (B0 + C0 / T - 1) / T
+        # x = x0 exp(-F k0 n_tot t) at fixed P: d ln x / dT = -t F k0 n_tot ((B0 + C0 / T - 1) / T + d ln F / dT)
         want = row.start * np.exp(-lam[c] * dt[c])
-        order = FALLOFF_K0[1] + FALLOFF_K0[2] / temperature - 1.0
-        want_slope = -want * lam[c] * dt[c] * order / temperature
+        dlnf = troe_limit(temperature, TROE)[1] if form == "troe" else 0.0
+        order = (FALLOFF_K0[1] + FALLOFF_K0[2] / temperature - 1.0) / temperature + dlnf
+        want_slope = -want * lam[c] * dt[c] * order
         print(f"{form}: {name} at {temperature:g} K: x {seen:.12e} ({want:.12e}), dx/dT {slope:.6e} ({want_slope:.6e})")
         assert seen == pytest.approx(want, rel=RATE_TOLERANCE)
         assert slope == pytest.approx(want_slope, rel=LIMIT_TOLERANCE, abs=1e-30)

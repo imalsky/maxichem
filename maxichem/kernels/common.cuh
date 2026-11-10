@@ -100,15 +100,17 @@ __device__ __forceinline__ double law(const double* q, int fl, double Tc, double
   double k = exp(q[0] + q[1] * lT - q[2] * iT);
   if (fl & FL_SECOND_K0) k += exp(q[3] + q[4] * lT - q[5] * iT);
   // Falloff at the ends of Pr: k0 = 0 has no rate, also where k_inf = 0 makes Pr 0 / 0; Pr = inf (k_inf = 0) gives
-  // the high-pressure rate 0, Pr = 0 (k_inf overflowing) the low-pressure rate k0, and there the Troe factor is 1
+  // the high-pressure rate 0, Pr = 0 (k_inf overflowing) the low-pressure rate k0 times the Troe factor's limit
 #if HAS_TROE
   if (fl & FL_FALLOFF) {
     const double pr = k * nd / exp(q[6] + q[7] * lT - q[8] * iT);
     k = k > 0.0 ? k / (1.0 + pr) : 0.0;
-    if ((fl & FL_TROE) && pr > 0.0 && isfinite(pr)) {  // Troe factor (a, T3, T1, T2 = q[9..12])
+    if ((fl & FL_TROE) && k > 0.0) {  // Troe factor (a, T3, T1, T2 = q[9..12])
       const double fc = log10((1.0 - q[9]) * exp(-Tc / q[10]) + q[9] * exp(-Tc / q[11]) + exp(-q[12] / Tc));
       const double x = (fl & FL_VM11) ? log10(pr) : log10(pr) - TROE_C0 - TROE_C1 * fc;
-      const double y = (fl & FL_VM11) ? x / (TROE_N0 - TROE_N1 * fc) : x / (TROE_N0 - TROE_N1 * fc - TROE_D * x);
+      // at Pr = 0 the standard ratio tends to -1 / d, so F to Fc^(d^2 / (1 + d^2)); the VM11 one to -inf, F to 1
+      const double y = (fl & FL_VM11) ? x / (TROE_N0 - TROE_N1 * fc)
+                                      : (isfinite(x) ? x / (TROE_N0 - TROE_N1 * fc - TROE_D * x) : -1.0 / TROE_D);
       k *= exp10(fc / (1.0 + y * y));
     }
   }

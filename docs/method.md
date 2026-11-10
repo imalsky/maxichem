@@ -29,10 +29,11 @@ The reader takes the laws of VULCAN's network files (Tsai et al. 2017, 2021). Ea
 
 $F = 1$, or the Troe factor of a following `Troe [a, T3, T1, T2]` line (Venot et al. 2012, Appendix C), with
 $P_r = k_0 n_\mathrm{tot} / k_\infty$. A following `effi {...}` line multiplies k by the bulk gas's efficiency.
-At the ends of $P_r$, where $\log_{10} P_r$ is not finite, F = 1: $P_r = 0$ ($k_\infty$ overflowing) gives
-$k = k_0$, and $P_r = \infty$ ($k_\infty = 0$) gives $k = 0$, the high-pressure rate. A falloff row with $k_0 = 0$
-has no rate, also where $k_\infty = 0$ makes $P_r$ 0 / 0. (Troe's form itself tends to $F_c^{d^2 / (1 + d^2)}$,
-about $F_c^{0.019}$, as $P_r \to 0$ or $\infty$; it is taken as 1 only at the end points.)
+At the ends of $P_r$, where $\log_{10} P_r$ is not finite, F takes its limit: Troe's ratio
+$(\log_{10} P_r + c) / (N - d (\log_{10} P_r + c))$ tends to $-1/d$, so $F \to F_c^{d^2 / (1 + d^2)}$ (about
+$F_c^{0.019}$), and the special law's width gives $F \to 1$. So $P_r = 0$ ($k_\infty$ overflowing) gives $k = F k_0$,
+and $P_r = \infty$ ($k_\infty = 0$) gives $k = 0$, the high-pressure rate. A falloff row with $k_0 = 0$ has no rate,
+also where $k_\infty = 0$ makes $P_r$ 0 / 0.
 
 The special law is OH + CH3 + M -> CH3OH + M. Its fits are those of Jasper et al. (2007), in the form of Visscher & Moses
 (2011, Eqs. 13 and 14): two k0 terms, and a Troe factor without Troe's shift terms,
