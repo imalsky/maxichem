@@ -1737,7 +1737,7 @@ public reader.
   on a direction of two molecules (the reverse the larger, K < 1) and of three. The rows without Troe run again in a network
   with no Troe line, so both compiled falloff forms are seen. A direction of one molecule and M stays below 0.1 K_COLL under
   the current rule and the coming one (q = k), so that rule is not pinned. Worst error on lambda 1.0e-9 (limit 1e-6) at rtol
-  1e-9. The Troe constants are Gilbert et al. (1983) as the code cites them; the paper was not opened here.
+  1e-9. The Troe constants are those of Venot et al. (2012, Appendix C), which the code cites; the paper was not opened here. Every shipped network carries the special CH3OH law, so every one compiles the Troe form: the plain falloff arm, and fix A's edit of it, are seen only by these tests, not by the byte-identity dumps.
 - NASA-9 ranges (test_known_answers.py). CO_1 has different low and high sets with every polynomial term non-zero, the high
   b1 and b2 set so that H and S meet at 1000 K. CO_2 / CO_1 after a 1e10 s call against exp(G_1 - G_2) from the NASA-9
   polynomials written in helpers.py: at 900, 1100 and 2500 K within 4e-15 (limit 1e-12).

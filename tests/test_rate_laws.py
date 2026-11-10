@@ -19,7 +19,7 @@ from maxichem import kincuda, kincuda_ad
 pytestmark = pytest.mark.gpu
 
 K_COLL = 1e-9  # cm3 s^-1: the collision limit of docs/method.md, typed here
-# The Troe factor (Gilbert et al. 1983): c = -0.4 - 0.67 log Fc, N = 0.75 - 1.27 log Fc, d = 0.14
+# The Troe factor (Venot et al. 2012, Appendix C): c = -0.4 - 0.67 log Fc, N = 0.75 - 1.27 log Fc, d = 0.14
 TROE_C = (-0.4, -0.67)
 TROE_N = (0.75, -1.27)
 TROE_D = 0.14

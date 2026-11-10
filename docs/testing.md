@@ -39,7 +39,7 @@ reactions have zero rates: they take a network past the 32 rows of the trailing 
 ## Known answers
 
 The known-answer tests (`test_rate_laws.py`, `test_known_answers.py`, `test_order.py`) state each expected value from a
-formula written out in the test: the rate laws, the Troe factor (Gilbert et al. 1983; the special law's width as in
+formula written out in the test: the rate laws, the Troe factor (Venot et al. 2012, Appendix C; the special law's width as in
 docs/method.md), the NASA-9 polynomials (McBride et al. 2002) and closed-form solutions of small reactors. k_B, the
 standard pressure and `K_COLL` are typed in `helpers.py` and the tests, not imported from the solver, so that a wrong
 constant there fails them. Tests that need other data than `tests/data` write their network and NASA-9 files into a
