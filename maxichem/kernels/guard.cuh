@@ -106,13 +106,12 @@ __device__ int check_cell(const double* __restrict__ x0, double* xout, int done,
 // Checks of each cell after the call (one thread per cell); counts in count[1] to count[COUNT_RECOMPUTED]: a refused
 // cell by its status (bad input, T < TMIN, T > TMAX), else: non-finite state, unfinished, element drift, recompute. A
 // cell to recompute gets redo = 1 and is appended to list (the first count[COUNT_RECOMPUTED] entries; their order is
-// not deterministic, the cells' results do not depend on it). J is in every solver kernel's arguments; the guard needs
-// none.
+// not deterministic, the cells' results do not depend on it).
 extern "C" __global__ void guard(const double* __restrict__ x0, double* __restrict__ xout,
                                  const int* __restrict__ doneo, const double* __restrict__ noko,
                                  const int* __restrict__ status, const double* __restrict__ atoms,
                                  int* __restrict__ redo, int* __restrict__ list, int* __restrict__ count, int B,
-                                 double atol J_PARAM) {
+                                 double atol) {
   const int cell = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   if (cell >= B) return;
   const int s = status[cell];

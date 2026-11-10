@@ -13,8 +13,8 @@ from ._constants import (
     DRIFT,
     KERNEL_ARGUMENTS,
     PHOTOLYSIS_ARGUMENT,
+    PHOTOLYSIS_KERNEL_NAMES,
     REC_STEPS,
-    SOLVER_KERNEL_NAMES,
     T_MAX,
     T_MIN,
     X_SUM_TOL,
@@ -156,9 +156,10 @@ class Solver:
     def _arguments(self, kernel: str, values: dict[str, Any]) -> list[Any]:
         """Return a kernel's arguments, in its signature's order, from the values by parameter name.
 
-        A solver kernel takes J last only with photolysis; the derivative kernels' lists always hold it, null without.
+        The call and recovery kernels take J last only with photolysis, the guard never; the derivative kernels' lists
+        always hold it, null without.
         """
-        extra = [values[PHOTOLYSIS_ARGUMENT]] if self.nj and kernel in SOLVER_KERNEL_NAMES else []
+        extra = [values[PHOTOLYSIS_ARGUMENT]] if self.nj and kernel in PHOTOLYSIS_KERNEL_NAMES else []
         return [values[name] for name in KERNEL_ARGUMENTS[kernel]] + extra
 
     @property

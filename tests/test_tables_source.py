@@ -64,6 +64,8 @@ def test_argument_table_matches_the_kernel_signature(kernel):
     text = "".join(sources.values())
     signature = re.search(rf"(?:\s|\b){kernel}\(([^)]*)\)\s*{{", text)
     assert signature is not None
+    if kernel in _constants.SOLVER_KERNEL_NAMES:  # J last only in the kernels the callers append it to
+        assert signature.group(1).endswith(" J_PARAM") == (kernel in _constants.PHOTOLYSIS_KERNEL_NAMES)
     parameters = signature.group(1).replace(" J_PARAM", "")
     for macro in ("JVP_ARGS", "VJP_ARGS"):
         definition = re.search(rf"#define {macro}\s+((?:.*\\\n)*.*)", text)

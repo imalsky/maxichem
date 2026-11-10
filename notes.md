@@ -1717,6 +1717,10 @@ Branch sweep-fixes (one commit per fix). Scratch data of the measurements are no
   passes. Checks: CPU 66 passed; slow CPU 4 passed; parity and guard 43 passed in 219 s; known answers and order 9 passed;
   test_ad 81 passed in 1003 s; test_export_cpp 14 passed in 408 s; test_vulcan_truth 2 passed in
   205 s with both pins held.
+- The guard's J parameter was left unused by the status (clang-tidy misc-unused-parameters, seen with the kernel header
+  regenerated): removed; J is appended only to the call and recovery kernels (PHOTOLYSIS_KERNEL_NAMES). pre-commit on all
+  files passes, clang-tidy included; CPU 66 passed; parity and guard 43 passed; test_export_cpp 14 passed; valid outputs
+  bitwise the base's (12,264,022 numbers, 0 differ).
 
 ## References (by topic)
 

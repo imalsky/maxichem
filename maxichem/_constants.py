@@ -53,7 +53,7 @@ RATE_LAW_SHIFTS = {
 
 # Each kernel's parameters, in the order of its signature in kernels/. The Python and C++ callers build their launches
 # from this table; a test compares it with the kernel files. A photolysis network adds PHOTOLYSIS_ARGUMENT at the end of
-# SOLVER_KERNEL_NAMES' lists; the derivative kernels always take it, null without photolysis.
+# PHOTOLYSIS_KERNEL_NAMES' lists; the derivative kernels always take it, null without photolysis.
 _JVP_ARGUMENTS = (
     "x0", "Ta", "Pa", "dta", "hin", "lm", "rc", "dx0", "dTa", "dPa", "ddta", "dhin", "dlm", "drc", "D",
     "xout", "hout", "doneo", "noko", "status", "dxout", "dhout", "count", "B", "rtol", "atol", "max_steps", "adapt",
@@ -67,6 +67,7 @@ _VJP_ARGUMENTS = (
 )  # fmt: skip
 _RECOVERY_ARGUMENTS = ("redo", "list", "wscr", "didx", "atoms")  # what a derivative kernel's recovery adds
 SOLVER_KERNEL_NAMES = ("call", "guard", "recover")  # the kernels of SOLVER_KERNELS' file, and what the export holds
+PHOTOLYSIS_KERNEL_NAMES = ("call", "recover")  # the solver kernels that take J last with photolysis; the guard has none
 KERNEL_ARGUMENTS = {
     "call": (
         "x0", "Ta", "Pa", "dta", "hio", "xout", "doneo", "noko", "status", "count", "B", "rtol", "atol", "max_steps",

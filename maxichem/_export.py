@@ -9,6 +9,7 @@ from ._constants import (
     EXPORT_FORMAT,
     KERNEL_ARGUMENTS,
     PHOTOLYSIS_ARGUMENT,
+    PHOTOLYSIS_KERNEL_NAMES,
     REC_STEPS,
     SOLVER_KERNEL_NAMES,
     T_MAX,
@@ -65,6 +66,7 @@ def write_export(solver: "CudaSolver", folder: str | Path) -> None:
         dtype = str(a.dtype).replace("torch.", "")
         lines.append(f"table {name} {dtype} {' '.join(str(n) for n in a.shape)}")
     for kernel in SOLVER_KERNEL_NAMES:
-        names = [*KERNEL_ARGUMENTS[kernel], *([PHOTOLYSIS_ARGUMENT] if solver.nj else [])]
+        photolysis = solver.nj and kernel in PHOTOLYSIS_KERNEL_NAMES
+        names = [*KERNEL_ARGUMENTS[kernel], *([PHOTOLYSIS_ARGUMENT] if photolysis else [])]
         lines.append(f"args {kernel} {' '.join(names)}")
     (folder / "meta.txt").write_text("\n".join(lines) + "\n")
