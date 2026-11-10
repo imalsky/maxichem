@@ -48,8 +48,14 @@ def test_kernels_write_no_bare_floats_but_arithmetic():
     assert not bare, f"name these in _constants.py or beside their formula: {bare}"
 
 
+def test_kernels_take_the_method_settings_from_the_header():
+    text = "".join(_kernel_header.kernel_sources("").values())
+    for name in _kernel_header._METHOD_SETTINGS:
+        assert re.findall(rf"constexpr double {name} = (\w+);", text) == [f"{name}_VALUE"], name
+
+
 def test_settings_named_in_the_method_exist():
-    kernels = "".join(_kernel_header.kernel_sources("").values())
+    kernels = COMMENT.sub("", "".join(_kernel_header.kernel_sources("").values()))
     spans = re.findall(r"`([^`]+)`", (ROOT / "docs" / "method.md").read_text())
     names = {name for span in spans for name in SETTING_NAME.findall(span)}
     missing = sorted(n for n in names if not hasattr(_constants, n) and not re.search(rf"\b{n}\b", kernels))
