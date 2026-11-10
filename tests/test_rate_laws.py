@@ -12,8 +12,9 @@ from dataclasses import dataclass, field
 import helpers
 import numpy as np
 import pytest
+import torch
 
-from maxichem import kincuda
+from maxichem import kincuda, kincuda_ad
 
 pytestmark = pytest.mark.gpu
 
@@ -224,3 +225,63 @@ def test_forward_rate_coefficients(gpu, tmp_path, form):
     for (name, _, temperature, pressure), e, rate in zip(cases, errors, lam, strict=True):
         print(f"{form}: {name} at {temperature:g} K, {pressure:g} dyn cm^-2: lambda {rate:.6e} s^-1, error {e:.2e}")
     assert errors.max() < RATE_TOLERANCE
+
+
+# The falloff law at the limits of Pr, where log10(Pr) is not finite: no rate where k0 = 0 (also with k_inf = 0, a
+# Pr of 0 / 0), the high-pressure rate 0 where k_inf = 0, and the low-pressure rate where k_inf overflows; the Troe
+# factor is 1 at both ends. The product isomers sit far below, so the reverse is negligible.
+FAR_BELOW = -2.0e5  # K
+OVERFLOW = (1.0e300, 20.0, 0.0)  # A, B, C: ln k_inf above 709 at every T of the solver's range
+LIMITS = {
+    "k0 = 0": ("[ CO_1 + M -> CO_2 + M ] 0.0 0.0 0.0 3.16 0.5 0.0", "CO_1", "CO_2", None),
+    "k_inf underflows": ("[ CO_3 + M -> CO_4 + M ] 3.0E-14 -1.0 0.0 1.0E-300 0.0 2.0E+05", "CO_3", "CO_4", None),
+    "k0 = k_inf = 0": ("[ CO_5 + M -> CO_6 + M ] 0.0 0.0 0.0 0.0 0.0 0.0", "CO_5", "CO_6", None),
+    "k_inf overflows": (
+        "[ CO_7 + M -> CO_8 + M ] 3.0E-14 -1.0 0.0 1.0E+300 20.0 0.0",
+        "CO_7",
+        "CO_8",
+        lambda T, _: arrhenius(*FALLOFF_K0, T),
+    ),
+}
+LIMIT_TOLERANCE = 1e-5  # relative, on the T tangent against its closed form: the integrator's error at RTOL
+
+
+@pytest.mark.parametrize("form", ["troe", "plain"])
+def test_falloff_at_the_limits_of_pr(gpu, tmp_path, form):
+    troe_line = "\nTroe [0.6, 100.0, 2000.0, 5000.0]" if form == "troe" else ""
+    rows = [
+        Row("three", line + troe_line, a, b, rate or (lambda *_: 0.0), product_enthalpy=FAR_BELOW, bath={"He": 0.9})
+        for line, a, b, rate in LIMITS.values()
+    ]
+    net, _ = network(rows, tmp_path)
+    names = list(LIMITS)
+    cases = [(name, row, T, P) for name, row in zip(names, rows, strict=True) for T, P in CONDITIONS]
+    x0 = np.zeros((len(cases), len(net.species)))
+    lam = np.zeros(len(cases))
+    for c, (_, row, T, P) in enumerate(cases):
+        x0[c, net.species.index(row.reactant)] = row.start
+        for q, f in row.bath.items():
+            x0[c, net.species.index(q)] = f
+        nd = float(helpers.number_density(T, P))
+        lam[c] = row.rate(T, nd) * nd  # k_f with M folded in; the reverse is negligible
+    dt = np.where(lam > 0.0, 1.0 / np.where(lam > 0.0, lam, 1.0), 1.0)
+    T, P = (helpers.tensor([case[i] for case in cases], gpu) for i in (2, 3))
+    inputs = (helpers.tensor(x0, gpu), T, P, helpers.tensor(dt, gpu), helpers.tensor(1e-3 * dt, gpu))
+    with kincuda.CudaSolver(net, gpu) as solver:
+        called = solver(*inputs, rtol=RTOL)
+    zero = torch.zeros_like(T)
+    with kincuda_ad.ADSolver(net, gpu) as ad:
+        tangent = ad.jvp(*inputs, torch.zeros_like(inputs[0]), torch.ones_like(T), zero, zero, zero, rtol=RTOL)
+    assert bool(called[2].all())
+    for a, b in zip(called, tangent[:4], strict=True):
+        assert torch.equal(a, b)
+    for c, (name, row, temperature, _) in enumerate(cases):
+        i = net.species.index(row.reactant)
+        seen, slope = float(called[0][c, i]), float(tangent[4][c, i])
+        # x = x0 exp(-k0 n_tot t) at fixed P: d ln x / dT = -t k0 n_tot (B0 + C0 / T - 1) / T
+        want = row.start * np.exp(-lam[c] * dt[c])
+        order = FALLOFF_K0[1] + FALLOFF_K0[2] / temperature - 1.0
+        want_slope = -want * lam[c] * dt[c] * order / temperature
+        print(f"{form}: {name} at {temperature:g} K: x {seen:.12e} ({want:.12e}), dx/dT {slope:.6e} ({want_slope:.6e})")
+        assert seen == pytest.approx(want, rel=RATE_TOLERANCE)
+        assert slope == pytest.approx(want_slope, rel=LIMIT_TOLERANCE, abs=1e-30)
