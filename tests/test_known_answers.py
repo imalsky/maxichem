@@ -211,7 +211,13 @@ def test_each_photolysis_branch_takes_its_own_rate(gpu, tmp_path):
         x0 = helpers.state(net, cells, gpu, **ABSORBED)
         dt = helpers.tensor(times, gpu)
         x, _, done, _ = solver(
-            x0, helpers.full(cells, T_TEST, gpu), helpers.full(cells, P_TEST, gpu), dt, 1e-6 * dt, PHOTOLYSIS_RTOL, J=J
+            x0,
+            helpers.full(cells, T_TEST, gpu),
+            helpers.full(cells, P_TEST, gpu),
+            dt,
+            1e-6 * dt,
+            rtol=PHOTOLYSIS_RTOL,
+            J=J,
         )
     assert bool(done.all())
     for c, t in enumerate(times):
