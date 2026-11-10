@@ -150,24 +150,22 @@ __device__ __forceinline__ void rate_law_partials(const double* q, int fl, doubl
     const double rr = kl * nd / exp(q[6] + q[7] * lT - q[8] * iT);
     ph = 1.0 / (1.0 + rr);
     pc = isfinite(rr) ? rr / (1.0 + rr) : 1.0;
-    if ((fl & FL_TROE) && isfinite(rr)) {
+    if ((fl & FL_TROE) && rr > 0.0 && isfinite(rr)) {
       const double ea = (1.0 - q[9]) * exp(-Tc / q[10]), eb = q[9] * exp(-Tc / q[11]), ec = exp(-q[12] / Tc);
-      const double fc = ea + eb + ec, f = log10(fc);
+      const double fc = ea + eb + ec, f = log10(fc), z = log10(rr), nn = TROE_N0 - TROE_N1 * f;
       const bool vm = (fl & FL_VM11) != 0;
-      // Pr = 0: law()'s limit F = Fc^(d^2 / (1 + d^2)) (VM11: F = 1), with no Pr dependence
-      double sz = 0.0, tf = vm ? 0.0 : TROE_D * TROE_D / (1.0 + TROE_D * TROE_D);
-      if (rr > 0.0) {
-        const double z = log10(rr), nn = TROE_N0 - TROE_N1 * f;
-        const double x = vm ? z : z - TROE_C0 - TROE_C1 * f, dd = vm ? nn : nn - TROE_D * x, y = x / dd;
-        const double yz = nn / (dd * dd), yf = (vm ? TROE_N1 * x : TROE_N1 * x - TROE_C1 * nn) / (dd * dd);
-        const double u = 1.0 / (1.0 + y * y);
-        sz = -2.0 * f * y * yz * u * u;
-        tf = u - 2.0 * f * y * yf * u * u;
-      }
+      const double x = vm ? z : z - TROE_C0 - TROE_C1 * f, dd = vm ? nn : nn - TROE_D * x, y = x / dd;
+      const double yz = nn / (dd * dd), yf = (vm ? TROE_N1 * x : TROE_N1 * x - TROE_C1 * nn) / (dd * dd);
+      const double u = 1.0 / (1.0 + y * y), sz = -2.0 * f * y * yz * u * u, tf = u - 2.0 * f * y * yf * u * u;
       ph += sz;
       pc -= sz;
       // ln F = ln 10 log10 F; df/dT = Fc' / (Fc ln 10)
       fT = tf * (-ea / q[10] - eb / q[11] + ec * q[12] * iT * iT) / fc;
+    } else if ((fl & FL_TROE) && !(fl & FL_VM11) && rr == 0.0) {
+      // Pr = 0: law()'s limit F = Fc^s, s = d^2 / (1 + d^2), no Pr dependence; d ln F / dT = s Fc' / Fc (VM11: F = 1)
+      const double ea = (1.0 - q[9]) * exp(-Tc / q[10]), eb = q[9] * exp(-Tc / q[11]), ec = exp(-q[12] / Tc);
+      const double s = TROE_D * TROE_D / (1.0 + TROE_D * TROE_D);
+      fT = s * (-ea / q[10] - eb / q[11] + ec * q[12] * iT * iT) / (ea + eb + ec);
     }
   }
   D[0] = ph * w0;
