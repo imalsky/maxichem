@@ -318,8 +318,9 @@ void Solver::refuse(torch::Tensor const& x, torch::Tensor const& T, torch::Tenso
     m << bad << " cells of bad input: x negative or non-finite, |sum(x) - 1| above " << x_sum_tol_
       << " or no x above 0; T non-finite, P not above 0, dt negative or non-finite, or J negative or non-finite "
       << "(first: cell " << i << ": sum(x) - 1 = " << (x[i].sum() - 1.0).item<double>()
-      << ", min(x) = " << x[i].min().item<double>() << ", T = " << T[i].item<double>()
-      << " K, P = " << P[i].item<double>() << " dyn cm^-2, dt = " << dt[i].item<double>() << " s";
+      << " (added in another order than the kernel's, so it can differ in the last bits), min(x) = "
+      << x[i].min().item<double>() << ", T = " << T[i].item<double>() << " K, P = " << P[i].item<double>()
+      << " dyn cm^-2, dt = " << dt[i].item<double>() << " s";
     if (nj) m << ", min(J) = " << J[i].min().item<double>() << " s^-1";
     m << "); pass x normalized to sum 1 in float64, clamped at 0";
   }

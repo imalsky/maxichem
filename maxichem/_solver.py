@@ -196,7 +196,8 @@ class Solver:
         if n["bad_input"]:
             i = _first(refused & torch.logical_not(cold | hot))
             where = (
-                f"cell {i}: sum(x) - 1 = {float(x[i].sum() - 1.0):g}, min(x) = {float(x[i].min()):g}, "
+                f"cell {i}: sum(x) - 1 = {float(x[i].sum() - 1.0):g} (added in another order than the kernel's, so "
+                f"it can differ in the last bits), min(x) = {float(x[i].min()):g}, "
                 f"T = {float(T[i]):g} K, P = {float(P[i]):g} dyn cm^-2, dt = {float(dt[i]):g} s"
                 + ("" if J is None else f", min(J) = {float(J[i].min()):g} s^-1")
             )
