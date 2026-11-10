@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from ._constants import NO_SLOT, RATE_LAW_FLAGS, RATE_LAW_SHIFTS
-from .kinvulcan import VulcanNetwork
+from .kinvulcan import VulcanNetwork, _check_third_body
 
 MAX_SPECIES = 254  # species slots are uint8, with one value left for the padding
 NTAIL = 32  # rows of the trailing block factored in registers (at most 32)
@@ -177,6 +177,7 @@ def _reaction_tables(
         rx[j, : len(reactants[j])] = [pos[q] for q in reactants[j]]
         if j >= n_thermal:  # photolysis: no reverse side, no law (kf = J, kr = 0 in the kernel)
             continue
+        _check_third_body(r["eq"], r["kind"], f"reaction {j}")  # also a reaction built or changed by hand
         rx[j, 3 : 3 + len(products[j])] = [pos[q] for q in products[j]]
         rc[j], rf[j] = _law(r)
         rf[j] |= (

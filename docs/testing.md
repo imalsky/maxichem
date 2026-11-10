@@ -11,8 +11,8 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 
 | File | What it tests | Needs |
 | --- | --- | --- |
-| `test_reader.py` | The reader on invented networks: every rate law, atoms, refusals of reactions, repeated species, headings and NASA-9 files; on VULCAN's own files, only TiSNCHO refused | CPU; the VULCAN files: `VULCAN_THERMO`, marked slow |
-| `test_tables_source.py` | The term streams hold the stoichiometry, on a small network too; the header selects the rate-law forms; the argument table matches every kernel's signature; a hand-built reverse law, `drift`, `cap` and a constructor that fails | CPU |
+| `test_reader.py` | The reader on invented networks: every rate law, atoms, refusals of reactions (M on one side, or not as the law needs), repeated species, headings and NASA-9 files; on VULCAN's own files, only TiSNCHO refused | CPU; the VULCAN files: `VULCAN_THERMO`, marked slow |
+| `test_tables_source.py` | The term streams hold the stoichiometry, on a small network too; the header selects the rate-law forms; the argument table matches every kernel's signature; a hand-built reverse law or law whose M does not match, `drift`, `cap` and a constructor that fails | CPU |
 | `test_kernels_compile.py` | Every form of the kernels compiles, including forms no real network reaches | CPU |
 | `test_paths.py` | Data locations follow the environment; missing data give a clear error | CPU |
 | `test_coupling_radiation.py` | The column heating: none from a height-constant flux on a sphere, where the area-weighted form gives some; cooling where the net upward flux grows; each column's budget to round-off; the budget check refuses a NaN flux, naming its column, the area-weighted heating, an overflowing residual, bad thicknesses and other precisions than float64; face temperatures exact for a linear T(z); the radiation's firing steps over 200,000-500,000 steps of 70, 70.1, 0.1 and 35.7 s (periods 300 and 300.1 s) are the first step at or after each multiple, worked out in exact decimal arithmetic | CPU |
@@ -22,6 +22,7 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_coupling_photolysis.py` | The stand-in J: nearest layer in log pressure, zero at night, day-side cells above and below the table counted; a NaN or negative table, an empty table and a mask that is not boolean refused | CPU |
 | `test_packaging.py` | The built wheel holds the kernels and assembles them without the checkout | CPU, slow |
 | `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation; a small network in every kernel | GPU |
+| `test_collision_limit.py` | The collision limit on `synthetic_collision` at 3000 K, against closed forms: a capped dissociation A + M, forward and reverse, at K_COLL n_tot; the capped association where it is faster; a tie; the pair's ratio; a first-order line without M and a photolysis branch left alone; the tangent and adjoint of each capped coefficient along T at fixed P and along ln P (`tests/rate_probe.cu` runs the derivative kernels' rate arithmetic) | GPU |
 | `test_order.py` | Rodas3's order of accuracy | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
 | `test_guard.py` | The guard and recovery; refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases | GPU, data |

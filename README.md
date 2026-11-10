@@ -13,10 +13,11 @@ are compiled for the network and run over many cells at once.
 - **Physics.** Mass-action kinetics at constant T and P within a call: dx/dt = (S v - x sum(S v)) / n_tot, with
   n_tot = P / kT. Forward rates come from the network file. Reverse rates come from NASA-9 thermodynamics. Elements are
   conserved.
-- **Collision limit.** No thermal rate may exceed 1e-9 cm^3 s^-1 as a two-body rate (three-body rates times n_tot).
-  When the faster direction of a reaction is above it, both directions are scaled down by the same factor, so the
-  equilibrium is kept. It acts where a fit is used far outside its range, for example the reverse of CH + M -> C + H + M
-  below about 600 K. VULCAN-JAX and the truth data use the same limit.
+- **Collision limit.** No thermal rate may exceed 1e-9 cm^3 s^-1 as a bimolecular-equivalent rate, with M counted as a
+  collision partner (a dissociation A + M counts with its rate coefficient k). When the faster direction of a reaction
+  is above it, both directions are scaled down by the same factor, so the equilibrium is kept. It acts where a fit is
+  used far outside its range, for example the reverse of CH + M -> C + H + M below about 600 K. VULCAN-JAX uses the
+  same rule; the truth data were made with its earlier form, which left out dissociations (notes.md).
 - **Photolysis.** Each photolysis branch is a first-order reaction with a rate J (s^-1) given per cell by the caller,
   for example from the GCM's radiative transfer. maxichem does not compute actinic fluxes. At night, J = 0.
 - **Integrator.** Rodas3 (order 3, L-stable) with the exact Jacobian and a sparse LU factorization. Adaptive steps

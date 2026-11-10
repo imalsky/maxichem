@@ -22,6 +22,7 @@ NASA_SPLIT_T = 1000.0  # K: where the NASA-9 fits change range; the kernels get 
 # range).
 MAX_GIBBS_JUMP = 1.0e-5
 TROE_FIELDS = 4  # the a, T3, T1, T2 of a "Troe [...]" line
+_THREE_BODY_KINDS = (3, 5, 6)  # the laws with M: falloff, low-pressure only, special
 NASA_FILE_SIZES = (20, 30, 40)  # numbers in a NASA-9 file: two to four ranges of 10 (those past the second are unused)
 
 
@@ -108,6 +109,21 @@ def _photolysis_branch(line: str, where: str, photo: list[dict[str, Any]]) -> di
     return {"eq": equation, "names": (lhs, rhs), "absorber": fields[0], "branch": branch}
 
 
+def _check_third_body(equation: str, kind: int, where: str) -> None:
+    """Refuse a thermal reaction whose M does not match its law: both sides for a three-body law, neither otherwise.
+
+    The tables hold one three-body flag per reaction, from its law, which folds n_tot into both directions and which the
+    collision limit counts as a collision partner on both sides.
+    """
+    lhs, rhs = (side.split("+") for side in equation.split("->"))
+    on_side = ["M" in [q.strip() for q in side] for side in (lhs, rhs)]
+    three_body = kind in _THREE_BODY_KINDS
+    if on_side != [three_body, three_body]:
+        sides = " and ".join(s for s, m in zip(("reactant", "product"), on_side, strict=True) if m) or "no"
+        need = "on both sides (a three-body law)" if three_body else "on neither side (a two-body law)"
+        raise ValueError(f"{where}: M on {sides} side, but this reaction's law needs M {need}: {equation}")
+
+
 def _thermal_reaction(line: str, where: str, section: str) -> dict[str, Any]:
     """Return one thermal reaction with its rate law, from the law of its section."""
     equation, fields = _reaction_line(line, where)
@@ -131,6 +147,7 @@ def _thermal_reaction(line: str, where: str, section: str) -> dict[str, Any]:
             raise ValueError(f"unknown special reaction {equation}")
         reaction["kind"] = 6
         reaction.update(SPECIAL[equation.replace(" ", "")])
+    _check_third_body(equation, reaction["kind"], where)
     return reaction
 
 

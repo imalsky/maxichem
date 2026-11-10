@@ -119,16 +119,18 @@ __device__ __forceinline__ double law(const double* q, int fl, double Tc, double
   return k;
 }
 
-// A direction's bimolecular-equivalent rate: k (M folded in) times nd^(molecules - 2), for two or three molecules.
-__device__ __forceinline__ double bimolecular_rate(int molecules, double k, double nd) {
-  return molecules >= 2 ? k * (molecules == 3 ? nd : 1.0) : 0.0;
+// A direction's bimolecular-equivalent rate: k (M folded in, three_body) times nd^(molecules - 2), where molecules plus
+// M make at least two collision partners: k / nd for a dissociation A + M, 0 for one molecule without M.
+__device__ __forceinline__ double bimolecular_rate(int molecules, bool three_body, double k, double nd) {
+  return molecules >= 2 ? k * (molecules == 3 ? nd : 1.0) : (three_body ? k / nd : 0.0);
 }
 
 // The collision limit: q, the larger of the two directions' bimolecular-equivalent rates; if q > K_COLL both directions
 // take K_COLL / q.
 __device__ __forceinline__ void collision_limit(int fl, double& kf, double& kr, double nd) {
   const int mf = (fl >> FL_FORWARD_SHIFT) & 3, mr = (fl >> FL_REVERSE_SHIFT) & 3;
-  const double q = fmax(bimolecular_rate(mf, kf, nd), bimolecular_rate(mr, kr, nd));
+  const bool three_body = (fl & FL_THREE_BODY) != 0;
+  const double q = fmax(bimolecular_rate(mf, three_body, kf, nd), bimolecular_rate(mr, three_body, kr, nd));
   if (q > KCOLL) {
     const double c = KCOLL / q;
     kf *= c;

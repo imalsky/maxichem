@@ -70,6 +70,10 @@ def test_reactions_conserve_atoms(read_network, stem):
         ("Troe [0.6, 100.0, 2000.0, 5000.0]", "Troe [0.6, 100.0", "cannot be read"),
         ("effi {'H2': 2.5,", "effi {'H2': 2.5", "cannot be read"),
         ("]  H2O  1", "]  H2O  one", "must be an integer"),
+        ("[ O + O + M -> O2 + M ", "[ O + O + M -> O2 ", r"bad.txt:\d+: M on reactant side, .* on both sides"),
+        ("[ H + H + M -> H2 + M ", "[ H + H -> H2 + M ", r"bad.txt:\d+: M on product side, .* on both sides"),
+        ("[ H + H + M -> H2 + M ", "[ H + H -> H2 ", "M on no side, .* on both sides"),
+        ("[ H + OH -> H2 + O ", "[ H + OH + M -> H2 + O + M ", "M on reactant and product side, .* on neither side"),
     ],
 )
 def test_refuses_a_bad_network(tmp_path, network_text, nasa_dir, old, new, message):

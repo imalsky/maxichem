@@ -44,6 +44,20 @@ def test_hand_built_reverse_law_is_refused(read_network):
         _tables.tables(net, 2)
 
 
+def test_hand_built_law_whose_m_does_not_match_is_refused(read_network):
+    # The tables fold n_tot into both directions by the law alone, and the collision limit counts M on both sides.
+    net = read_network()
+    j = next(j for j, r in enumerate(net.reac) if r["eq"].replace(" ", "") == "O+O+M->O2+M")
+    net.reac[j] |= {"kind": 2, "A": 1e-30, "B": 0.0, "C": 0.0}
+    with pytest.raises(ValueError, match=f"reaction {j}: M on reactant and product side, .* on neither side"):
+        _tables.tables(net, 2)
+    net = read_network()
+    j = next(j for j, r in enumerate(net.reac) if r["eq"].replace(" ", "") == "H+OH->H2+O")
+    net.reac[j] |= {"kind": 5, "A0": 1e-30, "B0": 0.0, "C0": 0.0}
+    with pytest.raises(ValueError, match=f"reaction {j}: M on no side, .* on both sides"):
+        _tables.tables(net, 2)
+
+
 def test_rate_law_table_takes_the_network_forms(read_network):
     assert _tables.tables(read_network("synthetic_falloff"), 2)["law"] == []
     tab = _tables.tables(read_network(), 2)
