@@ -1,13 +1,18 @@
 """The solver against answers known without the solver: decays, equilibria, photolysis branches and step control."""
 
+from fractions import Fraction
+from pathlib import Path
+
 import helpers
 import numpy as np
 import pytest
 import torch
 
-from maxichem import kincuda, kincuda_ad, kinvulcan
+from maxichem import kincuda, kincuda_ad
 
 pytestmark = pytest.mark.gpu
+
+NASA9_DATA = Path(__file__).parent / "data" / "NASA9"
 
 T_TEST = 1500.0  # K
 P_TEST = 1e6  # dyn cm^-2
@@ -44,10 +49,11 @@ def test_photolysis_decay_at_constant_pressure(read_network, gpu):
     assert np.allclose(x[:, net.species.index("N_1")].cpu().numpy(), b_answer, rtol=DECAY_TOLERANCE, atol=0.0)
 
 
-def _gibbs(net, name, T):
-    """Return G / RT of a species of the invented data: constant Cp / R in both ranges."""
-    cp, h, b2 = net.lo[net.species.index(name)][[2, 7, 8]]
-    return cp + h / T - (cp * np.log(T) + b2)
+def _gibbs(name, T):
+    """Return G / RT of a species of tests/data, from its NASA-9 file read here: the range below or above 1000 K."""
+    numbers = np.loadtxt(NASA9_DATA / f"{name}.txt").flatten()
+    first = 0 if T < NASA_SPLIT else 10  # each range: a1..a7, an unused entry, b1, b2
+    return helpers.gibbs_rt(numbers[[first + i for i in (0, 1, 2, 3, 4, 5, 6, 8, 9)]], T)
 
 
 @pytest.mark.parametrize("stem", ["synthetic_falloff", "synthetic_small"])
@@ -67,7 +73,7 @@ def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T, stem):
         )
     assert bool(done.all())
     fractions = {q: float(x[0, net.species.index(q)]) for q in ("H", "H2", "OH", "O", "H2O")}
-    g = {q: _gibbs(net, q, T) for q in fractions}
+    g = {q: _gibbs(q, T) for q in fractions}
     # H + OH = H2 + O and H + H2O = OH + H2: no change of moles, so the ratio of mole fractions is K
     k1 = np.exp(-(g["H2"] + g["O"] - g["H"] - g["OH"]))
     k2 = np.exp(-(g["OH"] + g["H2"] - g["H"] - g["H2O"]))
@@ -78,7 +84,7 @@ def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T, stem):
         k2, rel=EQUILIBRIUM_TOLERANCE
     )
     # H + H + M = H2 + M: one mole fewer. K_p = (p_H2 / P0) / (p_H / P0)^2 and p_i = x_i P: x_H2 / x_H^2 = K_p P / P0
-    k3 = np.exp(-(g["H2"] - 2.0 * g["H"])) * P_EQUILIBRIUM / kinvulcan.P0
+    k3 = np.exp(-(g["H2"] - 2.0 * g["H"])) * P_EQUILIBRIUM / helpers.STANDARD_PRESSURE
     assert fractions["H2"] / fractions["H"] ** 2 == pytest.approx(k3, rel=EQUILIBRIUM_TOLERANCE)
     shares = (x @ torch.as_tensor(net.atoms, device=gpu)).sum(0)
     assert (
@@ -242,6 +248,60 @@ def test_a_rejected_first_try_is_retried(read_network, gpu):
     assert float(x[0, net.species.index("N_1")]) == pytest.approx(b_answer, rel=DECAY_TOLERANCE)
     assert unfinished[0] == 1  # at max_steps = the accepted steps: at least one try was rejected
     assert unfinished[-1] == 0
+
+
+# The test above proves a rejection, but its first trial is negative (N_A = -712/7203 at J dt = 5), so positivity
+# alone rejects it. Here the first trial is positive and only its error estimate rejects it.
+FIRST_TRY_DECAYS = Fraction(1, 10)  # J dt
+ACCEPT_ANY_ERROR = 1e6  # rtol: a positive trial passes
+
+
+def _first_trial(z: Fraction) -> tuple[list[Fraction], list[Fraction]]:
+    """Return N' and K4 of one Rodas3 step (docs/method.md) of A -> 2 B from N = (1, 0) at J h = z, exactly.
+
+    Units of h = 1, so J = z. W = I / (gamma h) - J_N with J_N = [[-J, 0], [2 J, 0]], lower triangular.
+    """
+    w = (1 / (Fraction(1, 2)) + z, -2 * z, 1 / Fraction(1, 2))  # W_AA, W_BA, W_BB
+
+    def solve(b: list[Fraction]) -> list[Fraction]:
+        a = b[0] / w[0]
+        return [a, (b[1] - w[1] * a) / w[2]]
+
+    def f(y: list[Fraction]) -> list[Fraction]:
+        return [-z * y[0], 2 * z * y[0]]
+
+    n = [Fraction(1), Fraction(0)]
+    k1 = solve(f(n))
+    k2 = solve([f(n)[i] + 4 * k1[i] for i in range(2)])
+    y3 = [n[i] + 2 * k1[i] for i in range(2)]
+    k3 = solve([f(y3)[i] + k1[i] - k2[i] for i in range(2)])
+    y4 = [y3[i] + k3[i] for i in range(2)]
+    k4 = solve([f(y4)[i] + k1[i] - k2[i] - Fraction(8, 3) * k3[i] for i in range(2)])
+    return [y4[i] + k4[i] for i in range(2)], k4
+
+
+@pytest.mark.parametrize("norm", ["root mean square", "largest"])
+def test_a_positive_first_try_is_rejected_for_its_error(read_network, gpu, norm):
+    # err_i = K4_i / (atol + rtol max(|N_i|, |N'_i|)); a first try takes the larger of the RMS over all species and the
+    # largest |err_i| (docs/method.md). rtol puts the RMS above 1, or the largest alone above 1.
+    net = read_network("synthetic_decay")
+    new, k4 = _first_trial(FIRST_TRY_DECAYS)
+    assert min(new) > 0
+    scaled = np.array([float(abs(k4[0])), float(abs(k4[1]) / new[1])])  # err_i times rtol, atol negligible
+    rms, largest = np.sqrt((scaled**2).sum() / len(net.species)), scaled.max()
+    rtol = rms / 10.0 if norm == "root mean square" else float(np.sqrt(rms * largest))
+    print(f"{norm}: rtol {rtol:.3e}, err RMS {rms / rtol:.3f}, largest {largest / rtol:.3f}")
+    J = torch.full((1, len(net.photo)), J_TEST, dtype=torch.float64, device=gpu)
+    x0 = helpers.state(net, 1, gpu, N2_1=1.0)
+    T, P = helpers.full(1, T_TEST, gpu), helpers.full(1, P_TEST, gpu)
+    dt = helpers.full(1, float(FIRST_TRY_DECAYS) / J_TEST, gpu)
+    with kincuda.CudaSolver(net, gpu, photo=True) as solver:
+        solver.launch(x0, T, P, dt, dt.clone(), rtol=ACCEPT_ANY_ERROR, max_steps=1, J=J)
+        positive = solver.fallback["unfinished"]
+        solver.launch(x0, T, P, dt, dt.clone(), rtol=rtol, max_steps=1, J=J)
+        rejected = solver.fallback["unfinished"]
+    assert positive == 0  # the one try passes when no error is too large: it is not refused for a negative state
+    assert rejected == 1
 
 
 RECOMBINATION_RTOL = 1e-8
