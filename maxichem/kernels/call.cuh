@@ -1,8 +1,8 @@
 // The call kernel: every cell's rates, Rodas3 steps and step control in one launch.
 
 // one block per SM is enough: without that bound ptxas may cap the registers below what the block size allows and spill
+// size-limit-ok: arguments bound by name (KERNEL_ARGUMENTS); split, it cost 1.1 % (0.654 to 0.661 us with photolysis)
 extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
-    // size-limit-ok: split into forced-inline helpers it cost 1.1 % (lit 0.654 to 0.661 us per cell-call), bits equal
     call(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
          const double* __restrict__ dta, double* __restrict__ hio, double* __restrict__ xout, int* __restrict__ doneo,
          double* __restrict__ noko, int* __restrict__ status, int* __restrict__ count, int B, double rtol, double atol,

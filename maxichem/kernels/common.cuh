@@ -181,6 +181,7 @@ __device__ __forceinline__ void rate_pair(int r, int fl, const double* __restric
 }
 
 // Rate coefficients of a cell across the cell's lanes (grp: its named barrier); photolysis rows kf = J, kr = 0.
+// size-limit-ok: 13: three outputs, T and nd, the rate tables and J, the cell and its lanes
 __device__ __forceinline__ void cell_rates(double* g, double* kf, double* kr, double Tc, double nd,
                                            const double* __restrict__ rc, const int* __restrict__ rf,
                                            const double* __restrict__ nasa, const Tab& tab,
@@ -290,6 +291,7 @@ __device__ __forceinline__ void gather_row(int i, const double* part, double* F,
 
 // F = (n_tot / nd) S v(n) at the state Y (n = nd Y / n_tot, n_tot = sum Y); u0 = S v / nd unless null; returns n_tot.
 // Every warp of the cell sums n_tot itself; the rest is spread over the cell's NL lanes (cl).
+// size-limit-ok: 15; __noinline__, so a struct by reference would have to sit in local memory
 __device__ __noinline__ double rhs(const double* Y, double* F, double* u0, double* n, double* v, double* part,
                                    const double* kf, const double* kr, double nd, const Tab& tab,
                                    const unsigned* __restrict__ sst, int sround, int lane, int cl, int grp) {

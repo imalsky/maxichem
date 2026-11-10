@@ -3,12 +3,14 @@
 
 The limits are the constants below.
 
-Python: module docstring, file and function length. Python complexity is Ruff's C901.
-C, C++ and CUDA: file and function length, and complexity by a scan with comments and strings removed.
-It counts branches as C901 does (if, for, while, case, catch), not boolean operators.
+Python: module docstring, file and function length. Python complexity and arguments are Ruff's C901 and PLR0913.
+C, C++ and CUDA: file and function length, complexity and arguments by a scan with comments and strings removed.
+It counts branches as C901 does (if, for, while, case, catch), not boolean operators, and the parameters with the
+object-like macros of the file's folder expanded (the definition with the most parameters, where there are two).
 
 An exception needs a one-line reason beside it: a comment holding ``size-limit-ok: <reason>`` on the line of the
-function or the line above it, or in the first lines of the file for a file or module docstring limit.
+function or the line above it (in C, the line above the declaration's first line, so above ``template`` or ``extern``),
+or in the first lines of the file for a file or module docstring limit.
 Takes files as arguments, or every tracked file with none. Skips experiments/. Exits 1 when a limit is broken.
 """
 
@@ -25,6 +27,7 @@ MAX_FILE_LINES = 800
 # Not 80: that invited mechanical splits, and a step that reads as one ordered operation stays whole.
 MAX_FUNCTION_LINES = 150
 MAX_COMPLEXITY = 15
+MAX_ARGUMENTS = 12
 FILE_EXCEPTION_LINES = 5  # a file-wide exception must sit this close to the top, where a reader sees it
 
 PYTHON_SUFFIXES = {".py", ".pyi"}
@@ -38,6 +41,8 @@ C_BRANCH = re.compile(r"\b(?:if|for|while|case|catch)\b")
 C_SIGNATURE_END = re.compile(r"\)\s*(?:(?:const|noexcept|override|final|mutable)\s*)*(?:->[^;{}()]*)?$")
 C_CONTROL_WORDS = {"if", "for", "while", "switch", "catch", "sizeof", "return"}
 C_WORD_BEFORE = re.compile(r"([A-Za-z_~][\w:~]*)\s*$")
+C_OBJECT_MACRO = re.compile(r"^[ \t]*#[ \t]*define[ \t]+(\w+)(?![\w(])[ \t]*((?:[^\n]*\\\n)*[^\n]*)", re.MULTILINE)
+C_DECLARATION_START = re.compile(r"[;{}]")  # what ends the code before a declaration
 
 
 def _blank(match: re.Match[str]) -> str:
@@ -96,8 +101,8 @@ def check_python(path: Path, text: str) -> list[str]:
     return failures
 
 
-def _function_name(head: str) -> str | None:
-    """Return the name of the function whose signature ends this text, or None if it is not a function.
+def _signature(head: str) -> tuple[str, int, int] | None:
+    """Return the name and parameter list of the function whose signature ends this text, or None if it is not one.
 
     Parameters
     ----------
@@ -106,8 +111,9 @@ def _function_name(head: str) -> str | None:
 
     Returns
     -------
-    str or None
-        The word before the parameter list, unless that word is a control keyword.
+    tuple or None
+        The word before the parameter list, unless that word is a control keyword, and the positions of the list's
+        opening and closing parentheses.
     """
     match = C_SIGNATURE_END.search(head)
     if match is None:
@@ -120,11 +126,13 @@ def _function_name(head: str) -> str | None:
             depth -= 1
             if depth == 0:
                 word = C_WORD_BEFORE.search(head[:position])
-                return None if word is None or word.group(1) in C_CONTROL_WORDS else word.group(1)
+                if word is None or word.group(1) in C_CONTROL_WORDS:
+                    return None
+                return word.group(1), position, match.start()
     return None
 
 
-def c_functions(code: str) -> list[tuple[str, int, int]]:
+def c_functions(code: str) -> list[tuple[str, int, int, int, str]]:
     """Find the outermost function bodies in C-family code with comments, strings and macros removed.
 
     Parameters
@@ -135,28 +143,81 @@ def c_functions(code: str) -> list[tuple[str, int, int]]:
     Returns
     -------
     list of tuple
-        Name, position of the name's line start and position after the closing brace, per function.
+        Name, position of the declaration's first line, position of the name's line, position after the closing
+        brace and the parameter list's text, per function.
     """
     functions = []
     depth = 0
-    current: tuple[str, int, int] | None = None
+    current: tuple[str, int, int, int, str] | None = None
     for match in re.finditer(r"[{}]", code):
         if match.group() == "{":
             if current is None:
-                name = _function_name(code[: match.start()])
-                if name is not None:
-                    start = code.rfind(name, 0, match.start())
-                    current = (name, code.rfind("\n", 0, start) + 1, depth)
+                signature = _signature(code[: match.start()])
+                if signature is not None:
+                    name, opening, closing = signature
+                    ends = [m.end() for m in C_DECLARATION_START.finditer(code, 0, opening)]
+                    head = code[ends[-1] if ends else 0 : opening]
+                    first = opening - len(head.lstrip())
+                    line = code.rfind("\n", 0, code.rfind(name, 0, opening)) + 1
+                    current = (name, code.rfind("\n", 0, first) + 1, line, depth, code[opening + 1 : closing])
             depth += 1
         else:
             depth -= 1
-            if current is not None and depth == current[2]:
-                functions.append((current[0], current[1], match.end()))
+            if current is not None and depth == current[3]:
+                functions.append((current[0], current[1], current[2], match.end(), current[4]))
                 current = None
     return functions
 
 
-def check_c_family(path: Path, text: str) -> list[str]:
+def c_macros(texts: list[str]) -> dict[str, list[str]]:
+    """Return the bodies of every object-like macro the texts define, by name, continuation lines joined."""
+    macros: dict[str, list[str]] = {}
+    for text in texts:
+        for name, body in C_OBJECT_MACRO.findall(C_NOISE.sub(_blank, text)):
+            macros.setdefault(name, []).append(body.replace("\\\n", " "))
+    return macros
+
+
+def _top_level_commas(text: str) -> int:
+    """Return the commas outside any parentheses, brackets or braces."""
+    depth, commas = 0, 0
+    for character in text:
+        depth += (character in "([{") - (character in ")]}")
+        commas += character == "," and depth == 0
+    return commas
+
+
+def c_parameter_count(parameters: str, macros: dict[str, list[str]]) -> int:
+    """Return the parameters of a list, its object-like macros expanded (the definition with the most, of several).
+
+    Parameters
+    ----------
+    parameters : str
+        The text between a function's parentheses.
+    macros : dict
+        Macro bodies by name (``c_macros``).
+
+    Returns
+    -------
+    int
+        The number of parameters; 0 for ``()`` and ``(void)``.
+    """
+    for _ in range(len(macros) + 1):  # each pass expands one level of nesting
+        expanded = re.sub(
+            r"\b\w+\b",
+            lambda m: max(macros[m.group()], key=_top_level_commas) if m.group() in macros else m.group(),
+            parameters,
+        )
+        if expanded == parameters:
+            break
+        parameters = expanded
+    text = parameters.strip()
+    if not text or text == "void":
+        return 0
+    return _top_level_commas(text) + 1
+
+
+def check_c_family(path: Path, text: str, macros: dict[str, list[str]] | None = None) -> list[str]:
     """Check one C, C++ or CUDA file.
 
     Parameters
@@ -165,6 +226,8 @@ def check_c_family(path: Path, text: str) -> list[str]:
         The file, used in messages.
     text : str
         Its contents.
+    macros : dict, optional
+        Object-like macros its parameter lists may use (``c_macros``); the file's own if None.
 
     Returns
     -------
@@ -173,18 +236,23 @@ def check_c_family(path: Path, text: str) -> list[str]:
     """
     lines = text.splitlines()
     failures = _check_file_length(path, lines)
+    macros = c_macros([text]) if macros is None else macros
     code = C_PREPROCESSOR.sub(_blank, C_NOISE.sub(_blank, text))
-    for name, start, end in c_functions(code):
+    for name, start, name_start, end, parameters in c_functions(code):
         first_line = code.count("\n", 0, start) + 1
-        if _has_exception(lines, first_line):
+        name_line = code.count("\n", 0, name_start) + 1
+        if any(_has_exception(lines, line) for line in range(first_line, name_line + 1)):
             continue
-        body = code[start:end]
+        body = code[name_start:end]
         length = body.count("\n") + 1
         complexity = 1 + len(C_BRANCH.findall(body))
+        arguments = c_parameter_count(parameters, macros)
         if length > MAX_FUNCTION_LINES:
             failures.append(f"{path}:{first_line}: {name} has {length} lines, limit {MAX_FUNCTION_LINES}")
         if complexity > MAX_COMPLEXITY:
             failures.append(f"{path}:{first_line}: {name} has complexity {complexity}, limit {MAX_COMPLEXITY}")
+        if arguments > MAX_ARGUMENTS:
+            failures.append(f"{path}:{first_line}: {name} has {arguments} arguments, limit {MAX_ARGUMENTS}")
     return failures
 
 
@@ -215,7 +283,9 @@ def main(arguments: list[str]) -> int:
         if path.suffix in PYTHON_SUFFIXES:
             failures += check_python(path, path.read_text(encoding="utf-8"))
         elif path.suffix in C_FAMILY_SUFFIXES:
-            failures += check_c_family(path, path.read_text(encoding="utf-8"))
+            folder = sorted(p for p in path.parent.iterdir() if p.suffix in C_FAMILY_SUFFIXES)
+            macros = c_macros([p.read_text(encoding="utf-8") for p in folder])
+            failures += check_c_family(path, path.read_text(encoding="utf-8"), macros)
     for failure in failures:
         print(failure)
     return 1 if failures else 0

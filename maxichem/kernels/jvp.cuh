@@ -210,8 +210,8 @@ __device__ __forceinline__ double tangent_step(double* work, const double (&c)[N
 // first count[COUNT_RECOMPUTED] cells of list, the recover kernel's attempts (dense W in wscr, one NS x NS per warp;
 // max_steps = the recovery's tries; COUNT_RECOVERY_QUEUE), each result then tested as the recover kernel tests it: redo
 // = 1 and COUNT_RECOVERED, or redo = 2, COUNT_STILL_FAILED and NaN tangents.
+// size-limit-ok: the entries' arguments; its parts share one cell's state and each direction's tangents
 template <bool DN>
-// size-limit-ok: the parts left share one cell's state and each direction's tangents, which a split would pass by hand
 __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, double* wscr,
                                           const u16* __restrict__ didx, const double* __restrict__ atoms) {
   extern __shared__ double smem[];
@@ -340,12 +340,14 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
   }
 }
 
+// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(32 * WPB) jvp(JVP_ARGS) {
   jvp_cells<false>(JVP_PASS, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // After jvp and the guard: the listed cells redone on the recovery's path with their tangents (redo, list: the
 // guard's).
+// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(32 * WPB)
     jvp_rec(JVP_ARGS, int* __restrict__ redo, const int* __restrict__ list, double* __restrict__ wscr,
             const u16* __restrict__ didx, const double* __restrict__ atoms) {

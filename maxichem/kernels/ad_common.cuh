@@ -52,6 +52,7 @@ __device__ __forceinline__ void screen_lm(const double* lmc, int lane, double& p
 // The call kernel's rhs on one warp, kept apart because it has warp barriers where rhs has the cell's named barrier;
 // the primal test in test_ad.py holds the two to the same bits. F = (n_tot / nd) S v(n) at Y, u0 = S v / nd unless
 // null; each lane walks W of the call kernel's NL lane streams, so every sum is the call kernel's. Returns n_tot.
+// size-limit-ok: 13, rhs's list; __noinline__, so a struct by reference would have to sit in local memory
 __device__ __noinline__ double rhs1(const double* Y, double* F, double* u0, double* n, double* v, double* part,
                                     const double* kf, const double* kr, double nd, const Tab& tab,
                                     const unsigned* __restrict__ sst, int sround, int lane) {
@@ -140,6 +141,7 @@ __device__ __forceinline__ double collision_limit_nd_weight(int fl, double wA, d
 // Rate coefficients of the cell (the call kernel's code: the law, the reverse from Gibbs, the collision limit;
 // photolysis rows kf = J, kr = 0), times exp(lm) when per-cell log multipliers are given; cw[r], cw[NR + r] = the
 // collision limit's weights (collision_limit_weights).
+// size-limit-ok: 13: cell_rates' list on one warp, with the log multipliers and the limit weights
 __device__ __forceinline__ void rates(double* work, double* kf, double* kr, double* cw, double Tc, double nd,
                                       const double* lmc, const double* Jc, const double* __restrict__ rc,
                                       const int* __restrict__ rf, const double* __restrict__ nasa, const Tab& tab,
@@ -237,6 +239,7 @@ __device__ __forceinline__ void gibbs_dT(double* g, double Tc, const double* __r
 // table (drc [R, 9], may be null); kf, kr, cw: the cell's rates and collision-limit weights (rates()). With A = ln of
 // the pair's forward coefficient before the limit, G = ln kr - A, L = ln nd, the limit adds
 // d ln c = -(wA dA + wG dG + wE dL) to both directions (wE = (wA - wG) [forward of 3 molecules] + wG [reverse of 3]).
+// size-limit-ok: 18: rates()'s inputs, the cell's rates and weights, and five input tangents, each optional
 __device__ __forceinline__ void rates_tan(double* work, double* dk, double Tc, double nd, double dTc, double dlnd,
                                           const double* lmc, const double* dlmc, const double* dJc,
                                           const double* __restrict__ rc, const double* drc, const int* __restrict__ rf,

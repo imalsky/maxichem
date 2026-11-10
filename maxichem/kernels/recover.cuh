@@ -226,6 +226,7 @@ __device__ __forceinline__ void dense_stages(const CellArrays& a, int* pr, doubl
 // Jacobian streams, stages and step control, with the dense W = I / (gamma h) - Jn - w 1^T factored by dense_lu on the
 // first warp; writes the result over the call's (xout, hio, doneo, noko), sets redo to 1 (the result passes the guard's
 // test) or 2 and counts it in COUNT_RECOVERED or COUNT_STILL_FAILED. Returns at once when the list is empty.
+// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(NL, 1)
     recover(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
             const double* __restrict__ dta, const double* __restrict__ hin, double* xout, double* hio, int* doneo,

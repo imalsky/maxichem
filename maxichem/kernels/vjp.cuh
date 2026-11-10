@@ -207,6 +207,7 @@ __device__ __forceinline__ void rhs_vjp(double* work, const double* Y, const dou
 }
 
 // Stages' concentration derivatives and the rho of rhs_vjp_n: the reverse terms of one reaction r, added to its sums.
+// size-limit-ok: 16: six of them are the caller's per-lane sums, by reference, which stay in registers over the loop
 __device__ __forceinline__ void reverse_reaction(int r, const double* work, double* lbk, double* rho, const double* n,
                                                  const double (&rt)[4], double g, const double* kf, const double* kr,
                                                  double (&ff)[4], double (&ffd)[4], double (&tl)[4], double (&tdl)[4],
@@ -505,6 +506,7 @@ __device__ __forceinline__ void error_cotangent(const double* N, const double* Y
 
 // The rate cotangents lbk -> the log multipliers glm, J, gA (the forward coefficients before the limit, for arrh), and
 // this lane's parts of the cotangents of T (gTl) and ln nd (gnl).
+// size-limit-ok: 18: rates()'s inputs, the cotangents in, and an output for each input the rates depend on
 __device__ __forceinline__ void rate_cotangents(double* work, const double* lbk, const double* kf, const double* cw,
                                                 const double* lmc, const double* __restrict__ rc,
                                                 const int* __restrict__ rf, const double* __restrict__ nasa,
@@ -542,8 +544,8 @@ __device__ __forceinline__ void rate_cotangents(double* work, const double* lbk,
 // recover kernel's attempts (dense W in wscr; max_steps = the recovery's tries; CAPR stored attempts;
 // COUNT_RECOVERY_QUEUE); its result tested as the recover kernel tests it: redo = 1 and COUNT_RECOVERED, or redo = 2,
 // COUNT_STILL_FAILED and NaN cotangents.
+// size-limit-ok: the entries' arguments; the forward and reverse passes share one cell's state
 template <bool DN>
-// size-limit-ok: the forward and reverse passes share one cell's state, which a split would pass by hand
 __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, double* wscr,
                                           const u16* __restrict__ didx, const double* __restrict__ atoms) {
   constexpr int CP = DN ? CAPR : CAP;
@@ -734,12 +736,14 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
   }
 }
 
+// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(32 * WPB) vjp(VJP_ARGS) {
   vjp_cells<false>(VJP_PASS, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // After vjp and the guard: the listed cells redone on the recovery's path with their cotangents (redo, list: the
 // guard's; rec holds CAPR attempts per warp).
+// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(32 * WPB)
     vjp_rec(VJP_ARGS, int* __restrict__ redo, const int* __restrict__ list, double* __restrict__ wscr,
             const u16* __restrict__ didx, const double* __restrict__ atoms) {
