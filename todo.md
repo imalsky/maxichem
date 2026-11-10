@@ -18,13 +18,6 @@ Tasks put off to return to, with the date deferred.
     higher, so the cost per cell-call should drop a lot (not measured).
   - Run the speed tables of README.md (quiet gas and the mixing bed, NCHO_photo and SNCHO_photo_network_2025) and the
     checks there.
-- 2026-11-04. One snapy branch after PR #334 merges.
-  - The fork has two branches: isaac/recon-many-variables (the launch-split fix alone, PR #334) and
-    isaac/maxichem-coupling (the same fix plus the fused tracer transport).
-  - Done 2026-11-09: #334 is in snapy main (fe2edaa3); isaac/recon-many-variables is deleted on the fork and the fork's
-    main is level with snapy main.
-  - Still needed: bring isaac/maxichem-coupling up to the new main (merge it in and port the fused tracer path to main's
-    new tracer code in src/mesh/meshblock.cpp, src/scalar/scalar.cpp and tests/CMakeLists.txt).
 - 2026-11-05. Sphere heating bug (notes.md, 2026-11-05 18:53).
   - Bug: heat = -(A_top F_top - A_bot F_bot) / V with the column's plane-parallel fluxes gives a false 2 F / r per volume on
     the sphere. It cools the night side and heats the day side, most near the lid, and crashed 140 layers.
