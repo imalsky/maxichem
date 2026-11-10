@@ -70,7 +70,7 @@ class Solver {
   torch::Tensor scratch_, scratch_rec_;
   // throws std::invalid_argument if the call just launched refused a cell (bad input or T out of range)
   void refuse(torch::Tensor const& x, torch::Tensor const& T, torch::Tensor const& P, torch::Tensor const& dt,
-              torch::Tensor const& J, torch::Tensor const& done, torch::Tensor const& redo) const;
+              torch::Tensor const& J, torch::Tensor const& status) const;
 };
 
 }  // namespace maxichem

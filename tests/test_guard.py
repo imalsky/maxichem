@@ -177,6 +177,47 @@ def test_bad_inputs_are_refused(parity, verdict, monkeypatch):
     )
 
 
+def test_just_outside_the_range_is_refused_and_named(parity, verdict, monkeypatch):
+    # T one float64 step outside each end, with dt = 0 and dt > 0: every such cell is refused, named and not done.
+    x0, _, P = parity.starts(4, 2, 1.0)
+    cold, hot = np.nextafter(kincuda.T_MIN, 0.0), np.nextafter(kincuda.T_MAX, np.inf)
+    t_out = helpers.tensor([cold, hot, cold, hot], parity.device)
+    dt, h = helpers.tensor([0.0, 0.0, 500.0, 500.0], parity.device), parity.full(4, 1e-10)
+    refused = r"2 cells below 300 K, .*\(first: cell 0, T = 300 K\).*; 2 cells above 3000 K, .*\(first: cell 1, "
+    with pytest.raises(ValueError, match=refused) as raised:
+        parity.solver(x0, t_out, P, dt, h)
+    with monkeypatch.context() as m:
+        m.setattr(parity.solver, "_refuse", lambda *_: None)
+        _, _, done, _ = parity.solver(x0, t_out, P, dt, h)
+    counts = dict(parity.solver.fallback)
+    verdict(
+        "guard: T one step outside each end, dt 0 and 500 s: refused, named, not done",
+        counts["cold"] == 2 and counts["hot"] == 2 and not bool(done.any()),
+        f"counts {counts}; done {done.tolist()}; ValueError: {raised.value}",
+    )
+
+
+def test_sum_on_the_tolerance_is_judged_once(parity, verdict):
+    # The call's warp and the guard add x in different orders. A sum just above X_SUM_TOL in the warp's order and just
+    # below it in the network's order is refused; the opposite cell is accepted and stepped. Each is judged once.
+    cells = 16
+    x0, T, P = parity.starts(cells, 3, 0.0)
+    perm = [int(q) for q in parity.solver._tables["perm"].tolist()]
+    rows = x0.tolist()
+    above = helpers.on_the_tolerance(rows, perm, kincuda.X_SUM_TOL, warp_above=True)
+    below = helpers.on_the_tolerance(rows, perm, kincuda.X_SUM_TOL, warp_above=False)
+    dt, h = parity.full(1, 50.0), parity.full(1, 1e-10)
+    with pytest.raises(ValueError, match=r"1 cells of bad input: .*\(first: cell 0: sum\(x\) - 1 = 1e-10,") as raised:
+        parity.solver(helpers.tensor([above], parity.device), T[:1], P[:1], dt, h)
+    _, _, done, _ = parity.solver(helpers.tensor([below], parity.device), T[:1], P[:1], dt, h)
+    verdict(
+        "guard: a sum on the tolerance, judged in the warp's order only",
+        bool(done.all()) and parity.solver.fallback["bad_input"] == 0,
+        f"warp {helpers.warp_sum(above, perm) - 1:.16g} / network order {sum(above) - 1:.16g}: {raised.value}; warp "
+        f"{helpers.warp_sum(below, perm) - 1:.16g} / network order {sum(below) - 1:.16g}: accepted, done",
+    )
+
+
 def test_non_finite_step_acts_as_dt(parity, verdict):
     cells = 64
     x0, T, P = parity.starts(cells, 2, 1.0)

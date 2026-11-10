@@ -28,7 +28,7 @@ COUNTS = (
     "still_failed",
     "nonfinite_h",
 )
-EXPORT_FORMAT = 5  # raised by a change the export's reader depends on; cpp/maxichem.cpp refuses any other
+EXPORT_FORMAT = 6  # raised by a change the export's reader depends on; cpp/maxichem.cpp refuses any other
 # attempts stored per cell before the adjoint switches to segment checkpoints; a call may take max_steps up to
 # (2 CAP)^2 / REC_STEPS, 0.4 CAP^2, so this CAP's limit is DEFAULT_MAX_STEPS
 CAP = 100
@@ -56,11 +56,11 @@ RATE_LAW_SHIFTS = {
 # SOLVER_KERNEL_NAMES' lists; the derivative kernels always take it, null without photolysis.
 _JVP_ARGUMENTS = (
     "x0", "Ta", "Pa", "dta", "hin", "lm", "rc", "dx0", "dTa", "dPa", "ddta", "dhin", "dlm", "drc", "D",
-    "xout", "hout", "doneo", "noko", "dxout", "dhout", "count", "B", "rtol", "atol", "max_steps", "adapt",
+    "xout", "hout", "doneo", "noko", "status", "dxout", "dhout", "count", "B", "rtol", "atol", "max_steps", "adapt",
     "perm", "blob", "rf", "nasa", "scratch", "sst", "jt", "lu", "optr", "sround", "jround", "Jin", "dJin",
 )  # fmt: skip
 _VJP_ARGUMENTS = (
-    "x0", "Ta", "Pa", "dta", "hin", "lm", "rc", "gx", "gh", "xout", "hout", "doneo", "noko",
+    "x0", "Ta", "Pa", "dta", "hin", "lm", "rc", "gx", "gh", "xout", "hout", "doneo", "noko", "status",
     "gx0", "gT", "gP", "gdt", "ghin", "glm", "count", "B", "rtol", "atol", "max_steps", "adapt",
     "perm", "blob", "rf", "nasa", "scratch", "rec", "sst", "jt", "lu", "optr", "gt", "xg",
     "sround", "jround", "ground", "Jin", "gJ", "gA",
@@ -69,10 +69,10 @@ _RECOVERY_ARGUMENTS = ("redo", "list", "wscr", "didx", "atoms")  # what a deriva
 SOLVER_KERNEL_NAMES = ("call", "guard", "recover")  # the kernels of SOLVER_KERNELS' file, and what the export holds
 KERNEL_ARGUMENTS = {
     "call": (
-        "x0", "Ta", "Pa", "dta", "hio", "xout", "doneo", "noko", "count", "B", "rtol", "atol", "max_steps",
+        "x0", "Ta", "Pa", "dta", "hio", "xout", "doneo", "noko", "status", "count", "B", "rtol", "atol", "max_steps",
         "perm", "blob", "rc", "rf", "nasa", "scratch", "sst", "jt", "lu", "optr", "sround", "jround",
     ),
-    "guard": ("x0", "Ta", "Pa", "dta", "xout", "doneo", "noko", "atoms", "redo", "list", "count", "B", "atol"),
+    "guard": ("x0", "xout", "doneo", "noko", "status", "atoms", "redo", "list", "count", "B", "atol"),
     "recover": (
         "x0", "Ta", "Pa", "dta", "hin", "xout", "hio", "doneo", "noko", "redo", "list", "count", "rtol", "atol",
         "max_steps", "perm", "blob", "rc", "rf", "nasa", "scratch", "sst", "jt", "didx", "atoms", "sround", "jround",

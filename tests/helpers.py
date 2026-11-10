@@ -40,6 +40,34 @@ def state(net: Any, cells: int, device: Any, **fractions: float) -> torch.Tensor
     return x / x.sum(1, keepdim=True)
 
 
+def warp_sum(row: list[float], perm: list[int]) -> float:
+    """Return sum(x) as the call kernel's warp adds it, bit for bit (Python floats are float64).
+
+    Lane l adds x[perm[i]] for i = l, l + 32, ..., then the 32 lanes meet in a butterfly.
+    """
+    lanes = [0.0] * 32
+    for i, j in enumerate(perm):
+        lanes[i % 32] += row[j]
+    for step in (16, 8, 4, 2, 1):
+        lanes = [lanes[lane] + lanes[lane ^ step] for lane in range(32)]
+    return lanes[0]
+
+
+def on_the_tolerance(rows: list[list[float]], perm: list[int], tolerance: float, warp_above: bool) -> list[float]:
+    """Return one of rows, scaled so that |sum - 1| is above the tolerance in one order of the sum, below in the other.
+
+    Above in the warp's order (warp_sum) if warp_above, else in the network's order; both within rounding of it.
+    """
+    for row in rows:
+        total = warp_sum(row, perm)
+        for k in range(-2000, 2000):
+            scaled = [q / total * (1.0 + tolerance + 1e-18 * k) for q in row]
+            warp, plain = abs(warp_sum(scaled, perm) - 1.0), abs(sum(scaled) - 1.0)
+            if (warp > tolerance >= plain) if warp_above else (plain > tolerance >= warp):
+                return scaled
+    raise RuntimeError("no row scales to put the two orders of the sum on either side of the tolerance")
+
+
 def decay_answer(t: Any) -> tuple[Any, Any]:
     """Return the mole fractions of A and B for A -> 2 B at constant pressure, from pure A, at J t."""
     survive = np.exp(-t)

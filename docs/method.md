@@ -111,14 +111,17 @@ Each cell's arithmetic depends only on its inputs, so results are bitwise reprod
 
 ### Refused cells
 
-Each kernel screens its cells before stepping them. Bad input (a negative or non-finite x, $|\sum_i x_i - 1| >$ `X_SUM_TOL`,
-no x above 0, a non-finite T, P <= 0, a negative or non-finite dt, a negative or non-finite J) and cells below `T_MIN` or above
-`T_MAX` are not stepped; the guard counts them and does not list them for recovery. The kernels' state is N, molecules per starting molecule,
-so a sum of 0.9 would raise every density by 11 %: the call refuses it instead of renormalizing. `X_SUM_TOL` is 1e-10: every
-stored input the checks feed sums to 1 within 1.3e-15, and the solver's outputs within rounding too. The guard sums x in another
-order than the call's warps, so a sum within rounding of the tolerance may be judged differently by the two: a cell the call
-refuses and the guard accepts ends recomputed and still failed, and one the call steps and the guard refuses is refused. After the kernels, the call reads the counts back, its one host sync, and raises if it refused a
-cell.
+The kernel that steps a cell (the call kernel, or a derivative kernel) screens it once, before stepping, and writes the result
+as the cell's status: 0, or why it is refused. Refused are bad input (a negative or non-finite x, $|\sum_i x_i - 1| >$
+`X_SUM_TOL`, no x above 0, a non-finite T, P <= 0, a negative or non-finite dt, a negative or non-finite J) and cells below
+`T_MIN` or above `T_MAX`. A refused cell is not stepped and is not done, also at dt = 0. The guard counts the refused cells
+from their status, without screening them again, and does not list them for recovery; the recovery steps only listed cells.
+So the sum, which depends on the order it is added in, is judged once, in the screening kernel's order. The kernels' state is N,
+molecules per starting molecule, so a sum of 0.9 would raise every density by 11 %: the call refuses it instead of
+renormalizing. `X_SUM_TOL` is 1e-10: every stored input the checks feed sums to 1 within 1.3e-15, and the solver's outputs
+within rounding too. After the kernels, the call reads the counts back, its one host sync, and raises if it refused a cell,
+naming the first refused cell of each kind from the status. A non-finite log multiplier of the derivative kernels is not a
+refusal: the cell is not stepped and fails (flag 2).
 
 ### Why the element test works
 

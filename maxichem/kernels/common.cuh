@@ -211,8 +211,16 @@ __device__ __forceinline__ void screen_J(const double* __restrict__ Jin, int cel
   }
 }
 
-// Outside the solver's temperature range [TMIN, TMAX] (not stepped); a NaN T is not, it is bad input.
-__device__ __forceinline__ bool outside_range(double Tc) { return Tc < TMIN || Tc > TMAX; }
+// A cell's screening result: 0 (stepped) or why it is refused. The kernel that steps the cell decides it once and
+// writes it to status; the guard counts it from there, and the host names the refused cells from there.
+constexpr int REFUSED_COLD = 1;
+constexpr int REFUSED_BAD_INPUT = 2;
+constexpr int REFUSED_HOT = 3;
+
+// The screening result from the bad-input test (fine) and T: below TMIN, above TMAX (a NaN T is neither: bad input).
+__device__ __forceinline__ int cell_status(bool fine, double Tc) {
+  return Tc < TMIN ? REFUSED_COLD : (Tc > TMAX ? REFUSED_HOT : (fine ? 0 : REFUSED_BAD_INPUT));
+}
 
 // The bad-input test's forcing: T and nd finite, P > 0, dt finite and at least 0.
 __device__ __forceinline__ bool forcing_fine(double Tc, double nd, double dt) {

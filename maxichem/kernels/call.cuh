@@ -5,8 +5,8 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
     // size-limit-ok: split into forced-inline helpers it cost 1.1 % (lit 0.654 to 0.661 us per cell-call), bits equal
     call(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
          const double* __restrict__ dta, double* __restrict__ hio, double* __restrict__ xout, int* __restrict__ doneo,
-         double* __restrict__ noko, int* __restrict__ count, int B, double rtol, double atol, int max_steps,
-         const int* __restrict__ perm, const unsigned* __restrict__ blob, const double* __restrict__ rc,
+         double* __restrict__ noko, int* __restrict__ status, int* __restrict__ count, int B, double rtol, double atol,
+         int max_steps, const int* __restrict__ perm, const unsigned* __restrict__ blob, const double* __restrict__ rc,
          const int* __restrict__ rf, const double* __restrict__ nasa, double* scratch, const unsigned* __restrict__ sst,
          const u64* __restrict__ jt, const u64* __restrict__ lu, const int* __restrict__ optr, int sround,
          int jround J_PARAM) {
@@ -40,14 +40,15 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
 #if NJ
     screen_J(Jin, cell, lane, 32, p);
 #endif
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), outside = outside_range(Tc);
-    if (fin && !outside) cell_rates(v, kf, kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, grp);
+    const int st = cell_status(cell_fine(p, pm, Tc, nd, dt), Tc);
+    if (cl == 0) status[cell] = st;
+    if (st == 0) cell_rates(v, kf, kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, grp);
     CSYNC(grp);
     const double h0 = isfinite(hio[cell]) ? hio[cell] : dt;  // a non-finite h acts as dt, and is counted
     if (cl == 0 && !isfinite(hio[cell])) atomicAdd(count + COUNT_NONFINITE_H, 1);
     double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
-    bool prej = false;                                       // the last try was rejected (its err pen, its size pha)
-    int it = (dt > 0.0 && fin && !outside) ? 0 : max_steps;  // no step for bad input or gas outside the range
+    bool prej = false;                               // the last try was rejected (its err pen, its size pha)
+    int it = (dt > 0.0 && st == 0) ? 0 : max_steps;  // no step for a refused cell
     while (it < max_steps && t < dt * CALL_END) {
       const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
       if (prej) {
@@ -175,7 +176,7 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
     write_state(N, xout + (size_t)cell * NS, perm, lane, cl, NL);
     if (cl == 0) {
       hio[cell] = h;
-      doneo[cell] = (fin && t >= dt * CALL_END) ? 1 : 0;
+      doneo[cell] = (st == 0 && t >= dt * CALL_END) ? 1 : 0;  // a refused cell is not done, also at dt = 0
       noko[cell] = nok;
     }
     if (cl == 0) *nextc = (int)(gridDim.x * CPB + atomicAdd(count + COUNT_QUEUE, 1));

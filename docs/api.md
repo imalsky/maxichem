@@ -52,10 +52,11 @@ without it.
 
 A cell is refused when it is bad input (a negative or non-finite mole fraction, |sum(x) - 1| above `X_SUM_TOL`, no mole fraction
 above 0, a non-finite T, P <= 0, a negative or non-finite dt, or a negative or non-finite J) or outside [`T_MIN`, `T_MAX`] (counted
-as cold or hot). The kernels do not step
-it and count it. After the kernels, `launch` and a call read the counts back, the call's one host sync, and raise ValueError naming
-the counts, the limits and the first refused cell with its values. The counts are added to `total` first, and `fallback` reads them
-after the raise. `ADSolver`'s calls refuse the same cells. Inputs of the wrong shape, dtype or device raise before any launch.
+as cold or hot). The kernel that steps the cell decides this once (method.md, "Refused cells"); it does not step the cell, and the
+guard counts it. After the kernels, `launch` and a call read the counts back, the call's one host sync, and raise ValueError when any
+cell was refused, naming the count of each kind, the limits and the first refused cell of each kind with its values. The counts are
+added to `total` first, and `fallback` reads them after the raise. `ADSolver`'s calls refuse the same cells; a non-finite log
+multiplier is not a refusal there (the cell fails, flag 2). Inputs of the wrong shape, dtype or device raise before any launch.
 
 A non-finite h acts as dt and is counted in `nonfinite_h`. `launch` and a call both add their counts to `total`, which `check()` reads.
 

@@ -53,7 +53,16 @@ def test_cpp_call_is_the_python_call(export_program, tmp_path, network, photo, t
 
 
 @pytest.mark.parametrize(
-    ("edit", "refused"), [("sum", True), ("nan", True), ("inside", False), ("hot", True), ("bounds", False)]
+    ("edit", "refused"),
+    [
+        ("sum", True),
+        ("nan", True),
+        ("inside", False),
+        ("hot", True),
+        ("hot_dt0", True),
+        ("bounds", False),
+        ("straddle", True),
+    ],
 )
 def test_cpp_refuses_what_python_refuses(export_program, tmp_path, edit, refused):
     paths.need(paths.vulcan_thermo())
@@ -61,6 +70,8 @@ def test_cpp_refuses_what_python_refuses(export_program, tmp_path, edit, refused
     case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, 1024, 1, 4000, network, edit]
     subprocess.run([str(q) for q in case], check=True, capture_output=True)
     assert (tmp_path / "case" / "refused.txt").exists() == refused
+    if refused:  # the edited cell is named
+        assert "(first: cell 5" in (tmp_path / "case" / "refused.txt").read_text()
     result = subprocess.run(
         [export_program, tmp_path / "export", tmp_path / "case"], check=False, capture_output=True, text=True
     )

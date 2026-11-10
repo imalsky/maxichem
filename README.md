@@ -114,8 +114,9 @@ counts = solver.check()  # guard counts; raises if a cell was outside 300-3000 K
   checked only up to 3000 K), or with a non-finite x, T, P or dt, a negative mole fraction (clamp at 0 before
   the call), mole fractions that do not sum to 1 within `kincuda.X_SUM_TOL` = 1e-10 (normalize in float64 before the
   call), no mole fraction above 0, P <= 0, dt < 0, or a negative or non-finite J: the kernels do not step it, and the
-  call raises ValueError (C++: `std::invalid_argument`) naming the counts and the first such cell. Reading the counts
-  back for this is the call's one host sync. Inputs of the wrong shape, dtype or device raise before any launch.
+  whole call raises ValueError (C++: `std::invalid_argument`) when any cell is refused, naming the count and the first
+  cell of each kind. The sum is judged once, in the order the call kernel adds it. Reading the counts back for this is
+  the call's one host sync. Inputs of the wrong shape, dtype or device raise before any launch.
 - Not done here: radiation, transport, condensation.
 - From C++ (no Python in the time loop): `solver.export(folder)` writes the kernels (source and cubin for this GPU),
   their tables and the launch sizes; `cpp/maxichem.hpp` (`maxichem::Solver`, libtorch and the CUDA driver API) loads

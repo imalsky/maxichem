@@ -1,9 +1,6 @@
 // The guard: checks each cell after the call, and puts its element shares back.
 
-// What the guard's test found in a cell: a value for the first three, bits for the others, 0 when it passed.
-constexpr int GUARD_COLD = 1;
-constexpr int GUARD_BAD_INPUT = 2;
-constexpr int GUARD_HOT = 3;
+// What the guard's test found in a stepped cell's result: bits, 0 when it passed.
 constexpr int GUARD_NONFINITE = 4;
 constexpr int GUARD_UNFINISHED = 8;
 constexpr int GUARD_DRIFT = 16;
@@ -55,14 +52,13 @@ __device__ __forceinline__ void element_multipliers(const double* q, const doubl
   }
 }
 
-// The guard's test of one cell (network species order): GUARD_COLD, GUARD_HOT, GUARD_BAD_INPUT, else the bits
-// GUARD_NONFINITE, GUARD_UNFINISHED, GUARD_DRIFT (0: passed). A cell that passes has its element shares put back
-// (docs/method.md): x' = x (1 + sum_e lambda_e a_ie). Explicit fma: x depends on these sums, and every kernel that
-// calls this must get the same bits.
-__device__ int check_cell(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
-                          const double* __restrict__ dta, double* xout, int done, double nok,
-                          const double* __restrict__ atoms, double atol, int cell J_PARAM) {
-  double e0[NEL], e1[NEL], p = 0.0, mx = 0.0;  // atoms of each element in the input and the new state
+// The guard's test of the result of a cell that was stepped (network species order): the bits GUARD_NONFINITE,
+// GUARD_UNFINISHED, GUARD_DRIFT (0: passed). A cell that passes has its element shares put back (docs/method.md):
+// x' = x (1 + sum_e lambda_e a_ie). Explicit fma: x depends on these sums, and every kernel that calls this must get
+// the same bits. It does not screen the inputs: the kernel that stepped the cell did, once (its status).
+__device__ int check_cell(const double* __restrict__ x0, double* xout, int done, double nok,
+                          const double* __restrict__ atoms, double atol, int cell) {
+  double e0[NEL], e1[NEL];  // atoms of each element in the input and the new state
 #pragma unroll
   for (int e = 0; e < NEL; e++) {
     e0[e] = 0.0;
@@ -71,7 +67,6 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
   bool xfin = true;
   for (int i = 0; i < NS; i++) {
     const double a = x0[(size_t)cell * NS + i], b = xout[(size_t)cell * NS + i];
-    screen_x(a, p, mx);
     xfin = xfin && isfinite(b);
 #pragma unroll
     for (int e = 0; e < NEL; e++) {
@@ -79,15 +74,6 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
       e1[e] = fma(atoms[i * NEL + e], b, e1[e]);
     }
   }
-#if NJ
-  screen_J(Jin, cell, 0, 1, p);
-#endif
-  const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
-  if (Tc < TMIN) return GUARD_COLD;
-  if (Tc > TMAX) return GUARD_HOT;
-  // cell_fine's test; this thread sums x in the network's order, the call's warp in its own, so a sum within rounding
-  // of XSUMTOL may be judged differently by the two
-  if (!(fabs(p - 1.0) <= XSUMTOL && mx > 0.0 && forcing_fine(Tc, nd, dta[cell]))) return GUARD_BAD_INPUT;
   double s0 = 0.0, s1 = 0.0;
 #pragma unroll
   for (int e = 0; e < NEL; e++) {
@@ -117,27 +103,28 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
   return 0;
 }
 
-// Checks of each cell after the call (one thread per cell); counts in count[1] to count[COUNT_RECOMPUTED]: bad input, T
-// < TMIN, T > TMAX, else: non-finite state, unfinished, element drift, recompute. A cell to recompute gets redo = 1 and
-// is appended to list (the first count[COUNT_RECOMPUTED] entries; their order is not deterministic, the cells' results
-// do not depend on it).
-extern "C" __global__ void guard(const double* __restrict__ x0, const double* __restrict__ Ta,
-                                 const double* __restrict__ Pa, const double* __restrict__ dta,
-                                 double* __restrict__ xout, const int* __restrict__ doneo,
-                                 const double* __restrict__ noko, const double* __restrict__ atoms,
+// Checks of each cell after the call (one thread per cell); counts in count[1] to count[COUNT_RECOMPUTED]: a refused
+// cell by its status (bad input, T < TMIN, T > TMAX), else: non-finite state, unfinished, element drift, recompute. A
+// cell to recompute gets redo = 1 and is appended to list (the first count[COUNT_RECOMPUTED] entries; their order is
+// not deterministic, the cells' results do not depend on it). J is in every solver kernel's arguments; the guard needs
+// none.
+extern "C" __global__ void guard(const double* __restrict__ x0, double* __restrict__ xout,
+                                 const int* __restrict__ doneo, const double* __restrict__ noko,
+                                 const int* __restrict__ status, const double* __restrict__ atoms,
                                  int* __restrict__ redo, int* __restrict__ list, int* __restrict__ count, int B,
                                  double atol J_PARAM) {
   const int cell = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   if (cell >= B) return;
-  const int c = check_cell(x0, Ta, Pa, dta, xout, doneo[cell], noko[cell], atoms, atol, cell J_ARG);
+  const int s = status[cell];
   int r = 0;
-  if (c == GUARD_COLD)
+  if (s == REFUSED_COLD)
     atomicAdd(count + COUNT_COLD, 1);
-  else if (c == GUARD_HOT)
+  else if (s == REFUSED_HOT)
     atomicAdd(count + COUNT_HOT, 1);
-  else if (c == GUARD_BAD_INPUT)
+  else if (s == REFUSED_BAD_INPUT)
     atomicAdd(count + COUNT_BAD_INPUT, 1);
   else {
+    const int c = check_cell(x0, xout, doneo[cell], noko[cell], atoms, atol, cell);
     if (c & GUARD_NONFINITE) atomicAdd(count + COUNT_NONFINITE, 1);
     if (c & GUARD_UNFINISHED) atomicAdd(count + COUNT_UNFINISHED, 1);
     if (c & GUARD_DRIFT) atomicAdd(count + COUNT_DRIFT, 1);

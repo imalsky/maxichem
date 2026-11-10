@@ -248,18 +248,13 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
     const double Tc = Ta[cell], dt = dta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
     for (int i = cl; i < NS; i += NL) N[i] = x0[(size_t)cell * NS + perm[i]];
     CSYNC(0);
-    double p = 0.0, pm = 0.0;
-    for (int i = lane; i < NS; i += 32) screen_x(N[i], p, pm);
-#if NJ
-    screen_J(Jin, cell, lane, 32, p);
-#endif
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), outside = outside_range(Tc);
-    if (fin && !outside) cell_rates(a.v, a.kf, a.kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, 0);
+    // a listed cell passed the call kernel's screening (status 0), so it is not screened again
+    cell_rates(a.v, a.kf, a.kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, 0);
     CSYNC(0);
     const double h0 = isfinite(hin[cell]) ? hin[cell] : dt;  // a non-finite h acts as dt (the call kernel counted it)
     double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;
-    int it = (dt > 0.0 && fin && !outside) ? 0 : max_steps;
+    int it = dt > 0.0 ? 0 : max_steps;
     while (it < max_steps && t < dt * CALL_END) {
       const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
       if (prej)
@@ -288,10 +283,10 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
       it++;
     }
     write_state(N, xout + (size_t)cell * NS, perm, lane, cl, NL);
-    const int dn = (fin && t >= dt * CALL_END) ? 1 : 0;
+    const int dn = (t >= dt * CALL_END) ? 1 : 0;
     CSYNC(0);
     if (cl == 0) {
-      const int c = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell J_ARG);
+      const int c = check_cell(x0, xout, dn, nok, atoms, atol, cell);
       hio[cell] = h;
       doneo[cell] = c ? 0 : dn;  // done: finished and passing the guard
       noko[cell] = nok;

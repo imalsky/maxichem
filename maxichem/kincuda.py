@@ -221,7 +221,7 @@ class CudaSolver(Solver):
         x, T, P, dt, h = (a.contiguous() for a in (x, T, P, dt, h))
         jx = check_photolysis(J, B, self.nj, self.dev)
         xo, ho = torch.empty_like(x), h.clone()
-        done, redo, lst = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(3))
+        done, redo, lst, status = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(4))
         nok = torch.empty(B, dtype=torch.float64, device=self.dev)
         self.count.zero_()
         stream = torch.cuda.current_stream(self.dev).cuda_stream
@@ -237,6 +237,7 @@ class CudaSolver(Solver):
             "xout": xo,
             "doneo": done,
             "noko": nok,
+            "status": status,
             "redo": redo,
             "list": lst,
             "count": self.count,
@@ -258,7 +259,7 @@ class CudaSolver(Solver):
         arguments = self._arguments("recover", values)
         launch_kernel(self._recover_kernel, grid, 32 * self.w, self.smem_rec, stream, arguments)
         self.total += self.count
-        self._refuse(x, T, P, dt, jx, done, redo)
+        self._refuse(x, T, P, dt, jx, status)
         return xo, ho, done.bool(), nok, redo
 
     def __call__(

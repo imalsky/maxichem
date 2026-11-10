@@ -194,14 +194,15 @@ __device__ __forceinline__ double tangent_step(double* work, const double (&c)[N
       const double *__restrict__ dx0, const double *__restrict__ dTa, const double *__restrict__ dPa,                  \
       const double *__restrict__ ddta, const double *__restrict__ dhin, const double *dlm, const double *drc, int D,   \
       double *__restrict__ xout, double *__restrict__ hout, int *__restrict__ doneo, double *__restrict__ noko,        \
-      double *__restrict__ dxout, double *__restrict__ dhout, int *__restrict__ count, int B, double rtol,             \
-      double atol, int max_steps, int adapt, const int *__restrict__ perm, const unsigned *__restrict__ blob,          \
-      const int *__restrict__ rf, const double *__restrict__ nasa, double *scratch, const unsigned *__restrict__ sst,  \
-      const u64 *__restrict__ jt, const u64 *__restrict__ lu, const int *__restrict__ optr, int sround, int jround,    \
-      const double *__restrict__ Jin, const double *dJin
-#define JVP_PASS                                                                                                      \
-  x0, Ta, Pa, dta, hin, lm, rc, dx0, dTa, dPa, ddta, dhin, dlm, drc, D, xout, hout, doneo, noko, dxout, dhout, count, \
-      B, rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, sst, jt, lu, optr, sround, jround, Jin, dJin
+      int *__restrict__ status, double *__restrict__ dxout, double *__restrict__ dhout, int *__restrict__ count,       \
+      int B, double rtol, double atol, int max_steps, int adapt, const int *__restrict__ perm,                         \
+      const unsigned *__restrict__ blob, const int *__restrict__ rf, const double *__restrict__ nasa, double *scratch, \
+      const unsigned *__restrict__ sst, const u64 *__restrict__ jt, const u64 *__restrict__ lu,                        \
+      const int *__restrict__ optr, int sround, int jround, const double *__restrict__ Jin, const double *dJin
+#define JVP_PASS                                                                                                       \
+  x0, Ta, Pa, dta, hin, lm, rc, dx0, dTa, dPa, ddta, dhin, dlm, drc, D, xout, hout, doneo, noko, status, dxout, dhout, \
+      count, B, rtol, atol, max_steps, adapt, perm, blob, rf, nasa, scratch, sst, jt, lu, optr, sround, jround, Jin,   \
+      dJin
 
 // The call and its tangents, one warp per cell. D tangent directions share the call: direction d's inputs and outputs
 // at [d * B + cell] (dx0, dxout, dlm, dJin by rows of NS, NR or NJ), drc at [d * NR * 9]; dlm, drc, dJin may be null;
@@ -245,9 +246,12 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
       for (int i = lane; i < NS; i += 32) Ng[d * NS + i] = dx0[((size_t)d * B + cell) * NS + perm[i]];
     screen_J(Jin, cell, lane, 32, p);
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
-    screen_lm(lmc, lane, p);
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), outside = outside_range(Tc);
-    if (fin && !outside) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
+    double pl = 0.0;  // a non-finite log multiplier: not stepped, but not refused (the cell fails, flag 2)
+    screen_lm(lmc, lane, pl);
+    const int st = cell_status(cell_fine(p, pm, Tc, nd, dt), Tc);
+    if (!DN && lane == 0) status[cell] = st;
+    const bool run = st == 0 && isfinite(wsum(pl));
+    if (run) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
     const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it), and is counted
     if (!DN && !hfin && lane == 0) atomicAdd(count + COUNT_NONFINITE_H, 1);
     const double hi = hfin ? hin[cell] : dt, m = fmin(hi, dt);
@@ -255,7 +259,7 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
       const size_t qd = (size_t)d * B + cell;
       const double dTc = dTa[qd], ddt = adapt ? ddta[qd] : 0.0, dhi = adapt ? dhin[qd] : 0.0;
       dlnd[d] = dPa[qd] / Pc - dTc / Tc;
-      if (fin && !outside)
+      if (run)
         rates_tan(work, dk + 2 * NR * d, Tc, nd, dTc, dlnd[d], lmc, dlm ? dlm + qd * NR : nullptr,
                   dJin ? dJin + qd * NJ : nullptr, rc, drc ? drc + (size_t)d * NR * 9 : nullptr, rf, nasa, kf, kr, cw,
                   tab, lane);
@@ -268,7 +272,7 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
     __syncwarp();
     double h = fmax(m, H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;
-    int it = (dt > 0.0 && fin && !outside) ? 0 : max_steps;
+    int it = (dt > 0.0 && run) ? 0 : max_steps;
     while (it < max_steps && t < dt * CALL_END) {
       const double rem = dt - t, ha = fmin(h, rem);
       double c0 = 0.0, dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
@@ -318,13 +322,13 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
       for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + perm[i]] = (ng[i] - N[i] / s * sd) / s;
       if (lane == 0) dhout[(size_t)d * B + cell] = hd[d];
     }
-    const int dn = (fin && t >= dt * CALL_END) ? 1 : 0;
+    const int dn = (run && t >= dt * CALL_END) ? 1 : 0;
     if (lane == 0) {
       hout[cell] = h;
       doneo[cell] = dn;
       noko[cell] = nok;
     }
-    if (DN && recovery_fails(x0, Ta, Pa, dta, xout, doneo, redo, count, dn, nok, atoms, atol, cell, lane J_ARG))
+    if (DN && recovery_fails(x0, xout, doneo, redo, count, dn, nok, atoms, atol, cell, lane))
       for (int d = 0; d < D; d++) {
         for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + i] = DNAN;
         if (lane == 0) dhout[(size_t)d * B + cell] = DNAN;

@@ -437,18 +437,18 @@ __device__ __forceinline__ void save_attempt(double* rp, const double* N, double
   const double *__restrict__ x0, const double *__restrict__ Ta, const double *__restrict__ Pa,                         \
       const double *__restrict__ dta, const double *__restrict__ hin, const double *lm, const double *__restrict__ rc, \
       const double *__restrict__ gx, const double *gh, double *__restrict__ xout, double *__restrict__ hout,           \
-      int *__restrict__ doneo, double *__restrict__ noko, double *__restrict__ gx0, double *__restrict__ gT,           \
-      double *__restrict__ gP, double *__restrict__ gdt, double *__restrict__ ghin, double *__restrict__ glm,          \
-      int *__restrict__ count, int B, double rtol, double atol, int max_steps, int adapt,                              \
+      int *__restrict__ doneo, double *__restrict__ noko, int *__restrict__ status, double *__restrict__ gx0,          \
+      double *__restrict__ gT, double *__restrict__ gP, double *__restrict__ gdt, double *__restrict__ ghin,           \
+      double *__restrict__ glm, int *__restrict__ count, int B, double rtol, double atol, int max_steps, int adapt,    \
       const int *__restrict__ perm, const unsigned *__restrict__ blob, const int *__restrict__ rf,                     \
       const double *__restrict__ nasa, double *scratch, double *rec, const unsigned *__restrict__ sst,                 \
       const u64 *__restrict__ jt, const u64 *__restrict__ lu, const int *__restrict__ optr,                            \
       const u64 *__restrict__ gt, const int *__restrict__ xg, int sround, int jround, int ground,                      \
       const double *__restrict__ Jin, double *__restrict__ gJ, double *__restrict__ gA
-#define VJP_PASS                                                                                                    \
-  x0, Ta, Pa, dta, hin, lm, rc, gx, gh, xout, hout, doneo, noko, gx0, gT, gP, gdt, ghin, glm, count, B, rtol, atol, \
-      max_steps, adapt, perm, blob, rf, nasa, scratch, rec, sst, jt, lu, optr, gt, xg, sround, jround, ground, Jin, \
-      gJ, gA
+#define VJP_PASS                                                                                                      \
+  x0, Ta, Pa, dta, hin, lm, rc, gx, gh, xout, hout, doneo, noko, status, gx0, gT, gP, gdt, ghin, glm, count, B, rtol, \
+      atol, max_steps, adapt, perm, blob, rf, nasa, scratch, rec, sst, jt, lu, optr, gt, xg, sround, jround, ground,  \
+      Jin, gJ, gA
 
 // The cotangents of a failed cell's inputs: NaN. Its gA is 0, which leaves it out of arrh's sum over the batch, so one
 // failed cell does not spoil the other cells' rate table; COUNT_STILL_FAILED counts the cells left out.
@@ -579,9 +579,12 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       screen_x(N[i], p, pm);
     }
     screen_J(Jin, cell, lane, 32, p);
-    screen_lm(lmc, lane, p);
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), outside = outside_range(Tc);
-    if (fin && !outside) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
+    double pl = 0.0;  // a non-finite log multiplier: not stepped, but not refused (the cell fails, flag 2)
+    screen_lm(lmc, lane, pl);
+    const int screened = cell_status(cell_fine(p, pm, Tc, nd, dt), Tc);
+    if (!DN && lane == 0) status[cell] = screened;
+    const bool stepped = screened == 0 && isfinite(wsum(pl));
+    if (stepped) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
     __syncwarp();
     const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it), and is counted
     if (!DN && !hfin && lane == 0) atomicAdd(count + COUNT_NONFINITE_H, 1);
@@ -589,7 +592,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     double h = h0, t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;
     int na = 0;
-    const bool run = dt > 0.0 && fin && !outside;
+    const bool run = dt > 0.0 && stepped;
     double en_l = 0.0, c0_l = 0.0;  // the last attempt run (its stages are in place)
     // forward: the state before each of the first CP attempts (and whether it was accepted)
     while (run && na < max_steps && t < dt * CALL_END) {
@@ -603,7 +606,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     double gs = 0.0;
     for (int i = lane; i < NS; i += 32) gs += gx[(size_t)cell * NS + perm[i]] * N[i];
     gs = wsum(gs);
-    const int dn = (fin && t >= dt * CALL_END) ? 1 : 0;
+    const int dn = (stepped && t >= dt * CALL_END) ? 1 : 0;
     if (lane == 0) {
       hout[cell] = h;
       doneo[cell] = dn;
@@ -611,7 +614,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     }
     bool bad = false;
     if (DN) {
-      bad = recovery_fails(x0, Ta, Pa, dta, xout, doneo, redo, count, dn, nok, atoms, atol, cell, lane J_ARG);
+      bad = recovery_fails(x0, xout, doneo, redo, count, dn, nok, atoms, atol, cell, lane);
       if (bad) na = 0;  // no reverse: NaN cotangents below
     }
     // reverse: x = N / sum N

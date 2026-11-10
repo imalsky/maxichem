@@ -26,10 +26,9 @@ if TYPE_CHECKING:
     import ctypes
 
 
-def _first(mask: torch.Tensor) -> int | None:
-    """Return the first index where mask is true, or None."""
-    where = torch.nonzero(mask)
-    return int(where[0, 0]) if len(where) else None
+def _first(mask: torch.Tensor) -> int:
+    """Return the first index where mask is true (the caller knows there is one)."""
+    return int(torch.nonzero(mask)[0, 0])
 
 
 def check_tensor(name: str, a: torch.Tensor, shape: tuple[int, ...], device: torch.device) -> None:
@@ -174,37 +173,33 @@ class Solver:
         P: torch.Tensor,
         dt: torch.Tensor,
         J: torch.Tensor | None,
-        done: torch.Tensor,
-        flag: torch.Tensor,
+        status: torch.Tensor,
     ) -> None:
         """Raise ValueError if the call just launched refused a cell (one small copy from the device, a host sync).
 
-        The kernels decide: a refused cell is counted as bad input, cold or hot, and returns done 0 with flag 0. The
-        host only names the first such cell of each kind.
+        The kernel that steps a cell screens it once and writes its status: 0, or why it is refused (bad input, cold
+        or hot). The guard counts the refused cells from it, and the host names the first of each kind from it.
         """
         n = self.fallback
         if not (n["bad_input"] or n["cold"] or n["hot"]):
             return
-        refused = torch.logical_not(done.bool()) & (flag == 0)
+        refused = status != 0
         cold, hot = refused & (T < T_MIN), refused & (T > T_MAX)
         problems = []
         for kind, cells, side in (("cold", cold, f"below {T_MIN:g} K"), ("hot", hot, f"above {T_MAX:g} K")):
             if n[kind]:
                 i = _first(cells)
-                where = "not identified" if i is None else f"cell {i}, T = {float(T[i]):g} K"
                 problems.append(
-                    f"{n[kind]} cells {side}, outside the solver's range {T_MIN:g}-{T_MAX:g} K (first: {where}); "
-                    "leave them out of the call"
+                    f"{n[kind]} cells {side}, outside the solver's range {T_MIN:g}-{T_MAX:g} K (first: cell {i}, "
+                    f"T = {float(T[i]):g} K); leave them out of the call"
                 )
         if n["bad_input"]:
             i = _first(refused & torch.logical_not(cold | hot))
-            where = "not identified"
-            if i is not None:
-                where = (
-                    f"cell {i}: sum(x) - 1 = {float(x[i].sum() - 1.0):g}, min(x) = {float(x[i].min()):g}, "
-                    f"T = {float(T[i]):g} K, P = {float(P[i]):g} dyn cm^-2, dt = {float(dt[i]):g} s"
-                    + ("" if J is None else f", min(J) = {float(J[i].min()):g} s^-1")
-                )
+            where = (
+                f"cell {i}: sum(x) - 1 = {float(x[i].sum() - 1.0):g}, min(x) = {float(x[i].min()):g}, "
+                f"T = {float(T[i]):g} K, P = {float(P[i]):g} dyn cm^-2, dt = {float(dt[i]):g} s"
+                + ("" if J is None else f", min(J) = {float(J[i].min()):g} s^-1")
+            )
             problems.append(
                 f"{n['bad_input']} cells of bad input: x negative or non-finite, |sum(x) - 1| above {X_SUM_TOL:g} "
                 f"or no x above 0; T non-finite, P not above 0, dt negative or non-finite, or J negative or "

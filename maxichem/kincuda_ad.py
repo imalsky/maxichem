@@ -342,7 +342,7 @@ class ADSolver(Solver):
         xo, dxo = torch.empty_like(x), torch.empty((D, B, self.ns), dtype=torch.float64, device=self.dev)
         ho, nok = (torch.empty(B, dtype=torch.float64, device=self.dev) for _ in range(2))
         dho = torch.empty((D, B), dtype=torch.float64, device=self.dev)
-        done = torch.empty(B, dtype=torch.int32, device=self.dev)
+        done, status = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(2))
         self._grow_tangent_scratch(D)
         nb = max(1, min(-(-B // self.wpb["jvp"]), self.max_blocks["jvp"]))
         self.count.zero_()
@@ -358,6 +358,7 @@ class ADSolver(Solver):
             "hout": ho,
             "doneo": done,
             "noko": nok,
+            "status": status,
             "dxout": dxo,
             "dhout": dho,
             "scratch": self._scratch["jvp"],
@@ -370,7 +371,7 @@ class ADSolver(Solver):
         launch_kernel(self._kernels["jvp_rec"], nb, block, self.smem["jvp"], stream, self._arguments("jvp_rec", values))
         self.total += self.count
         self.flag = flags["redo"]
-        self._refuse(x, T, P, dt, J, done, self.flag)
+        self._refuse(x, T, P, dt, J, values["status"])
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
     @on_device
@@ -433,7 +434,7 @@ class ADSolver(Solver):
             gh = gh.contiguous()
         xo = torch.empty_like(x)
         ho, nok = (torch.empty(B, dtype=torch.float64, device=self.dev) for _ in range(2))
-        done = torch.empty(B, dtype=torch.int32, device=self.dev)
+        done, status = (torch.empty(B, dtype=torch.int32, device=self.dev) for _ in range(2))
         g = self._empty_cotangents(x, T)
         g_ln_a = torch.empty(B, self.nr, dtype=torch.float64, device=self.dev)
         nb = max(1, min(-(-B // self.wpb["vjp"]), self.max_blocks["vjp"]))
@@ -448,6 +449,7 @@ class ADSolver(Solver):
             "hout": ho,
             "doneo": done,
             "noko": nok,
+            "status": status,
             "gx0": g["x"],
             "gT": g["T"],
             "gP": g["P"],
@@ -468,5 +470,5 @@ class ADSolver(Solver):
         launch_kernel(self._kernels["arrh"], self.nr, ARRH_BLOCK_THREADS, 0, stream, self._arguments("arrh", values))
         self.total += self.count
         self.flag = flags["redo"]
-        self._refuse(x, T, P, dt, J, done, self.flag)
+        self._refuse(x, T, P, dt, J, values["status"])
         return xo, ho, done.bool(), nok, g

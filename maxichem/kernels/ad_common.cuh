@@ -462,15 +462,13 @@ __device__ __forceinline__ double step_factor_partials(double en, bool ok, bool 
 
 // The recover kernel's test of a recomputed cell's result: its flag (redo), count and done; returns on every lane
 // whether it still fails.
-__device__ __forceinline__ bool recovery_fails(const double* __restrict__ x0, const double* __restrict__ Ta,
-                                               const double* __restrict__ Pa, const double* __restrict__ dta,
-                                               double* xout, int* doneo, int* redo, int* count, int dn, double nok,
-                                               const double* __restrict__ atoms, double atol, int cell,
-                                               int lane J_PARAM) {
+__device__ __forceinline__ bool recovery_fails(const double* __restrict__ x0, double* xout, int* doneo, int* redo,
+                                               int* count, int dn, double nok, const double* __restrict__ atoms,
+                                               double atol, int cell, int lane) {
   __syncwarp();
   int bad = 0;
   if (lane == 0) {
-    bad = check_cell(x0, Ta, Pa, dta, xout, dn, nok, atoms, atol, cell J_ARG);
+    bad = check_cell(x0, xout, dn, nok, atoms, atol, cell);
     if (bad) doneo[cell] = 0;  // done: finished and passing the guard
     redo[cell] = bad ? 2 : 1;
     atomicAdd(count + (bad ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);

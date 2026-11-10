@@ -18,21 +18,26 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import helpers
+import numpy as np
 import torch
 
 from maxichem import CudaSolver, VulcanNetwork, paths
 from maxichem._checks import H2S_PER_H2_SOLAR, SOLAR_START
 from maxichem.kincuda import T_MAX, T_MIN, X_SUM_TOL
 
-# factors on x and temperatures (K; None keeps it) of cells 5 and 6: a sum of 0.9, a NaN sum and a T above T_MAX are
-# refused; sums within the tolerance and T at either end of the range are accepted
+# factors on x, temperatures (K) and call lengths (s) of cells 5 and 6, None keeping a value: a sum of 0.9, a NaN sum
+# and a T above T_MAX (also at dt 0) are refused; sums within the tolerance and T at either end of the range are
+# accepted. "straddle" gives cell 5 a sum above the tolerance in the call's order of the sum, below it in another order.
 EDITS = {
-    "none": ((1.0, 1.0), (None, None)),
-    "sum": ((0.9, 1.0), (None, None)),
-    "nan": ((float("nan"), 1.0), (None, None)),
-    "inside": ((1.0 + 0.9 * X_SUM_TOL, 1.0 - 0.9 * X_SUM_TOL), (None, None)),
-    "hot": ((1.0, 1.0), (T_MAX + 0.5, None)),
-    "bounds": ((1.0, 1.0), (T_MIN, T_MAX)),
+    "none": ((1.0, 1.0), (None, None), (None, None)),
+    "sum": ((0.9, 1.0), (None, None), (None, None)),
+    "nan": ((float("nan"), 1.0), (None, None), (None, None)),
+    "inside": ((1.0 + 0.9 * X_SUM_TOL, 1.0 - 0.9 * X_SUM_TOL), (None, None), (None, None)),
+    "hot": ((1.0, 1.0), (T_MAX + 0.5, None), (None, None)),
+    "hot_dt0": ((1.0, 1.0), (np.nextafter(T_MAX, np.inf), None), (0.0, None)),
+    "bounds": ((1.0, 1.0), (T_MIN, T_MAX), (None, None)),
+    "straddle": ((1.0, 1.0), (None, None), (None, None)),
 }
 
 
@@ -64,12 +69,17 @@ def main() -> None:
         J[P < 3e4] = 1e-4
     dt = torch.full_like(T, 50.0)
     x = x.clone()
-    factors, temperatures = EDITS[edit]
+    factors, temperatures, lengths = EDITS[edit]
     x[5:7] *= torch.tensor(factors, **f64)[:, None]
+    if edit == "straddle":
+        perm = [int(q) for q in solver._tables["perm"].tolist()]
+        x[5] = torch.tensor(helpers.on_the_tolerance(x[5:].tolist(), perm, X_SUM_TOL, warp_above=True), **f64)
     T = T.clone()
-    for cell, value in zip((5, 6), temperatures, strict=True):
-        if value is not None:
-            T[cell] = value
+    for cell, t_cell, dt_cell in zip((5, 6), temperatures, lengths, strict=True):
+        if t_cell is not None:
+            T[cell] = t_cell
+        if dt_cell is not None:
+            dt[cell] = dt_cell
     case = out / "case"
     case.mkdir(parents=True, exist_ok=True)
     for name, t in (("x", x), ("T", T), ("P", P), ("dt", dt), ("h", h), ("J", J)):
