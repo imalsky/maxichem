@@ -26,7 +26,10 @@ __device__ __forceinline__ void dense_lu(double* A, double* dinv, int* pr, int l
         bi = oi;
       }
     }
-    if (bi != NS && bi != k && !(fabs(A[k * NS + k]) >= PIVTAU * best)) {
+    // every lane reads A[k][k] before lane k & 31 can overwrite it in the exchange
+    const bool exchange = bi != NS && bi != k && !(fabs(A[k * NS + k]) >= PIVTAU * best);
+    __syncwarp();
+    if (exchange) {
       for (int j = lane; j < NS; j += 32) {
         const double a = A[k * NS + j];
         A[k * NS + j] = A[bi * NS + j];
