@@ -1,8 +1,8 @@
 """The solver's settings and constants, by kind, each with its unit and its reason or source.
 
-The kernels get the call settings and the physical constants through their generated header (_kernel_header.py), so
-each value is written once, here. The method is in docs/method.md; a published formula's coefficients stay beside the
-formula in kernels/, and the checks' acceptance bars are in _checks.py.
+The kernels get the call and method settings and the physical constants through their generated header
+(_kernel_header.py), so each value is written once, here. The method is in docs/method.md; a published formula's
+coefficients stay beside the formula in kernels/, and the checks' acceptance bars are in _checks.py.
 """
 
 # Call settings: what a call accepts, and its defaults.
@@ -24,6 +24,27 @@ ATOL = 1e-25  # default absolute tolerance, in mole fraction (docs/method.md)
 # (2 CAP)^2 / REC_STEPS, 0.4 CAP^2, so this CAP's limit is DEFAULT_MAX_STEPS
 CAP = 100
 DMAX = 16  # tangent directions per jvp call
+
+# Method settings: the step control, the recovery's pivoting and the guard's correction (docs/method.md). Unitless
+# unless stated; the kernels' constexprs of the same names take them from the header.
+H_MIN = 1e-12  # s: the smallest first try of a call
+CALL_END = 1.0 - 1e-14  # a call ends at this share of dt, so rounding does not force one more step
+STEP_SAFETY = 0.9  # the safety factor on err^(-1/3)
+ERR_FLOOR = 1e-10  # keeps the step factor finite at err = 0
+FAC_NONFINITE = 0.1  # the step factor after a non-finite err
+FACACC = 0.2  # the smallest step factor after an accepted step
+FACREJ = 0.2  # the smallest step factor after a rejected try
+FACMAX = 20.0  # the largest step factor
+FAC_AFTER_REJECT = 0.5  # the largest step factor after a rejected try
+SECMIN = 1e-4  # the smallest secant shrink
+SECANT_MIN_ORDER = 0.05  # below this fitted order of err in h, the shrink is SECMIN
+SECANT_MAX_ORDER = 3.0  # the method's error order: the largest order the fit may use
+SECANT_TARGET = 0.5  # the err a secant shrink aims at
+# recovery: exchange rows only below this share of the column's largest; plain partial pivoting (1) gave 12 times the
+# solve error at the step control's scale (notes.md, "Do not retry")
+PIVTAU = 0.1
+ELEMENT_PIVOT_MIN = 1e-10  # the guard leaves out an element whose pivot falls below this share
+GMAX = 1e-3  # the element-share correction changes a species by at most this, relative
 
 # Physical constants.
 KB = 1.380649e-16  # erg K^-1: Boltzmann's constant (exact in the SI since 2019)
