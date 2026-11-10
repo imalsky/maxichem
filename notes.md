@@ -1869,6 +1869,78 @@ the break named, and passes now.
   225 s; known answers, order, rate laws, kernel copies, dense LU 25 passed in 336 s; test_vulcan_truth 2 passed in 204 s;
   test_export_cpp 19 passed in 532 s; test_ad 81 passed in 1006 s (285 verdicts pass, 0 fail); pre-commit on all files passes with the header written.
 
+### 2026-11-10 09:15 to 13:10: the settings in one file, and no bare numbers in the kernels
+Branch settings-file, from 5a032ea. A cleanup: no result moves. Scratch data of the measurements are not kept in the
+repository.
+- Inventory at 5a032ea: every numeric literal outside a module-level UPPER_CASE assignment in maxichem/, coupling/,
+  bench/ and tools/ (syntax trees), and in the kernels and cpp/ with comments removed: 2,265. Classed by rules on file,
+  value and line; every literal of a class other than arithmetic was read, and a sample of the arithmetic. No bare call
+  setting, method setting or physical constant: all were named, the method settings as constexprs at the top of
+  common.cuh, KB, P0 and NASA_SPLIT_T in kinvulcan.py. 56 bench scenario values (gpu_speed's batch, written out in its
+  docstring; kintest's schedule and report bins); 81 coefficients of published formulas (the NASA-9 polynomial,
+  Rodas3's four stages, K1's weight 2 and 1 / GAMMA = 2, the 3 of the step factor's cube root in its derivative,
+  coupling's extrapolation and N2 per N); 352 layout numbers (201 of them the kernels' warp width: lane & 31, >> 5,
+  shuffle offsets; 14 warp widths and 11 bytes per double in host code; table widths, flag fields, stride terms); 4 report
+  bins of a check; 1,727 arithmetic, indices and shapes; 45 inside constexpr or #define lines. At the branch head 2,198.
+- Moved: H_MIN through GMAX (16 method settings) from common.cuh to _constants.py; the kernels keep their constexprs, set
+  from header macros NAME_VALUE = repr(value), each of which parses back to the same double. KB, P0, NASA_SPLIT_T from
+  kinvulcan.py, which still exports KB and P0. _constants.py has a section each for call settings, method settings,
+  physical constants and layout. Named: WARP_LANES, DOUBLE_BYTES, KIND_* (plain ints, so the reader's dicts and every
+  digest are unchanged), FALLOFF_KINDS, THREE_BODY_KINDS, ARRHENIUS_COLUMNS, RATE_ROW_COLUMNS, the uint8 and int32
+  limits; in C++ kWarpLanes. The step factor's derivative takes SECANT_MAX_ORDER for its 3, and a static_assert holds it
+  to 3, the cube root step_factor takes. docs/method.md names STEP_SAFETY, ERR_FLOOR, H_MIN, SECANT_TARGET,
+  SECANT_MAX_ORDER and T_MAX where it repeated their numbers.
+- Proofs. Python-only step (e32cc92): the generated header text equal in 106 of 106 compiled variants; reader, table,
+  derivative-table and size hashes equal on all 10 networks that load, dark and lit, at 101376 and 49152 B (146
+  records); every constant's value equal; the package's syntax trees equal with each new name replaced by its value, but
+  for 6 units read by hand (the moves, an f-string, two local names); the solvers' launch and scratch sizes and the
+  exports of both default networks, dark and lit (96 files: cubins, tables, meta.txt), byte-equal (162 records); parity
+  and guard 48 passed; slow CPU 4 passed. C++ step (da792eb): test_export_cpp 19 passed. Method settings through the
+  header (c5f4b5d) and the cube root's name (5fa8d94): compiled kernels equal to 5a032ea's in 77 of 77 variants at the
+  card's 101376 B (NCHO_photo, SNCHO_photo_network_2025 and CHO_photo, dark and lit; call at 1-4 cells per block, W in
+  and out of shared memory; jvp, vjp) and in the test networks' forms at the sizes the solvers pick for them (synthetic
+  call at 1, 4 and 5 cells, synthetic_small at 1 and 10, their jvp and vjp at 2, 5 and 32 warps, the plain falloff); the
+  header gains exactly the 16 macros, every other line in place. Compiled again from the commits themselves (c5f4b5d,
+  whose kernel file is the checked one with one comment realigned, and the head): 77 of 77 equal. Parity and guard 48
+  and test_export_cpp 19 passed on the method step. No compiled kernel changed at the card's sizes, so no speed was measured.
+- Found: at 49152 B NVRTC's output for an unchanged source varies from compile to compile. Of 40 variants at 49152 B
+  (call at 1-4 cells with W in and out of shared memory, jvp, vjp; NCHO_photo and CHO_photo), 21 gave 2 or 3 cubins in
+  3 compiles of 5a032ea, and in 6 PTX compiles each, 8 at a time, 22 gave 2 to 5 different PTX, so the spread starts
+  before the assembler. One variant compiled one at a time gave 2 PTX in 4. The 16 call variants with W in global
+  memory repeated exactly in every compile. The cause is not found; the load average was 14 to 33 throughout (these
+  compiles and other jobs), so load is only a guess. The 2026-11-06 entries' equal cubins at 49152 B may have been
+  lucky draws. These variants are compared by PTX instead: for each of the 40, 5a032ea, the method step and the
+  cube-root step share at least one identical PTX among 6 compiles each (40 of 40 for each pair), which a change in the
+  program would not allow. At 101376 B and in the test forms no compile here differed from another of the same program
+  (the 77 variants in the compiles of 5a032ea and both kernel steps; one call 4 of 4 repeats).
+- Not changed, with the reason. The kernels' 32 (warp width, 201 sites, with & 31 and >> 5): CUDA's warp, written as in
+  CUDA's own idiom; a constexpr int would touch every kernel. Rodas3's 2 (K1's weight in Y3, Y4 and N') and 1 / GAMMA =
+  2: naming one as a constexpr double changed the cubins of the call and derivative kernels by 16 to 144 bytes
+  (measured on 6 variants), which then needs the bitwise and speed proof; docs/method.md states them and the test allows
+  2.0. The guard's clamping allowance 2 atol per accepted step (guard.cuh) is a bare 2.0 of the same kind. Layout
+  formulas (strides, work-array offsets, record fields, VOFF, the stream words' bit budget, warps_per_cell's 4 and 3),
+  the header generator's bit-set macros and the NASA-9 file layout: the layout phase. gpu_speed's batch: written out in
+  its docstring; kintest's schedule: the check's definition, left as written. coupling/: formula coefficients only.
+- Kept from coming back: tests/test_constants_source.py (a new file, so the collision-limit branch's edits of
+  test_tables_source.py and its docs/testing.md row merge as before) fails on a float in a kernel other than 0, 1/2, 1
+  and 2 outside a constexpr or static_assert line, suffixed or not (shown on a bare 0.9 and 0.9f in the guard, and on
+  5a032ea's 3.0); on a backticked UPPER_CASE name in docs/method.md, three letters or more, that neither _constants.py
+  nor a kernel defines (shown with FAC_NONFINITE_X and CAPS); and on a C++ copy that differs from _constants.py (shown
+  with kGuardBlockThreads 256).
+- Merge with the pending collision-limit branch, tried in a scratch clone: one conflict more than main has, the import
+  line of _tables.py (keep both); the merged tree passes the CPU tier (115). After the merge its _THREE_BODY_KINDS
+  repeats THREE_BODY_KINDS.
+- Checks on the final tree (c665d02's content; the two commits after it change a test's patterns and a doc page, and
+  the CPU tier passes on them, 110), pre-commit on all files with the header written: CPU 110 passed;
+  slow CPU 4 passed; parity and guard 48 passed in 225 s; known answers, order, rate laws, kernel copies and dense LU 25
+  passed in 334 s; test_ad 81 passed in 1005 s (286 verdicts pass, 0 fail); test_export_cpp 19 passed in 534 s;
+  test_vulcan_truth 2 passed in 214 s (NCHO 0 misses, worst 0.014 dex on boxes, 0.004 on paths; sulfur pins held; run
+  in the worktree, since its run record reads the git commit). Valid-input outputs of the final tree, from a fresh
+  process through the public calls (the two default networks' export, parity-start, lit, chain, jvp and vjp cases, and
+  the export cases and a jvp and vjp on 256 solar starts for the 8 other networks that load), bitwise those of 5a032ea
+  dumped today: 26,401,783 numbers, 0 differ; that 5a032ea dump is bitwise the one of 2a3daee made for the previous
+  entry. No result moved.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
