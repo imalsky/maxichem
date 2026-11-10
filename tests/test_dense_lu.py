@@ -26,6 +26,8 @@ MATRICES = 8  # of each kind
 DOMINANT = 10.0  # the diagonal of the shuffled matrices, against off-diagonal entries of order 0.1
 OFF_DIAGONAL = 0.1
 SMALL_DIAGONAL = 1e-3  # on every other diagonal of the random matrices
+TIE_ROWS = [3, 7]  # rows of lanes 3 and 7 holding column 0's equal largest |entry|
+TIE = 10.0  # above every entry of a standard-normal column of 42
 FACTOR_TOLERANCE = 1e-13  # |P A - L U| against |L| |U|, per entry: rounding of sums in another order (fma)
 SOLVE_TOLERANCE = 1e-10  # relative, against numpy's solve and factors: rounding times these matrices' condition
 HARNESS = Path(__file__).parent / "dense_lu_check.cu"
@@ -55,12 +57,17 @@ def threshold_lu(a: np.ndarray) -> tuple[list[int], np.ndarray, int, int]:
 
 
 def _matrices(ns: int, rng: np.random.Generator) -> np.ndarray:
-    """Return MATRICES shuffled dominant matrices, then MATRICES random ones with small diagonals."""
+    """Return MATRICES shuffled dominant matrices, MATRICES random ones with small diagonals, and one with a tie.
+
+    The tie: column 0's largest |entry| twice, in rows of two lanes, so the warp's reduction must take the lower row.
+    """
     shuffled = OFF_DIAGONAL * rng.standard_normal((MATRICES, ns, ns)) + DOMINANT * np.eye(ns)
     shuffled = np.stack([q[rng.permutation(ns)] for q in shuffled])
     random = rng.standard_normal((MATRICES, ns, ns))
     random[:, range(0, ns, 2), range(0, ns, 2)] *= SMALL_DIAGONAL
-    return np.concatenate([shuffled, random])
+    tie = random[0].copy()
+    tie[TIE_ROWS, 0] = (TIE, -TIE)
+    return np.concatenate([shuffled, random, tie[None]])
 
 
 def test_dense_lu_pivots_by_the_threshold_rule(read_network, gpu):
@@ -103,4 +110,5 @@ def test_dense_lu_pivots_by_the_threshold_rule(read_network, gpu):
         assert error <= SOLVE_TOLERANCE
     # the cases exercise what they are for: exchanges at most pivots, and rows kept by the threshold
     assert min(exchanged[:MATRICES]) >= ns // 2
-    assert min(kept_rows[MATRICES:]) >= 1
+    assert min(kept_rows[MATRICES : 2 * MATRICES]) >= 1
+    assert rows[-1].tolist()[0] == TIE_ROWS[0]  # the tie went to the lower row

@@ -46,7 +46,16 @@ constant there fails them. Tests that need other data than `tests/data` write th
 temporary folder (`helpers.write_network`) and read them with the public reader. The rate laws are seen through
 isomerizations beside unchanged spectators, whose decay to equilibrium is exactly exponential at (k_f + k_r) times the
 spectators' densities. A direction of one molecule and M stays far below the collision limit, so the limit's rule for it
-is not pinned.
+is not pinned. The falloff law is also checked where Pr is 0, infinite or 0 / 0, against Troe's limit
+$F_c^{d^2/(1+d^2)}$ and its T derivative. The equilibrium of H + H + M = H2 + M uses NASA-9 data read from the files in
+the test and the standard pressure typed there, so a wrong P0 or a wrong $(k_B T / P_0)^{\Delta\nu}$ fails it. A first
+try is rejected for its error alone: its exact Rodas3 trial is positive, and rtol puts either the RMS or only the
+largest error above 1.
+
+Not covered by an independent test: efficiencies in a mixed gas (only the bulk gas's is used) and inside a falloff's Pr;
+the collision limit on a pair of unequal molecularity; the special law's limits of Pr and its pressure tangent; a NASA-9
+split moved by only 50 K (the tests' points are 100 K from it); a photolysis branch whose first product repeats; ties
+in the dense LU beyond column 0; element drift in an element other than He (the guard's test moves only He's share).
 
 ## The derivative cases
 
