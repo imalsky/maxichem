@@ -1516,6 +1516,37 @@ snapy's docs on tracers, and the papers below. One independent review of the sam
   time: 3,000 s at 1,500 K, 750 s at 2,500 K); the sponge's heat; the donor-cell implicit transfer; unfinished cells
   written back; the collision limit cuts the C2H + M pair by 47 times at 1,000 K and 100 bar (its number, not rerun).
 
+### 2026-11-09 18:00 to 18:15: #334 brought up to main; the drivers' gas, radiation step, edge temperatures, photolysis stand-in, unfinished cells and start mixture changed (experiments/2026-11-09_science_pass)
+- snapy #334: its branch now holds main bd40fd25 merged into the reviewed head 6b2ee96 (head 7c0f54f9, a plain push). The
+  patch against main equals the reviewed one byte for byte (the same sha256 of the two diffs; 4 files, +282/-54). The
+  result of the CI run on the new head is in the next entry that names it.
+- The snapy group's calls after the deck-gas point was posted: the decks switch to the H2 and He gas before any new lid or
+  sponge run; the lid target stays a pressure, about 0.03 mbar (about 140 layers of 60 km on the new gas, an estimate),
+  against one level higher, to day 2, judged on rms T <= 5 K and rms u <= 20 m/s at 0.1-1 bar; the weakest sponge (tau 1e4
+  s), its base quoted as a pressure; every lid, sponge and seed number on the H2 deck is provisional until rerun. How a
+  dry H2 and He gas is best declared in snapy is being checked by snapy's author; no new run before that answer.
+- The author's decisions on the drivers (gcm_box.py, gcm_chem.py, gcm10d.py, lid_run.py), applied:
+  1. Gas: `composition: {H: 1.68, He: 0.16}`, `cv_R: 2.65` (2.334 g/mol, R 3,562 J/kg/K; the metals are left out, 1.2 %
+     above the full mixture's R). re_start.py's cp follows (3.65 R). Not changed: conv_tracer.py and neg_repro.py (held
+     flow), and the C++ box with its Python twin. The saved flows and start columns are of the H2 gas: re-spin first.
+  2. Radiation every 300 s by default (was 3,600 s).
+  3. The longwave's edge temperatures are 1.5 T_0 - 0.5 T_1 (were 2 T_0 - T_1). lid_run.py keeps --lid-fix and --lw-sub.
+  4. gcm_box.py --jref: the table's J unscaled where cos z > 0, zero on the night side (was the table times cos z). Still
+     a stand-in: no slant attenuation; the table holds no zenith angle and mixes layers of several VULCAN runs.
+  5. An unfinished chemistry cell stops the run, in the start call and in every step, with the count and the first
+     cell's T and P (was: the partial result written back and counted).
+  6. The start's elements are VULCAN-JAX's default ratios per H nucleus (O/H 6.0618e-4, C/H 2.7761e-4, N/H 8.1853e-5,
+     He/H 0.09692, S/H 1.3183e-5): H2 0.8366, He 0.1623, H2O 5.50e-4, CO 4.65e-4, N2 6.85e-5 (C/O 0.458, 2.361 g/mol),
+     then the same 1e10 s call. Was O/H 8.32e-4, C/O 0.364.
+- Smoke test of the edited box driver (smoke.sh; main bd40fd25 + #334; 20 steps from rest, then 5 coupled steps, dark;
+  not a science run): both parts end normally; the start call takes 140 steps per cell on average, none unfinished; later
+  calls 1.16-1.22; 0 negative entries, element change at most 2.3e-15, sum(q) - 1 within 2.4e-7, column check 2e-16. The
+  100-layer box now reaches 2.4 mbar in its top cell (12.7 mbar on the H2 deck), as the estimate above said.
+- Posted to the snapy group as points outside these drivers: the implicit transfer's donor-cell ratio (and that the
+  single-tracer orders were measured without the implicit solve); the sponge's drag on all three wind components with
+  the energy kept; the heat of reaction that passive scalars leave out near a higher lid; no code path yet for J.
+- Open, not run: a 70 s against 35 s step comparison with the corrected heating and the new gas; the reruns.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
