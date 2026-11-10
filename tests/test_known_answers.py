@@ -11,6 +11,8 @@ pytestmark = pytest.mark.gpu
 
 T_TEST = 1500.0  # K
 P_TEST = 1e6  # dyn cm^-2
+# dyn cm^-2: 10 bar, off the standard pressure, so the equilibrium of a reaction that changes the moles depends on P
+P_EQUILIBRIUM = 1e7
 J_TEST = 2.0  # s^-1
 DECAY_TOLERANCE = 2e-5  # relative, at rtol 1e-6: the integrator's error; measured 7.9e-6
 EQUILIBRIUM_TOLERANCE = 1e-12  # relative, on a mass-action ratio against the NASA-9 closed form; measured 1.3e-15
@@ -59,7 +61,7 @@ def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T, stem):
         x, _, done, _ = solver(
             x0,
             helpers.full(cells, T, gpu),
-            helpers.full(cells, P_TEST, gpu),
+            helpers.full(cells, P_EQUILIBRIUM, gpu),
             helpers.full(cells, 1e10, gpu),
             helpers.full(cells, 1e-10, gpu),
         )
@@ -75,8 +77,8 @@ def test_long_call_reaches_the_nasa9_equilibrium(read_network, gpu, T, stem):
     assert fractions["OH"] * fractions["H2"] / (fractions["H"] * fractions["H2O"]) == pytest.approx(
         k2, rel=EQUILIBRIUM_TOLERANCE
     )
-    # H + H + M = H2 + M: one mole fewer, so the ratio carries n_tot against the standard state
-    k3 = np.exp(-(g["H2"] - 2.0 * g["H"])) * (kinvulcan.P0 / (kinvulcan.KB * T)) * (kinvulcan.KB * T / P_TEST)
+    # H + H + M = H2 + M: one mole fewer. K_p = (p_H2 / P0) / (p_H / P0)^2 and p_i = x_i P: x_H2 / x_H^2 = K_p P / P0
+    k3 = np.exp(-(g["H2"] - 2.0 * g["H"])) * P_EQUILIBRIUM / kinvulcan.P0
     assert fractions["H2"] / fractions["H"] ** 2 == pytest.approx(k3, rel=EQUILIBRIUM_TOLERANCE)
     shares = (x @ torch.as_tensor(net.atoms, device=gpu)).sum(0)
     assert (
