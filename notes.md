@@ -1745,6 +1745,20 @@ Branch call-interface, on 0c7f7df. An interface change; no number moves and no r
 - Checks: CPU 92 passed; parity and guard 45 passed in 216 s (worst 2.8e-8 dex); known answers and order 9 passed in 112 s;
   test_export_cpp 15 passed in 401 s, bitwise on every case, counts included; test_vulcan_truth 2 passed in 203 s (0 misses,
   worst 0.004 dex on paths, 0.014 on boxes); test_ad 81 passed in 992 s, 0 FAIL.
+- Review follow-up (02:20 to 03:55, two commits). (1) `solver.flag` was set before the refusal raised, so a caught
+  ValueError left flag 0 (passed) on the refused cells, and a call refused on the host kept the previous call's flag: it is
+  None from the start of every call until the call returns (both solvers). (2) The constructors' `drift`, `photo` and `cap`
+  are keyword only (`CudaSolver(net, device, True)` set drift to 1 with photolysis off); no caller here or in the GCM drivers
+  passed them by position. (3) The C++ constructor checked names only against a whitelist: a missing `didx` failed in the
+  driver after the call kernel ran, a repeated `atol` or a `Jin` on the guard ran with "bitwise identical" results, and Ta/Pa
+  swapped fed the wrong slots. Each kernel's list must now equal `KERNEL_ARGUMENTS` (J last for call and recover with
+  photolysis), and every meta.txt check runs before any CUDA work; all five edits are refused at construction, naming kernel
+  and argument. (4) The interface test checks each optional parameter's kind; the C++ test changes what the accessors return
+  in place and checks the solver is unchanged (a build whose accessors share the tensors aborts). Shown failing on the code
+  before: the flag tests (guard 2 of 2, test_ad 3 of 3), the parameter-kind test (the constructors; one optional made
+  positional again in a scratch copy). Checks: CPU 98 passed; parity and guard 47 passed in 215 s; test_export_cpp 19
+  passed in 501 s, bitwise on every case; test_vulcan_truth 2 passed in 203 s (0 misses, worst 0.004 dex on paths, 0.014 on
+  boxes); test_ad 81 passed in 993 s, 0 FAIL; pre-commit on all files passes.
 - Not done: the C++ call still takes rtol and atol by position; `meta.at` lookups give no key name; Python's `count` and `total`
   are still mutable attributes; Python refuses a [B, 0] J without photolysis.
 
