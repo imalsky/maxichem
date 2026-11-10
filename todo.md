@@ -21,8 +21,10 @@ Tasks put off to return to, with the date deferred.
 - 2026-11-04. One snapy branch after PR #334 merges.
   - The fork has two branches: isaac/recon-many-variables (the launch-split fix alone, PR #334) and
     isaac/maxichem-coupling (the same fix plus the fused tracer transport).
-  - Once #334 is in chengcli/snapy main: rebase isaac/maxichem-coupling onto the new main (the fix commit drops out),
-    delete isaac/recon-many-variables on the fork, and keep working on the one branch.
+  - Done 2026-11-09: #334 is in snapy main (fe2edaa3); isaac/recon-many-variables is deleted on the fork and the fork's
+    main is level with snapy main.
+  - Still needed: bring isaac/maxichem-coupling up to the new main (merge it in and port the fused tracer path to main's
+    new tracer code in src/mesh/meshblock.cpp, src/scalar/scalar.cpp and tests/CMakeLists.txt).
 - 2026-11-05. Sphere heating bug (notes.md, 2026-11-05 18:53).
   - Bug: heat = -(A_top F_top - A_bot F_bot) / V with the column's plane-parallel fluxes gives a false 2 F / r per volume on
     the sphere. It cools the night side and heats the day side, most near the lid, and crashed 140 layers.
@@ -33,13 +35,6 @@ Tasks put off to return to, with the date deferred.
 - 2026-11-05. Rerun the sphere work with the corrected heating formula (notes.md, 2026-11-05 18:53), after the code cleanup.
   - The 2-day runs at 100, 120 and 140 layers from both starts, then the lid comparison on 0.1-1 bar and a lid choice.
   - The 10-day runs with and without chemistry and their figures, then the radiation-step and sponge tests as needed.
-- 2026-11-06. Fix the TiH NASA-9 data, so TiSNCHO runs again (notes.md, 2026-11-06).
-  - Bug: VULCAN's `NASA9/TiH.txt` has Cp / R from -36 to 819 below 1000 K, G / RT off by up to 0.73 dex at 250-450 K, and
-    a formula behind it about 0.46 dex from the direct calculation at all temperatures, cause not found.
-  - State: the reader refuses it (`MAX_GIBBS_JUMP`, 1e-5), and with it TiSNCHO, the only network that carries TiH.
-  - Needed: refit both ranges with a physical Cp, starting from `experiments/2026-11-06_tih_thermo/direct_stat_mech.py`; decide
-    where the corrected file lives, since it departs from VULCAN; update the test that expects the refusal. The dissociation
-    energy's error still leaves TiH uncertain by about 0.5 dex at 1000 K.
 - 2026-11-09. Design debt in the kernels (found in a code review; no result is wrong because of it).
   - The memory layout has two owners. Python sets the call kernel's array order (`VOFF = nnz + 10 * ns + 3`,
     `maxichem/_kernel_header.py:132`); the scratch offset `kf + 2 * NR + 2` is written again in `call.cuh:31` and
