@@ -38,7 +38,9 @@ FACMAX = 20.0  # the largest step factor
 FAC_AFTER_REJECT = 0.5  # the largest step factor after a rejected try
 SECMIN = 1e-4  # the smallest secant shrink
 SECANT_MIN_ORDER = 0.05  # below this fitted order of err in h, the shrink is SECMIN
-SECANT_MAX_ORDER = 3.0  # the method's error order: the largest order the fit may use
+# Rodas3's error order (err ~ h^3): the largest order the secant fit may use, and the plain law's cube root, which the
+# kernels take as cbrt (a static_assert holds them together)
+SECANT_MAX_ORDER = 3.0
 SECANT_TARGET = 0.5  # the err a secant shrink aims at
 # recovery: exchange rows only below this share of the column's largest; plain partial pivoting (1) gave 12 times the
 # solve error at the step control's scale (notes.md, "Do not retry")

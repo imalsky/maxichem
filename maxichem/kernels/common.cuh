@@ -83,7 +83,8 @@ __device__ __forceinline__ double wmax(double v) {
 }
 
 // Step-size factor after a try of size ha with err en, accepted or not (ok); prej, pen, pha: the call's previous try
-// was rejected, its err, its size (docs/method.md).
+// was rejected, its err, its size (docs/method.md). The plain law's cube root is err^(-1 / SECANT_MAX_ORDER).
+static_assert(SECANT_MAX_ORDER == 3.0, "step_factor takes cbrt, and step_factor_partials its derivative");
 __device__ __forceinline__ double step_factor(double en, bool ok, bool prej, double pen, double pha, double ha) {
   const bool efin = isfinite(en);
   double fac = efin ? STEP_SAFETY / cbrt(fmax(en, ERR_FLOOR)) : FAC_NONFINITE;
