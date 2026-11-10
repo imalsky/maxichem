@@ -1409,6 +1409,55 @@ Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
   steps 1.60 vs 1.61 per call (max 39 in both); element change per cell at most 2.6e-15 and the radiation column check 4.1e-16
   in both. No timing (the GPU was shared with the twin).
 
+### 2026-11-09 16:01: the 1 K seed twins; the box and tracer order on snapy main bd40fd25; the deck's gas against the tracers' gas (experiments/2026-11-07_lid, 2026-11-09_main_check, 2026-11-09_passive_check)
+- Seed twins (`seed.sh`, `seed_compare.py`, seed_compare.json; `lid_run.py` gained `--perturb-top` and `--perturb-uniform`):
+  eq140 again with the starting pressure times (1 + 7.6e-4 s) in the top 10 layers only, about 1 K at 1,316 K; s = N(0, 1)
+  (seedn140) or s = 1, a coherent warming (seedu140). Same build as the lid runs (coupling branch 5be2af0, fusion off), 2 days.
+  Against eq140, rms at 0.1-1 bar: day 1 3.3e-4 K and 7.5e-4 m/s (noise), 3.5e-4 K and 8.3e-4 m/s (coherent); day 2 0.23 K and
+  2.0 m/s (noise; largest cell 15.7 K), 0.06 K and 0.39 m/s (coherent; 4.2 K). Day 2 at 0.02-0.1 bar: 1.2 K / 9.8 m/s and
+  0.32 K / 2.1 m/s; above 0.02 bar: 3.1 K / 20 m/s and 1.6 K / 8.1 m/s.
+- So a 1 K seed near the top stays far under the snapy group's 2 K line at day 2: by their rule the day-2 lid and sponge gaps
+  (5.6 K / 34 m/s, 6.8 K / 45 m/s) come from the setup, which points to 160 layers with the weakest sponge. Their call is
+  pending. Inferred, not tested: the seed is set at rest and has fallen to 3e-4 K at 0.1-1 bar by day 1, then grows 170-700 times
+  in day 2; the lid and sponge gaps were already 0.5-1.0 K at day 1. A one-time seed is a weak stand-in for a lid or a sponge,
+  which act the whole time; a seed added at day 1 would be a closer test (not run).
+- snapy main is bd40fd25 (#336, #337, #338, #340 merged since 21a3e8a). Built: main merged with #334 (local head 7c0f54f of
+  isaac/recon-many-variables in snapy-pr48, not pushed; `git diff bd40fd25 7c0f54f` equals `git diff 3c891cb 6b2ee96` byte for
+  byte). C++ ctests there: 110 pass, 1 skipped (two GPUs), test_straka fails (no `ncrcat` here); the multi-process tests pass
+  one at a time.
+- Box on that build, the 2026-11-07 dark NCHO case (69 tracers, default scalar path, 300 steps of 70 s, radiation every 600 s):
+  0 negative entries, no unfinished cell, all guard counts 0, 1.60 solver steps per call (median; max 39), element change per
+  cell at most 3.2e-15, transport and chemistry budgets within 4.1e-16 and 9.0e-16, column check 3.8e-16. A second run repeats
+  the first row for row. Misses not scored (no VULCAN truth for these runs). The sum of the tracers' mass fractions, logged in
+  the second run (`gcm_box.py` now writes `qsum`): within -4.1e-5 and +5.4e-5 of 1 over the 300 steps (each species' WENO5
+  weights differ, so the sum is not kept exactly; each species' mass is). No clean timing (other jobs on the CPUs): 1.39 s of
+  flow and tracers per step against 1.10 s on the coupling branch's default path on 2026-11-07, to be timed properly.
+- Single-tracer convergence on that build (`run_conv.sh`). The narrow blob (sigma 0.05 L, vertical, 25 to 400 cells): orders
+  3.40, 3.79, 4.70, 4.95, against 2.87, 2.69, 2.22, 2.03 on main 2d9fa41 (2026-11-04); the largest error above 1e-3 of the peak
+  at 50 cells 0.37 -> 0.25 dex, at 100 cells 0.060 -> 0.026 dex. So #336's separate reconstruction of tracer and density lifts
+  the q-bar / rho-bar cap. Correction to the 2026-11-07 entry: its "2.09, 1.24, 0.58" was the wide blob (sigma 0.1 L), which has
+  the wall's floor in its error (2026-11-04 02:00); on bd40fd25 that case gives 2.48, 0.62, 0.04 with L1 stuck near 1.4e-3. It is
+  not an order test. Horizontal orders are unchanged (4.04, 4.32, then the x1 floor).
+- The fused path of isaac/maxichem-coupling (5be2af0) no longer merges with main: conflicts in src/mesh/meshblock.cpp,
+  src/scalar/scalar.cpp and tests/CMakeLists.txt, and its kernels compute the scalar path of 21a3e8a. Open upstream #326
+  (fp32 foundations) changes four files of the tracer path again. Not rebuilt.
+- The deck's gas is not the tracers' gas (found in review, measured in `mu_scan.py`, `mu_run.py`, `deck_mu_probe.py`). Every
+  deck so far has one dry species H2 (2.016 g/mol, cv = 2.5 R); the tracers start as H2 0.84, He 0.16 plus metals,
+  2.3625 g/mol. So the flow's R / mu and scale height are 17.2 % too large for the gas the chemistry carries, and its cp is
+  about 12 % too large (14.43 against 12.90 kJ/kg/K at 1500 K with the NASA-9 heat capacities; a reviewer's number, not
+  recomputed here). The coupling itself is consistent (mass fractions per dry density, mass kept through the chemistry, T and P
+  from the flow). A deck entry `composition: {H: 1.68, He: 0.16}` is accepted and gives 2.334 g/mol.
+- How far the chemistry moves the molar mass, which a passive tracer cannot feed back: in the saved 10-day run (A, day 10,
+  old heating) the tracers' molar mass is 2.3572 to 2.3648 g/mol, no cell more than 1 % from the median. At chemical steady
+  state (dark, 1e10 s) it stays within 0.3 % up to 1500 K at every pressure and up to 2000 K at 0.1 bar and above; it falls
+  by 7 % at 2000 K and 1e-4 bar, 12 % at 2300 K and 1e-3 bar, 28 % at 2300 K and 1e-4 bar (H2 dissociation). The energy matters
+  earlier than the molar mass: 0.9 % of H2 dissociated at 2000 K and 0.01 bar raises the equilibrium cp by about 70 %
+  (a reviewer's estimate from the NASA-9 data, not recomputed here; Bell & Cowan 2018, ApJL 857, L20; Tan & Komacek 2019,
+  arXiv:1910.01622). The lid runs reach 1,900-2,400 K at and above 1 mbar, where this starts.
+- Review points on the box driver, not acted on: a cell that comes back unfinished is still written to the tracers (none
+  occurred; the counts are logged); the photolysis table is a fixed 1-D profile times cos z; the 70 s first-order splitting
+  has no convergence run with the corrected heating.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
