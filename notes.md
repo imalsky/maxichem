@@ -1477,6 +1477,42 @@ Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
   occurred; the counts are logged); the photolysis table is a fixed 1-D profile times cos z; the 70 s first-order splitting
   has no convergence run with the corrected heating.
 
+### 2026-11-09 16:50 to 17:15: a pass over the coupling's physics decisions (experiments/2026-11-09_science_pass)
+Read: the drivers (gcm_box.py, gcm10d.py, lid_run.py, chem_glue.cu), snapy's scalar and implicit transfer at bd40fd25 + #334,
+snapy's docs on tracers, and the papers below. One independent review of the same files, given no conclusions.
+- Uniform ratio on snapy main (uniform_box.py; the box deck with implicit-scheme 9, the 1-day spun-up flow, 300 steps of
+  70 s, no heating, winds up to 3 km/s): eight constant ratios stay to 8e-16 after 1 step and 1.8e-14 after 300, with 0
+  positivity hits. A blob and its complement (sum 1 at the start) depart from 1 by 1.0e-4 after 1 step and at most 5e-4
+  over the run. So the tracer flux is consistent with the mass flux through the implicit transfer (the donor cap's code
+  ran; whether it bound is not logged); the closure drift of sum(q) comes from each row's own WENO weights.
+- The single-tracer orders of the entry above were measured with implicit-scheme 0 (conv_tracer.py). The implicit
+  transfer moves tracer at the donor cell's ratio (first order); its share of the vertical transport at 70 s is not
+  measured.
+- Drivers, read in the code: the sphere runs are dark (J = 0 in gcm10d.py); only the lit box runs use the J table times
+  cos z. The longwave's edge temperatures are 2 T_0 - T_1, a full-cell extrapolation where the edge is half a cell away
+  (1.5 T_0 - 0.5 T_1 is the linear value). The start mixture has O/H 8.32e-4, C/H 3.03e-4, N/H 7.19e-5, C/O 0.364, He/H
+  0.095, against VULCAN-JAX's default 6.06e-4, 2.78e-4, 8.19e-5, 0.458, 0.097: 1.37 times its oxygen. The drivers hold
+  one grey shortwave band and no code that makes J from a radiation field, so the planned J source is not built. The 10-day runs took the radiation hourly; the lid and seed runs every 300 s.
+  The top sponge damps all three velocity components and leaves the total energy, so the kinetic energy it removes
+  becomes heat.
+- Published practice (papers opened; most through a text summary of the first part of each paper, so a number is as
+  found there and an absence means not found). Passive mixing ratios with one global R and cp: the UM kinetics runs (Drummond et
+  al. 2020: R 3516.6, cp 1.28e4 J/kg/K for HD 209458b, mass mixing ratios, chemistry every 3,750 s against a 30 s
+  dynamics step, radiation every 150 s, opacities follow the chemistry, no photochemistry, no Kzz, equilibrium start,
+  1,000 days), THOR (Mendonca et al. 2018: R 3714, cp 13,000, grey radiation with no feedback), Exo-FMS with mini-chem
+  (Lee et al. 2023: chemistry every 1,500 s, no feedback, no eddy diffusion), MITgcm (Cooper & Showman 2006). Only Tan &
+  Komacek 2019 let composition change R and cp, for atomic H, with onset near T_eq 2,200 K. The deck's R 4,124 and cp
+  14,435 J/kg/K sit 17 % and 13 % above the UM's values; the tracers' own gas gives R 3,519 and cp 12,903 at 1,500 K.
+- Photolysis and zenith angle: the direct beam's part of J is J_top exp(-tau / mu) with no cosine factor (Tsai et al.
+  2021, eq. 8; Bais et al. 2003, JGR 108, 8543), so a J(P) table times cos z is too small aloft, by cos z itself in thin
+  gas, and puts the photolysis layer at the wrong depth. No hot-Jupiter GCM found computes photolysis inside the model;
+  the UM does for terrestrial planets, per column in its radiation (Ridgway et al. 2023).
+- The independent review agreed on the passive representation, the dry-density convention, the flux and implicit
+  transfer, the conversions and the time level, and on the deck's gas as the largest error. Its further points, checked
+  in the code where stated above: the edge temperatures; the hourly radiation (its estimate of the thin-gas radiative
+  time: 3,000 s at 1,500 K, 750 s at 2,500 K); the sponge's heat; the donor-cell implicit transfer; unfinished cells
+  written back; the collision limit cuts the C2H + M pair by 47 times at 1,000 K and 100 bar (its number, not rerun).
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
