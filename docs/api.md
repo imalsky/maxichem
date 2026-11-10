@@ -38,8 +38,9 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 
 | Member | Meaning |
 | --- | --- |
-| `solver(x, T, P, dt, h, rtol, atol, max_steps, J)` | Returns (x, h, done, accepted steps); raises if it refused a cell |
-| `launch(...)` | The same, with a per-cell flag: 0 passed the guard, 1 recomputed and passes, 2 recomputed and still fails |
+| `solver(x, T, P, dt, h, *, rtol, atol, max_steps, J)` | Returns a `CallResult` (x, h, done, steps); raises if it refused a cell |
+| `launch(...)` | The same, as a `LaunchResult` with the per-cell flag added: 0 passed the guard, 1 recomputed and passes, 2 recomputed and still fails |
+| `flag` | The last call's per-cell flag (int32 [B]); `launch` and a call both set it |
 | `fallback` | The last call's counts, as a dict |
 | `check()` | The counts since construction; raises if any cell was below `T_MIN` or above `T_MAX` |
 | `export(folder)` | Writes what `cpp/maxichem.hpp` loads |
@@ -49,6 +50,17 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 
 J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells) and refused
 without it.
+
+The results are named tuples, so `x, h, done, steps = solver(...)` and indexing work as before:
+
+| Result | Fields |
+| --- | --- |
+| `CallResult` | `x` [B, S] mole fractions; `h` [B] the next call's starting step, s; `done` [B] bool; `steps` [B] accepted steps, float64 |
+| `LaunchResult` | `CallResult`'s fields, then `flag` [B] int32 |
+
+Interface change: `rtol`, `atol`, `max_steps` and `J` are keyword only, in the call, `launch`, `jvp` and `vjp`. A call that passed
+them by position, as `solver(x, T, P, dt, h, 1e-3, 1e-25)`, now raises TypeError: write `solver(x, T, P, dt, h, rtol=1e-3,
+atol=1e-25)`. Before, swapping the two tolerances passed every check. Unpacking and indexing the results is unchanged.
 
 A cell is refused when it is bad input (a negative or non-finite mole fraction, |sum(x) - 1| above `X_SUM_TOL`, no mole fraction
 above 0, a non-finite T, P <= 0, a negative or non-finite dt, or a negative or non-finite J) or outside [`T_MIN`, `T_MAX`] (counted
@@ -64,11 +76,16 @@ A non-finite h acts as dt and is counted in `nonfinite_h`. `launch` and a call b
 
 | Member | Meaning |
 | --- | --- |
-| `jvp(x, T, P, dt, h, dx, dT, dP, ddt, dh, lm, dlm, rc, drc, adapt, rtol, atol, max_steps, J, dJ)` | Returns (x, h, done, accepted steps, dx, dh) |
-| `vjp(x, T, P, dt, h, gx, gh, lm, rc, adapt, rtol, atol, max_steps, J)` | Returns (x, h, done, accepted steps, cotangents dict) |
-| `fallback`, `check()`, `flag` | Counts as `CudaSolver`, and the last call's per-cell flag |
+| `jvp(x, T, P, dt, h, dx, dT, dP, ddt, dh, *, lm, dlm, rc, drc, adapt, rtol, atol, max_steps, J, dJ)` | Returns a `JvpResult` (x, h, done, steps, dx, dh) |
+| `vjp(x, T, P, dt, h, gx, *, gh, lm, rc, adapt, rtol, atol, max_steps, J)` | Returns a `VjpResult` (x, h, done, steps, cotangents) |
+| `fallback`, `check()`, `flag` | As `CudaSolver` |
 | `rc0` | The network's rate table [R, W], which a call uses unless given another |
 | `close()` | As `CudaSolver` |
+
+Everything after the required tensors (after `dh` in `jvp`, after `gx` in `vjp`) is keyword only. The results are named tuples:
+`JvpResult` holds `CallResult`'s fields, then `dx` ([B, S], or [D, B, S] with a leading axis of directions) and `dh` ([B] or [D, B],
+s); `VjpResult` holds `CallResult`'s fields, then `cotangents`, a dict: x [B, S], T [B], P [B], dt [B], h [B], lm [B, R], rc [R, 9]
+and, with `photo=True`, J [B, branches], each per unit of its input. The per-cell flag is `flag`, as in `CudaSolver`.
 
 A non-finite log multiplier in `lm` takes no try: its cell comes back with done 0, flag 2 and NaN derivatives, counted as unfinished,
 recomputed and still failed.
@@ -84,7 +101,8 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 
 ## Constants in `kincuda`
 
-`ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `T_MAX`, `X_SUM_TOL`, `COUNTS`.
+`ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `T_MAX`, `X_SUM_TOL`, `COUNTS`. The result types are `kincuda.CallResult`,
+`kincuda.LaunchResult`, `kincuda_ad.JvpResult` and `kincuda_ad.VjpResult`.
 
 ## C++: `maxichem::Solver(folder, device)`
 

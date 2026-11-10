@@ -484,9 +484,10 @@ def test_recovered_primal_and_flags(checks, verdict):
     fl_j = checks.ad.flag.clone()
     v = checks.ad.vjp(x, T, P, d, h, torch.zeros_like(x), J=J, max_steps=3)
     same = all(torch.equal(p, q) and torch.equal(p, w) for p, q, w in zip(ref[:4], j[:4], v[:4], strict=True))
+    named = isinstance(j, kincuda_ad.JvpResult) and isinstance(v, kincuda_ad.VjpResult) and checks.kc.flag is ref.flag
     verdict(
         "recovered cells: primal and flags",
-        same and torch.equal(ref[4], fl_j) and torch.equal(ref[4], checks.ad.flag),
+        same and named and torch.equal(ref.flag, fl_j) and torch.equal(ref.flag, checks.ad.flag),
         f"max_steps 3: flags 0 / 1 / 2 = {[int((ref[4] == k).sum()) for k in range(3)]}, bitwise CudaSolver's: {same}",
     )
 

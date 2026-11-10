@@ -5,7 +5,7 @@ The method is in docs/method.md, the kernels' layout in docs/architecture.md.
 
 import ctypes
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 
@@ -50,10 +50,60 @@ from ._tables import (
 )
 from .kinvulcan import VulcanNetwork
 
-__all__ = ["ATOL", "COUNTS", "DRIFT", "REC_STEPS", "T_MAX", "T_MIN", "X_SUM_TOL", "CudaSolver"]
+__all__ = [
+    "ATOL",
+    "COUNTS",
+    "DRIFT",
+    "REC_STEPS",
+    "T_MAX",
+    "T_MIN",
+    "X_SUM_TOL",
+    "CallResult",
+    "CudaSolver",
+    "LaunchResult",
+]
 MAX_THREADS_PER_BLOCK = 1024  # CUDA's limit
 MAX_NAMED_BARRIERS = 15  # per block: the hardware's named barriers, one per cell (bar.sync in common.cuh)
 REGISTER_ALLOCATION_UNIT = 8  # registers per thread are allocated in this unit
+
+
+class CallResult(NamedTuple):
+    """What a call returns, per cell.
+
+    Attributes
+    ----------
+    x : torch.Tensor [B, S]
+        Mole fractions at the end of the call, float64, in the network's species order.
+    h : torch.Tensor [B]
+        The step size to start the cell's next call with, s, float64.
+    done : torch.Tensor [B]
+        bool: the call finished and its result passed the guard.
+    steps : torch.Tensor [B]
+        Accepted steps, float64.
+    """
+
+    x: torch.Tensor
+    h: torch.Tensor
+    done: torch.Tensor
+    steps: torch.Tensor
+
+
+class LaunchResult(NamedTuple):
+    """What ``CudaSolver.launch`` returns, per cell: ``CallResult``'s fields and the flag.
+
+    Attributes
+    ----------
+    x, h, done, steps : torch.Tensor
+        As ``CallResult``.
+    flag : torch.Tensor [B]
+        int32: 0 the call's result passed the guard, 1 recomputed and passes, 2 recomputed and still fails.
+    """
+
+    x: torch.Tensor
+    h: torch.Tensor
+    done: torch.Tensor
+    steps: torch.Tensor
+    flag: torch.Tensor
 
 
 class CudaSolver(Solver):
@@ -181,11 +231,12 @@ class CudaSolver(Solver):
         P: torch.Tensor,
         dt: torch.Tensor,
         h: torch.Tensor,
+        *,
         rtol: float = DEFAULT_RTOL,
         atol: float = ATOL,
         max_steps: int = DEFAULT_MAX_STEPS,
         J: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> LaunchResult:
         """Launch the call, the guard and the recovery; read the counts; refuse bad input and T out of range.
 
         The one host sync is the read of the counts, so the call can raise when it refused a cell.
@@ -197,18 +248,18 @@ class CudaSolver(Solver):
         T, P, dt, h : torch.Tensor
             Temperature (K), pressure (dyn cm^-2), call length (s), starting step (s): [B], float64.
         rtol, atol : float
-            Tolerances; atol is in mole fraction.
+            Tolerances, keyword only; atol is in mole fraction.
         max_steps : int
-            Tries per call; the recovery has ``REC_STEPS`` times as many.
+            Tries per call, keyword only; the recovery has ``REC_STEPS`` times as many.
         J : torch.Tensor, optional
-            Photolysis rates [B, branches] in s^-1: required with ``photo=True``, refused without it. Dark cells
-            pass zeros.
+            Photolysis rates [B, branches] in s^-1, keyword only: required with ``photo=True``, refused without it.
+            Dark cells pass zeros.
 
         Returns
         -------
-        tuple of torch.Tensor
-            x, h, done, accepted steps, and a per-cell flag: 0 (the call's result passed the guard), 1 (recomputed,
-            passes) or 2 (recomputed, still fails). The counts go to ``self.count``, and are added to ``self.total``.
+        LaunchResult
+            x, h, done, accepted steps and the per-cell flag, which ``self.flag`` also holds. The counts go to
+            ``self.count``, and are added to ``self.total``.
 
         Raises
         ------
@@ -259,8 +310,9 @@ class CudaSolver(Solver):
         arguments = self._arguments("recover", values)
         launch_kernel(self._recover_kernel, grid, 32 * self.w, self.smem_rec, stream, arguments)
         self.total += self.count
+        self.flag = redo
         self._refuse(x, T, P, dt, jx, status)
-        return xo, ho, done.bool(), nok, redo
+        return LaunchResult(xo, ho, done.bool(), nok, redo)
 
     def __call__(
         self,
@@ -269,14 +321,15 @@ class CudaSolver(Solver):
         P: torch.Tensor,
         dt: torch.Tensor,
         h: torch.Tensor,
+        *,
         rtol: float = DEFAULT_RTOL,
         atol: float = ATOL,
         max_steps: int = DEFAULT_MAX_STEPS,
         J: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, ...]:
-        """Run the call: ``launch`` without the flag."""
-        xo, ho, done, nok, _ = self.launch(x, T, P, dt, h, rtol, atol, max_steps, J)
-        return xo, ho, done, nok
+    ) -> CallResult:
+        """Run the call: ``launch`` without the flag in its result (``self.flag`` holds it)."""
+        r = self.launch(x, T, P, dt, h, rtol=rtol, atol=atol, max_steps=max_steps, J=J)
+        return CallResult(r.x, r.h, r.done, r.steps)
 
     def export(self, folder: str | Path) -> None:
         """Write what a caller without Python needs to run this solver's kernels.

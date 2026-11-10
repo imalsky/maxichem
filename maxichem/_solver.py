@@ -125,6 +125,7 @@ class Solver:
         self._scratch: dict[str, torch.Tensor] = {}
         self.count = torch.zeros(len(COUNT_SLOTS), dtype=torch.int32, device=self.dev)
         self.total = torch.zeros(len(COUNT_SLOTS), dtype=torch.int64, device=self.dev)
+        self.flag: torch.Tensor | None = None  # the last call's per-cell flag [B], int32 (docs/api.md)
 
     def close(self) -> None:
         """Unload the kernels and drop the tables and scratch, after the device's work is done.

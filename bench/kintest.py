@@ -172,8 +172,8 @@ class Block:
 
 
 def counts_since(solver, start):
-    """Return the guard's counts since start, an earlier copy of solver.total (one small copy from the device)."""
-    return dict(zip(kincuda.COUNTS, (solver.total - start)[1:-1].tolist(), strict=True))
+    """Return the guard's counts since start, an earlier ``solver.check()`` (one small copy from the device)."""
+    return {name: n - start[name] for name, n in solver.check().items()}
 
 
 def boxes(solver, net, species, gases, cap, folder, declared):
@@ -203,7 +203,7 @@ def boxes(solver, net, species, gases, cap, folder, declared):
     pinned = np.flatnonzero(np.isin(box_set["box"], [b for s, b in KNOWN_MISSES if s == folder.name]))
     results["b_pin_box"] = box_set["box"][pinned]
     results["b_pin_err"] = np.zeros((len(pinned), calls, len(gases.names)))
-    start = solver.total.clone()
+    start = solver.check()
     started = time.time()
 
     def tensor(a):
@@ -473,7 +473,7 @@ def run(blocks, state, solver, gases, full, started):
     device, ticks = solver.dev, state.ticks
     snapshot_every = 10 * READ if full else READ
     active, snapshots, snapshot_ticks, cell_calls = list(blocks), [], [], 0
-    start = solver.total.clone()
+    start = solver.check()
     loop_start = last_read = time.time()
     for tick in range(ticks):
         cells, forcing, scheduled = _schedule(active, tick, state.x, device)

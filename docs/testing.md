@@ -21,10 +21,11 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_coupling_flow_file.py` | A saved flow or start column loads into its own deck; another gas (composition, cv_R or molar mass alone), grid or shape, a start column whose levels are not [nz + 1], finite and positive, and an old file with no record, are refused | CPU |
 | `test_coupling_photolysis.py` | The stand-in J: nearest layer in log pressure, zero at night, day-side cells above and below the table counted; a NaN or negative table, an empty table and a mask that is not boolean refused | CPU |
 | `test_packaging.py` | The built wheel holds the kernels and assembles them without the checkout | CPU, slow |
+| `test_call_interface.py` | The call, `launch`, `jvp` and `vjp` refuse a setting passed by position (TypeError); their results are named tuples whose fields keep the old order | CPU |
 | `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation; a small network in every kernel | GPU |
 | `test_order.py` | Rodas3's order of accuracy | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
-| `test_guard.py` | The guard and recovery; refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases | GPU, data |
+| `test_guard.py` | The guard and recovery; refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases; the call's and `launch`'s named results and the flag they set | GPU, data |
 | `test_ad.py` | Derivatives against finite differences and against each other | GPU, data, slow |
 | `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses the inputs the Python call refuses, with the same message and counts; it refuses another export format | GPU, CUDA toolkit, slow |
 | `test_vulcan_truth.py` | `bench/kintest.py quick` against VULCAN-0D, on both default networks | GPU, data, slow |
@@ -83,7 +84,7 @@ paths' calls here are dark.
 
 Every panel is a block of cells with its own forcing (T, P, dt per call), mixes (x <- (1 - f) x + f y before a call), kick-twin starts
 and VULCAN truth. One loop of ticks: a block's call j runs on tick j * stride, and all scheduled cells go to the solver in one call per
-tick. Counters stay on the GPU and are read back every 1,000 ticks; the guard's counts come from `solver.total`. Per path they hold the worst floored error against VULCAN over the
+tick. Counters stay on the GPU and are read back every 1,000 ticks; the guard's counts come from differences of `solver.check()`. Per path they hold the worst floored error against VULCAN over the
 12 scored gases with its call and gas, stored states with a miss (> 0.1 dex) or a large miss (> 1 dex), unfinished calls, non-finite and
 negative states, the largest change of an element ratio (to H) on paths without mixes, accepted steps and the guard's counts.
 
