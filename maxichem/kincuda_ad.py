@@ -5,7 +5,7 @@ The method and the two contracts, frozen and adaptive, are in docs/method.md.
 
 import ctypes
 import operator
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -35,8 +35,49 @@ from ._solver import Solver, check_inputs, check_photolysis, check_tensor, share
 from ._tables import pack_small_tables, tables_for_device
 from .kinvulcan import VulcanNetwork
 
-__all__ = ["ADSolver"]
+__all__ = ["ADSolver", "JvpResult", "VjpResult"]
 MAX_WARPS_PER_BLOCK = 32  # the derivative kernels' queue and shared memory hold at most this many
+
+
+class JvpResult(NamedTuple):
+    """What ``ADSolver.jvp`` returns, per cell; ``self.flag`` holds the per-cell flag.
+
+    Attributes
+    ----------
+    x, h, done, steps : torch.Tensor
+        As ``kincuda.CallResult``: mole fractions [B, S], next step size [B] (s), done [B] (bool), accepted steps [B].
+    dx : torch.Tensor [B, S] or [D, B, S]
+        The tangent of x, float64; with the leading axis of D directions if the input tangents have it.
+    dh : torch.Tensor [B] or [D, B]
+        The tangent of h, s, float64; with the leading axis as dx.
+    """
+
+    x: torch.Tensor
+    h: torch.Tensor
+    done: torch.Tensor
+    steps: torch.Tensor
+    dx: torch.Tensor
+    dh: torch.Tensor
+
+
+class VjpResult(NamedTuple):
+    """What ``ADSolver.vjp`` returns, per cell; ``self.flag`` holds the per-cell flag.
+
+    Attributes
+    ----------
+    x, h, done, steps : torch.Tensor
+        As ``kincuda.CallResult``: mole fractions [B, S], next step size [B] (s), done [B] (bool), accepted steps [B].
+    cotangents : dict of str to torch.Tensor
+        The cotangents of the inputs, float64, per unit of each input (T per K, P per dyn cm^-2, dt and h per s, J
+        per s^-1): x [B, S], T [B], P [B], dt [B], h [B], lm [B, R], rc [R, 9] (a sum over the cells) and, with
+        ``photo=True``, J [B, branches].
+    """
+
+    x: torch.Tensor
+    h: torch.Tensor
+    done: torch.Tensor
+    steps: torch.Tensor
+    cotangents: dict[str, torch.Tensor]
 
 
 def _pointer(a: torch.Tensor | None) -> Any:
@@ -59,7 +100,7 @@ class ADSolver(Solver):
     device : torch.device or str
         A CUDA device; a bare "cuda" means the current one.
     cap : int
-        Attempts stored per cell before the adjoint switches to checkpoints.
+        Attempts stored per cell before the adjoint switches to checkpoints; keyword only, as drift and photo.
     drift : float, optional
         The guard's element-drift allowance, relative; ``DRIFT`` if None.
     photo : bool
@@ -70,6 +111,7 @@ class ADSolver(Solver):
         self,
         net: VulcanNetwork,
         device: torch.device | str,
+        *,
         cap: int = CAP,
         drift: float | None = None,
         photo: bool = False,
@@ -141,7 +183,6 @@ class ADSolver(Solver):
             "jround": ctypes.c_int(tab["jround"]),
             "ground": ctypes.c_int(ext["gt"].shape[0]),
         }
-        self.flag: torch.Tensor | None = None
 
     @property
     def rc0(self) -> torch.Tensor:
@@ -285,6 +326,7 @@ class ADSolver(Solver):
         dP: torch.Tensor,
         ddt: torch.Tensor,
         dh: torch.Tensor,
+        *,
         lm: torch.Tensor | None = None,
         dlm: torch.Tensor | None = None,
         rc: torch.Tensor | None = None,
@@ -295,8 +337,8 @@ class ADSolver(Solver):
         max_steps: int = DEFAULT_MAX_STEPS,
         J: torch.Tensor | None = None,
         dJ: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, ...]:
-        """Run the call and its tangent.
+    ) -> JvpResult:
+        """Run the call and its tangent. Everything after dh is keyword only.
 
         Parameters
         ----------
@@ -325,14 +367,17 @@ class ADSolver(Solver):
 
         Returns
         -------
-        tuple of torch.Tensor
-            x, h, done, accepted steps, dx, dh; the last two have the leading axis if the inputs do.
+        JvpResult
+            x, h, done, accepted steps, dx, dh; the last two have the leading axis if the inputs do. The per-cell flag
+            goes to ``self.flag``.
 
         Raises
         ------
         ValueError
-            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``].
+            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``]; ``self.flag`` is then
+            None.
         """
+        self.flag = None  # set again only when the call returns
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         tangents = {"dx": dx, "dT": dT, "dP": dP, "ddt": ddt, "dh": dh, "dlm": dlm, "drc": drc, "dJ": dJ}
         D = self._check_tangents(tangents, B)
@@ -370,9 +415,9 @@ class ADSolver(Solver):
         values |= {**flags, "max_steps": ctypes.c_int(REC_STEPS * max_steps)}
         launch_kernel(self._kernels["jvp_rec"], nb, block, self.smem["jvp"], stream, self._arguments("jvp_rec", values))
         self.total += self.count
-        self.flag = flags["redo"]
         self._refuse(x, T, P, dt, J, values["status"])
-        return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
+        self.flag = flags["redo"]
+        return JvpResult(xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho)
 
     @on_device
     def vjp(  # noqa: PLR0913  launch's inputs, lm, rc, adapt and the outputs' cotangents, as jvp
@@ -383,6 +428,7 @@ class ADSolver(Solver):
         dt: torch.Tensor,
         h: torch.Tensor,
         gx: torch.Tensor,
+        *,
         gh: torch.Tensor | None = None,
         lm: torch.Tensor | None = None,
         rc: torch.Tensor | None = None,
@@ -391,8 +437,8 @@ class ADSolver(Solver):
         atol: float = ATOL,
         max_steps: int = DEFAULT_MAX_STEPS,
         J: torch.Tensor | None = None,
-    ) -> tuple[Any, ...]:
-        """Run the call and the cotangents of its inputs.
+    ) -> VjpResult:
+        """Run the call and the cotangents of its inputs. Everything after gx is keyword only.
 
         Parameters
         ----------
@@ -416,16 +462,18 @@ class ADSolver(Solver):
 
         Returns
         -------
-        tuple
+        VjpResult
             x, h, done, accepted steps, and a dict of the cotangents x, T, P, dt, h, lm [B, R], rc [R, 9] and, with
-            ``photo=True``, J [B, branches]. A cell with flag 2 has NaN in its own cotangents and is left out of the
-            sum that rc is; ``fallback["still_failed"]`` counts the cells left out.
+            ``photo=True``, J [B, branches]. A cell with flag 2 (``self.flag``) has NaN in its own cotangents and is
+            left out of the sum that rc is; ``fallback["still_failed"]`` counts the cells left out.
 
         Raises
         ------
         ValueError
-            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``].
+            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``]; ``self.flag`` is then
+            None.
         """
+        self.flag = None  # set again only when the call returns
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         check_tensor("gx", gx, (B, self.ns), self.dev)
         gx = gx.contiguous()
@@ -469,6 +517,6 @@ class ADSolver(Solver):
         launch_kernel(self._kernels["vjp_rec"], nb, block, self.smem["vjp"], stream, self._arguments("vjp_rec", values))
         launch_kernel(self._kernels["arrh"], self.nr, ARRH_BLOCK_THREADS, 0, stream, self._arguments("arrh", values))
         self.total += self.count
-        self.flag = flags["redo"]
         self._refuse(x, T, P, dt, J, values["status"])
-        return xo, ho, done.bool(), nok, g
+        self.flag = flags["redo"]
+        return VjpResult(xo, ho, done.bool(), nok, g)

@@ -26,10 +26,11 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_order.py` | Rodas3's order of accuracy, on a linear problem and on one where the constant-pressure term of the Jacobian is not zero | GPU |
 | `test_kernel_copies.py` | The call, recovery, tangent and adjoint kernels return the same x, h, done, steps, status and flag on edge inputs: a non-finite or too long starting step, dt = 0, refused cells beside good ones, a first try rejected twice running | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
-| `test_guard.py` | The guard and recovery; the guard alone on hand-made results whose element share moved by 0.5 to 2 times the drift allowance (flagged only above it); refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases | GPU, data |
-| `test_dense_lu.py` | The recovery's dense LU and solve, run by a harness kernel (`tests/dense_lu_check.cu`), against threshold partial pivoting written out in numpy: the row order, L U = P A and the solve, on matrices that exchange rows at a third of the pivots or more and keep rows where plain partial pivoting would not | GPU |
+| `test_guard.py` | The guard and recovery; the guard alone on hand-made results whose element share moved by 0.5 to 2 times the drift allowance (flagged only above it); refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases; the call's and `launch`'s named results and the flag they set, which is None after a call that raised | GPU, data |
+| `test_dense_lu.py` | The recovery's dense LU and solve, run by a harness kernel (`tests/dense_lu_check.cu`), against threshold partial pivoting written out in numpy: the row order, L U = P A and the solve, on matrices that exchange rows at a third of the pivots or more and keep rows where plain partial pivoting would not, and a tie in the pivot search | GPU |
+| `test_call_interface.py` | Every optional argument of the call, `launch`, `jvp`, `vjp` and both constructors is keyword only, checked one parameter at a time, and a setting passed by position raises TypeError; their results are named tuples whose fields keep the old order | CPU |
 | `test_ad.py` | Derivatives against finite differences and against each other | GPU, data, slow |
-| `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses the inputs the Python call refuses, with the same message and counts; it refuses another export format | GPU, CUDA toolkit, slow |
+| `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses the inputs the Python call refuses, with the same message and counts; it refuses another export format, and at construction an export whose kernel argument lists differ from its own (unknown, missing, repeated or misplaced name, J on the guard); a thermal export takes an empty [B, 0] J with the same bits and refuses a [B, 1] one; changing what the accessors return leaves the solver as it was | GPU, CUDA toolkit, slow |
 | `test_vulcan_truth.py` | `bench/kintest.py quick` against VULCAN-0D, on both default networks | GPU, data, slow |
 
 `tests/data` holds invented networks with constant-Cp NASA-9 data, so a test can state its answer in closed form. Their `N_i`
@@ -107,7 +108,7 @@ paths' calls here are dark.
 
 Every panel is a block of cells with its own forcing (T, P, dt per call), mixes (x <- (1 - f) x + f y before a call), kick-twin starts
 and VULCAN truth. One loop of ticks: a block's call j runs on tick j * stride, and all scheduled cells go to the solver in one call per
-tick. Counters stay on the GPU and are read back every 1,000 ticks; the guard's counts come from `solver.total`. Per path they hold the worst floored error against VULCAN over the
+tick. Counters stay on the GPU and are read back every 1,000 ticks; the guard's counts come from differences of `solver.check()`. Per path they hold the worst floored error against VULCAN over the
 12 scored gases with its call and gas, stored states with a miss (> 0.1 dex) or a large miss (> 1 dex), unfinished calls, non-finite and
 negative states, the largest change of an element ratio (to H) on paths without mixes, accepted steps and the guard's counts.
 

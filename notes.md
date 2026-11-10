@@ -1804,6 +1804,46 @@ public reader.
   path inside a real call against an outside answer (the LU alone, and the copies' agreement); J changing within a call;
   anything above 3000 K.
 
+### 2026-11-10 00:30 to 02:19: the call interface: keyword-only settings, named results, a read-only C++ solver
+Branch call-interface, on 0c7f7df. An interface change; no number moves and no reference was regenerated.
+- Python (breaking). `rtol`, `atol`, `max_steps` and `J` are keyword only in the call and `launch`; in `jvp` everything after
+  `dh`, in `vjp` everything after `gx` (so `gh` too). `solver(x, T, P, dt, h, 1e-25, 1e-3)` had swapped the tolerances and passed
+  every check; it now raises TypeError. The results are named tuples in the old order (`CallResult` x, h, done, steps;
+  `LaunchResult` adds flag; `JvpResult` adds dx, dh; `VjpResult` adds the cotangents dict), so unpacking and indexing are
+  unchanged. Every caller in the repository and the three GCM drivers already passed the settings by keyword.
+- The flag. Both solvers keep the last per-cell flag in `solver.flag`; `launch` also returns it. Not taken: a flag field in the
+  `jvp`/`vjp` results, which would change their arity (five 6-name unpackings in test_ad). The names `fallback` and `launch`'s
+  counts are unchanged (2026-11-06 entries). The bench takes its guard counts as differences of `check()`, not `total[1:-1]`.
+- C++ (breaking). `ns`, `nj`, `species`, `elements`, `default_atol`, `count` and `total` are private behind accessors; `count()`,
+  `total()` and `atoms()` return copies. Assigning a one-slot `count` had pointed the kernels' atomics past its end. The
+  constructor refuses an export whose kernels name an argument the call does not supply, naming kernel and argument; before,
+  a renamed recovery argument stopped the call with a bare `map::at` after the call kernel ran. A defined J must be float64
+  [B, nj] on the device; an undefined J only when nj = 0, so a thermal export takes [B, 0] (as the C++ box driver passes) and
+  refuses [B, 1]. The C++ box drivers (2026-11-04_cpp, 2026-11-05_e2e) use the old members and will need `()`.
+- Shown to fail without the change: the positional-settings test on the code without `*` (4 of 4) and on the base (import);
+  the misuses (`chem.count = ...`, `chem.ns = 5`, `chem.nj = 0`, `chem.total = ...`, `chem.species.clear()`) compile on the old
+  header and not on the new; on the old caller a renamed `didx` gives `map::at` and a [B, 0] J "this solver has no photolysis".
+  In-place work on the returned copies leaves the members as they were (12 count slots, atoms sum 289).
+- Checks: CPU 92 passed; parity and guard 45 passed in 216 s (worst 2.8e-8 dex); known answers and order 9 passed in 112 s;
+  test_export_cpp 15 passed in 401 s, bitwise on every case, counts included; test_vulcan_truth 2 passed in 203 s (0 misses,
+  worst 0.004 dex on paths, 0.014 on boxes); test_ad 81 passed in 992 s, 0 FAIL.
+- Review follow-up (02:20 to 03:55, two commits). (1) `solver.flag` was set before the refusal raised, so a caught
+  ValueError left flag 0 (passed) on the refused cells, and a call refused on the host kept the previous call's flag: it is
+  None from the start of every call until the call returns (both solvers). (2) The constructors' `drift`, `photo` and `cap`
+  are keyword only (`CudaSolver(net, device, True)` set drift to 1 with photolysis off); no caller here or in the GCM drivers
+  passed them by position. (3) The C++ constructor checked names only against a whitelist: a missing `didx` failed in the
+  driver after the call kernel ran, a repeated `atol` or a `Jin` on the guard ran with "bitwise identical" results, and Ta/Pa
+  swapped fed the wrong slots. Each kernel's list must now equal `KERNEL_ARGUMENTS` (J last for call and recover with
+  photolysis), and every meta.txt check runs before any CUDA work; all five edits are refused at construction, naming kernel
+  and argument. (4) The interface test checks each optional parameter's kind; the C++ test changes what the accessors return
+  in place and checks the solver is unchanged (a build whose accessors share the tensors aborts). Shown failing on the code
+  before: the flag tests (guard 2 of 2, test_ad 3 of 3), the parameter-kind test (the constructors; one optional made
+  positional again in a scratch copy). Checks: CPU 98 passed; parity and guard 47 passed in 215 s; test_export_cpp 19
+  passed in 501 s, bitwise on every case; test_vulcan_truth 2 passed in 203 s (0 misses, worst 0.004 dex on paths, 0.014 on
+  boxes); test_ad 81 passed in 993 s, 0 FAIL; pre-commit on all files passes.
+- Not done: the C++ call still takes rtol and atol by position; `meta.at` lookups give no key name; Python's `count` and `total`
+  are still mutable attributes; Python refuses a [B, 0] J without photolysis.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.

@@ -484,9 +484,10 @@ def test_recovered_primal_and_flags(checks, verdict):
     fl_j = checks.ad.flag.clone()
     v = checks.ad.vjp(x, T, P, d, h, torch.zeros_like(x), J=J, max_steps=3)
     same = all(torch.equal(p, q) and torch.equal(p, w) for p, q, w in zip(ref[:4], j[:4], v[:4], strict=True))
+    named = isinstance(j, kincuda_ad.JvpResult) and isinstance(v, kincuda_ad.VjpResult) and checks.kc.flag is ref.flag
     verdict(
         "recovered cells: primal and flags",
-        same and torch.equal(ref[4], fl_j) and torch.equal(ref[4], checks.ad.flag),
+        same and named and torch.equal(ref.flag, fl_j) and torch.equal(ref.flag, checks.ad.flag),
         f"max_steps 3: flags 0 / 1 / 2 = {[int((ref[4] == k).sum()) for k in range(3)]}, bitwise CudaSolver's: {same}",
     )
 
@@ -759,10 +760,19 @@ def test_negative_x_is_refused(checks, verdict, monkeypatch):
     xneg = s.x.clone()
     xneg[0, 0] = -1e-3
     refused = r"1 cells of bad input: .*\(first: cell 0: .*min\(x\) = -0.001,"
+    flags_after_raise = []  # None after each call that raised: a refused cell's flag 0 would read as passed
     with pytest.raises(ValueError, match=refused):
         checks.ad.jvp(xneg, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    flags_after_raise.append(checks.ad.flag)
+    checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
     with pytest.raises(ValueError, match=refused):
         checks.ad.vjp(xneg, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
+    flags_after_raise.append(checks.ad.flag)
+    checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
+    with pytest.raises(ValueError, match=r"^gx: "):  # refused on the host, before any launch
+        checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c[:-1], lm=s.lm, J=s.J)
+    flags_after_raise.append(checks.ad.flag)
+    assert all(flag is None for flag in flags_after_raise)
     with monkeypatch.context() as m:  # what the kernels returned: the other cells untouched
         m.setattr(checks.ad, "_refuse", lambda *_: None)
         jb = checks.ad.jvp(xneg, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)

@@ -247,6 +247,36 @@ def test_launch_adds_to_the_total(parity):
     assert torch.equal(parity.solver.total - before, parity.solver.count.to(torch.int64))
 
 
+def test_call_and_launch_name_their_results(parity):
+    cells = 8
+    x, T, P = parity.starts(cells, 2, 1.0)
+    args = (x, T, P, parity.full(cells, 50.0), parity.full(cells, 1e-10))
+    launched = parity.solver.launch(*args, max_steps=2)  # few tries: the guard recomputes cells, so flags are not all 0
+    assert isinstance(launched, kincuda.LaunchResult)
+    assert parity.solver.flag is launched.flag
+    assert bool((launched.flag != 0).any())
+    called = parity.solver(*args, max_steps=2)
+    assert isinstance(called, kincuda.CallResult)
+    assert all(torch.equal(getattr(called, name), getattr(launched, name)) for name in called._fields)
+    assert torch.equal(parity.solver.flag, launched.flag)  # the call keeps the flag too
+
+
+def test_flag_is_none_after_a_call_that_raised(parity):
+    cells = 8
+    x, T, P = parity.starts(cells, 2, 1.0)
+    dt = h = parity.full(cells, 1.0)
+    bad = x.clone()
+    bad[3, 0] = float("nan")
+    parity.solver(x, T, P, dt, h)
+    with pytest.raises(ValueError, match="refused cells"):
+        parity.solver.launch(bad, T, P, dt, h)
+    assert parity.solver.flag is None  # the guard gives a refused cell flag 0, which would read as passed
+    parity.solver(x, T, P, dt, h)
+    with pytest.raises(ValueError, match=r"^T: "):  # refused on the host, before any launch
+        parity.solver(x[:5], T[:5].cpu(), P[:5], dt[:5], h[:5])
+    assert parity.solver.flag is None  # not the previous call's 8-cell flag
+
+
 def test_wrong_inputs_raise_before_any_launch(parity):
     cells = 64
     x, T, P = parity.starts(cells, 2, 1.0)
