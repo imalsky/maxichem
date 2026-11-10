@@ -1844,6 +1844,31 @@ Branch call-interface, on 0c7f7df. An interface change; no number moves and no r
 - Not done: the C++ call still takes rtol and atol by position; `meta.at` lookups give no key name; Python's `count` and `total`
   are still mutable attributes; Python refuses a [B, 0] J without photolysis.
 
+### 2026-11-10 06:30 to 09:11: the known-answer tests' review, four fixes; main merged
+An independent review of branch known-answers confirmed the tests' derivations and the eight kills and found four holes;
+each was checked first and is real. Each new test or expectation failed on a copy of the code before (1a7020f) or under
+the break named, and passes now.
+- Troe's end point. As Pr -> 0 or inf, (z + c) / (N - d (z + c)) -> -1 / d, so F -> Fc^(d^2/(1+d^2)): 0.98459, 0.97828,
+  0.97772 for the fixture at 600, 1500, 2600 K, not the F = 1 of 9910b1f. The call and the partials now take that limit
+  for the standard form (VM11 tends to 1), d ln F / dT = s Fc' / Fc; the limit test expects F k0 n_tot and the matching T
+  tangent (fails on 1a7020f). A first form of the partials moved 17 dumped derivative arrays by rounding (at most 1.5e-15
+  relative in dx); the finite-Pr block is the earlier text again, the limit a separate branch.
+- The equilibrium oracle took G / RT from the reader and P0 from kinvulcan; it now reads the NASA-9 files and types 1 bar.
+  With P0 x 10 the old tests pass and the six equilibrium cases fail.
+- Rejection for error alone. The old case's first trial is negative (N_A = -712/7203, exact). New: J dt = 1/10, the exact
+  Rodas3 trial positive; rtol 6.2e-6 puts the error RMS at 10, rtol 1.5e-4 the RMS at 0.42 and only the largest error,
+  the first try's norm, at 2.4. The first-try max norm (common.cuh try_error) is a real path: removing it passes the old
+  tests and fails the second case.
+- The kernel copies must finish: every stepped cell done, every recomputed cell recovered, recovered states within 1e-6 of
+  the ordinary call. With REC_STEPS 1 the old test passes and the new fails.
+- A tie in the dense LU's column 0 across two lanes must go to the lower row; reversed, the old test passes and the new
+  fails. docs/testing.md lists what no independent test covers.
+- Merged local main (b1d2640, keyword-only call interface) with a merge commit; one test passed rtol by position and now
+  passes it by keyword. Valid-input outputs at the merged head bitwise those of 0c7f7df: 26,401,783 numbers, 0 differ.
+- Checks on the merged head (2a3daee): CPU 107 passed in 24 s; slow CPU 4 passed in 100 s; parity and guard 48 passed in
+  225 s; known answers, order, rate laws, kernel copies, dense LU 25 passed in 336 s; test_vulcan_truth 2 passed in 204 s;
+  test_export_cpp 19 passed in 532 s; test_ad 81 passed in 1006 s (285 verdicts pass, 0 fail); pre-commit on all files passes with the header written.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
