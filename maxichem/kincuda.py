@@ -20,6 +20,7 @@ from ._constants import (
     REC_STEPS,
     SOLVER_KERNEL_NAMES,
     T_MIN,
+    X_SUM_TOL,
 )
 from ._cuda import (
     ATTR_LOCAL_BYTES,
@@ -48,7 +49,7 @@ from ._tables import (
 )
 from .kinvulcan import VulcanNetwork
 
-__all__ = ["ATOL", "COUNTS", "DRIFT", "REC_STEPS", "T_MIN", "CudaSolver"]
+__all__ = ["ATOL", "COUNTS", "DRIFT", "REC_STEPS", "T_MIN", "X_SUM_TOL", "CudaSolver"]
 MAX_THREADS_PER_BLOCK = 1024  # CUDA's limit
 MAX_NAMED_BARRIERS = 15  # per block: the hardware's named barriers, one per cell (bar.sync in common.cuh)
 REGISTER_ALLOCATION_UNIT = 8  # registers per thread are allocated in this unit
@@ -57,7 +58,8 @@ REGISTER_ALLOCATION_UNIT = 8  # registers per thread are allocated in this unit
 class CudaSolver(Solver):
     """Batched chemistry solver on one GPU.
 
-    Calling it advances each cell by dt, with no host sync. Calls run one at a time on torch's current stream: the
+    Calling it advances each cell by dt; it reads the call's counts back and raises if it refused a cell. Calls run
+    one at a time on torch's current stream: the
     queues, the counts and the scratch are shared. See docs/api.md for its members and docs/method.md for the method.
 
     Parameters
@@ -183,7 +185,9 @@ class CudaSolver(Solver):
         max_steps: int = DEFAULT_MAX_STEPS,
         J: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
-        """Launch the call, the guard and the recovery, with no host sync.
+        """Launch the call, the guard and the recovery; read the counts, and refuse bad input and cold cells.
+
+        The one host sync is the read of the counts, so the call can raise when it refused a cell.
 
         Parameters
         ----------
@@ -204,6 +208,12 @@ class CudaSolver(Solver):
         tuple of torch.Tensor
             x, h, done, accepted steps, and a per-cell flag: 0 (the call's result passed the guard), 1 (recomputed,
             passes) or 2 (recomputed, still fails). The counts go to ``self.count``, and are added to ``self.total``.
+
+        Raises
+        ------
+        ValueError
+            If a cell was bad input or below ``T_MIN`` (docs/api.md): the message gives the counts, the limits and the
+            first such cell. The counts stay readable in ``fallback``.
         """
         self._require_open()
         B = check_inputs(self.dev, self.ns, x, T, P, dt, h, rtol, atol, max_steps)
@@ -247,6 +257,7 @@ class CudaSolver(Solver):
         arguments = self._arguments("recover", values)
         launch_kernel(self._recover_kernel, grid, 32 * self.w, self.smem_rec, stream, arguments)
         self.total += self.count
+        self._refuse(x, T, P, dt, jx, done, redo)
         return xo, ho, done.bool(), nok, redo
 
     def __call__(

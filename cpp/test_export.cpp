@@ -4,12 +4,16 @@
 // T.bin, P.bin, dt.bin, h.bin [B], J.bin [B, nj] (photolysis networks; all float64), the Python call's results
 // x_out.bin, h_out.bin, steps_out.bin (float64), done_out.bin (int8) and counts_out.bin (int32), and B.txt and
 // max_steps.txt. The call runs twice, and both are compared in full (counts included); the second is timed. At the
-// default max_steps it uses the default arguments, so they answer for the Python defaults too.
+// default max_steps it uses the default arguments, so they answer for the Python defaults too. If the case holds
+// refused.txt, the Python call refused it: the C++ call must throw std::invalid_argument with that message and the
+// same counts.
 #include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
+#include <stdexcept>
 
 #include "maxichem.hpp"
 
@@ -50,6 +54,22 @@ int main(int argc, char** argv) {
   auto call = [&] {
     return defaults ? chem(x, T, P, dt, h, J) : chem(x, T, P, dt, h, J, maxichem::kDefaultRtol, -1.0, max_steps);
   };
+  if (std::ifstream expected_file{cs + "/refused.txt"}) {  // the Python call refused this input: so must this one
+    std::string const expected((std::istreambuf_iterator<char>(expected_file)), std::istreambuf_iterator<char>());
+    std::string message;
+    try {
+      call();
+    } catch (std::invalid_argument const& e) {
+      message = e.what();
+    }
+    std::string const prefix = "maxichem: ";
+    bool const same_message = message.rfind(prefix, 0) == 0 && message.substr(prefix.size()) == expected;
+    auto co = load(cs + "/counts_out.bin", {chem.count.size(0)}, torch::kInt32);
+    bool const same_counts = torch::equal(chem.count.cpu(), co);
+    std::cout << "C++ call " << (same_message && same_counts ? "refused as the Python call" : "DIFFERENT")
+              << "; message: " << message << "; counts " << chem.count.cpu().view({1, -1}) << std::endl;
+    return same_message && same_counts ? 0 : 1;
+  }
   auto r = call();
   auto counts = chem.count.cpu().clone();
   torch::cuda::synchronize();

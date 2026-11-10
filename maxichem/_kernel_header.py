@@ -18,6 +18,7 @@ from ._constants import (
     RATE_LAW_FLAGS,
     RATE_LAW_SHIFTS,
     T_MIN,
+    X_SUM_TOL,
 )
 from ._tables import (
     pack_small_tables,
@@ -136,6 +137,7 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         "NEL": tab["atoms"].shape[1],
         "ETOT": repr(float(tab["atoms"].sum())),
         "TMIN": repr(T_MIN),
+        "XSUMTOL": repr(X_SUM_TOL),
         "DRIFT": repr(float(drift)),
         "KCOLL": repr(K_COLL),
         "KBOLTZ": repr(kinvulcan.KB),

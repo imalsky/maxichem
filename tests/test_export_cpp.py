@@ -52,6 +52,21 @@ def test_cpp_call_is_the_python_call(export_program, tmp_path, network, photo, t
     assert ("(default arguments)" in result.stdout) == (tries == _constants.DEFAULT_MAX_STEPS)
 
 
+@pytest.mark.parametrize(("edit", "refused"), [("sum", True), ("nan", True), ("inside", False)])
+def test_cpp_refuses_what_python_refuses(export_program, tmp_path, edit, refused):
+    paths.need(paths.vulcan_thermo())
+    network = "NCHO_photo_network.txt"
+    case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, 1024, 1, 4000, network, edit]
+    subprocess.run([str(q) for q in case], check=True, capture_output=True)
+    assert (tmp_path / "case" / "refused.txt").exists() == refused
+    result = subprocess.run(
+        [export_program, tmp_path / "export", tmp_path / "case"], check=False, capture_output=True, text=True
+    )
+    print(result.stdout, flush=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ("refused as the Python call" if refused else "bitwise identical") in result.stdout
+
+
 def test_cpp_refuses_another_export_format(export_program, tmp_path):
     paths.need(paths.vulcan_thermo())
     case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, 64, 1, FORCED_TRIES]

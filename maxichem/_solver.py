@@ -16,12 +16,19 @@ from ._constants import (
     REC_STEPS,
     SOLVER_KERNEL_NAMES,
     T_MIN,
+    X_SUM_TOL,
 )
 from ._cuda import device_of, unload_at_deletion, unload_modules
 from .kinvulcan import VulcanNetwork
 
 if TYPE_CHECKING:
     import ctypes
+
+
+def _first(mask: torch.Tensor) -> int | None:
+    """Return the first index where mask is true, or None."""
+    where = torch.nonzero(mask)
+    return int(where[0, 0]) if len(where) else None
 
 
 def check_tensor(name: str, a: torch.Tensor, shape: tuple[int, ...], device: torch.device) -> None:
@@ -158,6 +165,50 @@ class Solver:
     def fallback(self) -> dict[str, int]:
         """Return the last call's counts (one small copy from the device)."""
         return dict(zip(COUNTS, self.count[1:-1].tolist(), strict=True))
+
+    def _refuse(
+        self,
+        x: torch.Tensor,
+        T: torch.Tensor,
+        P: torch.Tensor,
+        dt: torch.Tensor,
+        J: torch.Tensor | None,
+        done: torch.Tensor,
+        flag: torch.Tensor,
+    ) -> None:
+        """Raise ValueError if the call just launched refused a cell (one small copy from the device, a host sync).
+
+        The kernels decide: a refused cell is counted as bad input or cold, and returns done 0 with flag 0. The host
+        only names the first such cell of each kind.
+        """
+        n = self.fallback
+        if not (n["bad_input"] or n["cold"]):
+            return
+        refused = torch.logical_not(done.bool()) & (flag == 0)
+        cold = refused & (T < T_MIN)
+        problems = []
+        if n["cold"]:
+            i = _first(cold)
+            where = "not identified" if i is None else f"cell {i}, T = {float(T[i]):g} K"
+            problems.append(
+                f"{n['cold']} cells below {T_MIN:g} K, outside the solver's domain (first: {where}); leave them out "
+                "of the call"
+            )
+        if n["bad_input"]:
+            i = _first(refused & torch.logical_not(cold))
+            where = "not identified"
+            if i is not None:
+                where = (
+                    f"cell {i}: sum(x) - 1 = {float(x[i].sum() - 1.0):g}, min(x) = {float(x[i].min()):g}, "
+                    f"T = {float(T[i]):g} K, P = {float(P[i]):g} dyn cm^-2, dt = {float(dt[i]):g} s"
+                    + ("" if J is None else f", min(J) = {float(J[i].min()):g} s^-1")
+                )
+            problems.append(
+                f"{n['bad_input']} cells of bad input: x negative or non-finite, |sum(x) - 1| above {X_SUM_TOL:g} "
+                f"or no x above 0; T non-finite, P not above 0, dt negative or non-finite, or J negative or "
+                f"non-finite (first: {where}); pass x normalized to sum 1 in float64, clamped at 0"
+            )
+        raise ValueError("the call refused cells: " + "; ".join(problems))
 
     def check(self) -> dict[str, int]:
         """Return the counts since construction (one small copy); raise if any cell was below T_MIN."""

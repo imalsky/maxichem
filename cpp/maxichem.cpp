@@ -17,7 +17,7 @@ namespace maxichem {
 
 namespace {
 
-constexpr int kExportFormat = 3;              // EXPORT_FORMAT in maxichem/_constants.py: any other export is refused
+constexpr int kExportFormat = 4;              // EXPORT_FORMAT in maxichem/_constants.py: any other export is refused
 constexpr int kGuardBlockThreads = 128;       // any size works; this one packs cells densely
 constexpr size_t kCountSlotsAroundNames = 2;  // the two cell queues around the export's "counts" names
 
@@ -141,6 +141,16 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
   jround_ = static_cast<int>(geti("jround"));
   rec_steps_ = static_cast<int>(geti("rec_steps"));
   default_atol = std::stod(meta.at("atol"));
+  t_min_ = std::stod(meta.at("t_min"));
+  x_sum_tol_ = std::stod(meta.at("x_sum_tol"));
+  auto slot = [&](char const* name) {
+    auto const& names = lists["counts"];
+    auto it = std::find(names.begin(), names.end(), name);
+    if (it == names.end()) throw std::runtime_error(std::string("maxichem: meta.txt counts lack ") + name);
+    return static_cast<int64_t>(it - names.begin()) + 1;  // after the queue's slot
+  };
+  bad_input_slot_ = slot("bad_input");
+  cold_slot_ = slot("cold");
   if (static_cast<int>(species.size()) != ns)
     throw std::runtime_error("maxichem: meta.txt lists " + std::to_string(species.size()) + " species, ns is " +
                              std::to_string(ns));
@@ -270,7 +280,50 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   launch(recover_, "recover", std::max(1, std::min(B, rec_blocks_)), 32 * w_, smem_rec_);
 
   total += count;
+  refuse(x, T, P, dt, J, done, redo);
   return {xo, ho, done.to(torch::kBool), nok};
+}
+
+void Solver::refuse(torch::Tensor const& x, torch::Tensor const& T, torch::Tensor const& P, torch::Tensor const& dt,
+                    torch::Tensor const& J, torch::Tensor const& done, torch::Tensor const& redo) const {
+  auto counts = count.cpu();  // the call's one host sync
+  int const bad = counts[bad_input_slot_].item<int>(), cold = counts[cold_slot_].item<int>();
+  if (bad == 0 && cold == 0) return;
+  // as CudaSolver: the kernels decide; a refused cell returns done 0 and flag 0, and the host names the first one
+  auto refused = done.eq(0) & redo.eq(0);
+  auto is_cold = refused & T.lt(t_min_);
+  auto first = [](torch::Tensor const& mask) -> int64_t {
+    auto where = torch::nonzero(mask);
+    return where.size(0) ? where[0][0].item<int64_t>() : -1;
+  };
+  std::ostringstream m;
+  m << "maxichem: the call refused cells: ";
+  if (cold) {
+    int64_t const i = first(is_cold);
+    m << cold << " cells below " << t_min_ << " K, outside the solver's domain (first: ";
+    if (i < 0)
+      m << "not identified";
+    else
+      m << "cell " << i << ", T = " << T[i].item<double>() << " K";
+    m << "); leave them out of the call";
+  }
+  if (bad) {
+    if (cold) m << "; ";
+    int64_t const i = first(refused & is_cold.logical_not());
+    m << bad << " cells of bad input: x negative or non-finite, |sum(x) - 1| above " << x_sum_tol_
+      << " or no x above 0; T non-finite, P not above 0, dt negative or non-finite, or J negative or non-finite "
+      << "(first: ";
+    if (i < 0) {
+      m << "not identified";
+    } else {
+      m << "cell " << i << ": sum(x) - 1 = " << (x[i].sum() - 1.0).item<double>()
+        << ", min(x) = " << x[i].min().item<double>() << ", T = " << T[i].item<double>()
+        << " K, P = " << P[i].item<double>() << " dyn cm^-2, dt = " << dt[i].item<double>() << " s";
+      if (nj) m << ", min(J) = " << J[i].min().item<double>() << " s^-1";
+    }
+    m << "); pass x normalized to sum 1 in float64, clamped at 0";
+  }
+  throw std::invalid_argument(m.str());
 }
 
 }  // namespace maxichem

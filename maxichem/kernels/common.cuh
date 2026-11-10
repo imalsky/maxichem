@@ -216,11 +216,11 @@ __device__ __forceinline__ bool forcing_fine(double Tc, double nd, double dt) {
   return isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) && dt >= 0.0;
 }
 
-// The bad-input test on one warp (not stepped when false): non-finite, x < 0, no x > 0, P <= 0 or dt < 0. p, pm: this
-// lane's screen_x sum and maximum.
+// The bad-input test on one warp (not stepped when false): non-finite, x < 0, |sum x - 1| > XSUMTOL (written so that a
+// NaN sum fails), no x > 0, P <= 0 or dt < 0. p, pm: this lane's screen_x sum and maximum.
 __device__ __forceinline__ bool cell_fine(double p, double pm, double Tc, double nd, double dt) {
   const double ps = wsum(p);
-  return isfinite(ps) && wmax(pm) > 0.0 && forcing_fine(Tc, nd, dt);
+  return fabs(ps - 1.0) <= XSUMTOL && wmax(pm) > 0.0 && forcing_fine(Tc, nd, dt);
 }
 
 // The net rate v[r] of reaction r; na, nb: the widest sides of its round, so a side of fewer multiplies by n[NS] = 1.

@@ -11,6 +11,8 @@ from ._constants import (
     PHOTOLYSIS_ARGUMENT,
     REC_STEPS,
     SOLVER_KERNEL_NAMES,
+    T_MIN,
+    X_SUM_TOL,
 )
 from ._cuda import SOLVER_KERNELS, compile_cubin
 from ._kernel_header import call_header, kernel_sources
@@ -49,6 +51,8 @@ def write_export(solver: "CudaSolver", folder: str | Path) -> None:
         f"jround {solver._rounds['jround'].value}",
         f"rec_steps {REC_STEPS}",
         f"atol {ATOL!r}",
+        f"t_min {T_MIN!r}",
+        f"x_sum_tol {X_SUM_TOL!r}",
         f"counts {' '.join(COUNTS)}",
         f"species {' '.join(solver._names[0])}",
         f"elements {' '.join(solver._names[1])}",

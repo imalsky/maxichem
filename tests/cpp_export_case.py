@@ -1,10 +1,12 @@
 """Write an export of a network's solver (default NCHO_photo) and one call's inputs and results, for cpp/test_export.
 
     VULCAN_THERMO=<VULCAN-JAX's src/vulcan3/thermo> python tests/cpp_export_case.py <folder> [cells] [photo] [max_steps]
-        [network file, e.g. SNCHO_photo_network_2025.txt]
+        [network file, e.g. SNCHO_photo_network_2025.txt] [edit: a key of EDITS]
 
 photo 0 exports the thermal network (no J); a small max_steps (e.g. 2) leaves most cells unfinished, so the guard
-flags them and the recovery kernel recomputes them, and the counts are compared too.
+flags them and the recovery kernel recomputes them, and the counts are compared too. An edit scales x of cells 5 and
+6 before the 50-s call; if the Python call refuses the input, <folder>/case/refused.txt holds its message and only the
+counts are written.
 
 <folder>/export: CudaSolver.export; <folder>/case: x, T, P, dt, h, J of a GCM-like call (cells over 800-2000 K and
 1e-4 to 10 bar, H2S = 1.41e-5 x H2 on a sulfur network, relaxed to equilibrium, then 50 s with J = 1e-4 s^-1 above
@@ -20,6 +22,15 @@ import torch
 
 from maxichem import CudaSolver, VulcanNetwork, paths
 from maxichem._checks import H2S_PER_H2_SOLAR, SOLAR_START
+from maxichem.kincuda import X_SUM_TOL
+
+# factors on x of cells 5 and 6: a sum of 0.9 and a NaN sum are refused, sums within the tolerance are accepted
+EDITS = {
+    "none": (1.0, 1.0),
+    "sum": (0.9, 1.0),
+    "nan": (float("nan"), 1.0),
+    "inside": (1.0 + 0.9 * X_SUM_TOL, 1.0 - 0.9 * X_SUM_TOL),
+}
 
 
 def main() -> None:
@@ -29,6 +40,7 @@ def main() -> None:
     photo = bool(int(sys.argv[3])) if len(sys.argv) > 3 else True
     max_steps = int(sys.argv[4]) if len(sys.argv) > 4 else 4000
     network = sys.argv[5] if len(sys.argv) > 5 else "NCHO_photo_network.txt"
+    edit = sys.argv[6] if len(sys.argv) > 6 else "none"
     th = paths.vulcan_thermo()
     net = VulcanNetwork(f"{th}/{network}", f"{th}/NASA9")
     sp = list(net.species)
@@ -48,30 +60,27 @@ def main() -> None:
     if photo:
         J[P < 3e4] = 1e-4
     dt = torch.full_like(T, 50.0)
-    xo, ho, do, so = solver(x, T, P, dt, h, J=J, max_steps=max_steps)
-    counts = solver.count.clone()
-    torch.cuda.synchronize()
-    solver.export(out / "export")
+    x = x.clone()
+    x[5:7] *= torch.tensor(EDITS[edit], **f64)[:, None]
     case = out / "case"
     case.mkdir(parents=True, exist_ok=True)
-    for name, t in (
-        ("x", x),
-        ("T", T),
-        ("P", P),
-        ("dt", dt),
-        ("h", h),
-        ("J", J),
-        ("x_out", xo),
-        ("h_out", ho),
-        ("steps_out", so),
-    ):
-        if t is None:
-            continue
-        t.cpu().contiguous().numpy().tofile(case / f"{name}.bin")
-    do.cpu().to(torch.int8).numpy().tofile(case / "done_out.bin")
-    counts.cpu().numpy().tofile(case / "counts_out.bin")
+    for name, t in (("x", x), ("T", T), ("P", P), ("dt", dt), ("h", h), ("J", J)):
+        if t is not None:
+            t.cpu().contiguous().numpy().tofile(case / f"{name}.bin")
     (case / "max_steps.txt").write_text(str(max_steps))
     (case / "B.txt").write_text(str(B))
+    solver.export(out / "export")
+    try:
+        xo, ho, do, so = solver(x, T, P, dt, h, J=J, max_steps=max_steps)
+    except ValueError as error:
+        (case / "refused.txt").write_text(str(error))
+        solver.count.cpu().numpy().tofile(case / "counts_out.bin")
+        print(f"export and case written to {out}: {network}, {edit}: refused ({error})")
+        return
+    for name, t in (("x_out", xo), ("h_out", ho), ("steps_out", so)):
+        t.cpu().contiguous().numpy().tofile(case / f"{name}.bin")
+    do.cpu().to(torch.int8).numpy().tofile(case / "done_out.bin")
+    solver.count.cpu().numpy().tofile(case / "counts_out.bin")
     print(
         f"export and case written to {out}: {network}, {B} cells, photo {photo}, max_steps {max_steps}, steps per call "
         f"{float(so.mean()):.2f}, counts {solver.fallback}"

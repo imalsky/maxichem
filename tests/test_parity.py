@@ -129,7 +129,7 @@ def test_lit_chain(parity, verdict):
     )
 
 
-def test_lit_bad_rates_are_counted(parity, verdict):
+def test_lit_bad_rates_are_refused(parity, verdict, monkeypatch):
     cells = parity.J.shape[0]
     x0, T, P = parity.starts(cells, 0, 0.0)
     xs, p_some = x0[:64].clone(), P[:64]
@@ -138,7 +138,12 @@ def test_lit_bad_rates_are_counted(parity, verdict):
     t_bad = T[:64].clone()
     t_bad[11] = 250.0
     j_bad[11, 0] = float("nan")  # a cold cell with a bad J: counted cold
-    y, _, d, _ = parity.lit(xs, t_bad, p_some, parity.full(64, 1.0), parity.full(64, 1e-10), J=j_bad)
+    args = (xs, t_bad, p_some, parity.full(64, 1.0), parity.full(64, 1e-10))
+    with pytest.raises(ValueError, match=r"1 cells below .*cell 11.*3 cells of bad input: .*cell 3: .*min\(J\) = -1"):
+        parity.lit(*args, J=j_bad)
+    with monkeypatch.context() as m:
+        m.setattr(parity.lit, "_refuse", lambda *_: None)
+        y, _, d, _ = parity.lit(*args, J=j_bad)
     counts = dict(parity.lit.fallback)
     good = torch.ones(64, dtype=torch.bool, device=parity.device)
     good[[3, 5, 9, 11]] = False
@@ -156,7 +161,7 @@ def test_lit_bad_rates_are_counted(parity, verdict):
         and bool(torch.equal(d[good], dr))
     )
     verdict(
-        "photolysis: bad J counted, cold precedence",
+        "photolysis: bad J refused, cold precedence",
         ok,
         f"counts {counts}; rows 3, 5, 9 (J -1, NaN, inf) not finished and returned as the normalized input, "
         f"row 11 (250 K, NaN J) cold; "

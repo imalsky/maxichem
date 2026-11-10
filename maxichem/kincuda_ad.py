@@ -327,6 +327,11 @@ class ADSolver(Solver):
         -------
         tuple of torch.Tensor
             x, h, done, accepted steps, dx, dh; the last two have the leading axis if the inputs do.
+
+        Raises
+        ------
+        ValueError
+            As ``CudaSolver.launch``, if a cell was bad input or below ``T_MIN``.
         """
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         tangents = {"dx": dx, "dT": dT, "dP": dP, "ddt": ddt, "dh": dh, "dlm": dlm, "drc": drc, "dJ": dJ}
@@ -365,6 +370,7 @@ class ADSolver(Solver):
         launch_kernel(self._kernels["jvp_rec"], nb, block, self.smem["jvp"], stream, self._arguments("jvp_rec", values))
         self.total += self.count
         self.flag = flags["redo"]
+        self._refuse(x, T, P, dt, J, done, self.flag)
         return xo, ho, done.bool(), nok, dxo[0] if one else dxo, dho[0] if one else dho
 
     @on_device
@@ -413,6 +419,11 @@ class ADSolver(Solver):
             x, h, done, accepted steps, and a dict of the cotangents x, T, P, dt, h, lm [B, R], rc [R, 9] and, with
             ``photo=True``, J [B, branches]. A cell with flag 2 has NaN in its own cotangents and is left out of the
             sum that rc is; ``fallback["still_failed"]`` counts the cells left out.
+
+        Raises
+        ------
+        ValueError
+            As ``CudaSolver.launch``, if a cell was bad input or below ``T_MIN``.
         """
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         check_tensor("gx", gx, (B, self.ns), self.dev)
@@ -457,4 +468,5 @@ class ADSolver(Solver):
         launch_kernel(self._kernels["arrh"], self.nr, ARRH_BLOCK_THREADS, 0, stream, self._arguments("arrh", values))
         self.total += self.count
         self.flag = flags["redo"]
+        self._refuse(x, T, P, dt, J, done, self.flag)
         return xo, ho, done.bool(), nok, g

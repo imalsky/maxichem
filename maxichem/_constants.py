@@ -1,6 +1,11 @@
 """Settings shared by the solver modules, the kernels' header and the export."""
 
-T_MIN = 300.0  # K: the solver's domain starts here (colder cells are counted, not stepped)
+T_MIN = 300.0  # K: the solver's domain starts here (colder cells are counted, not stepped, and the call raises)
+# |sum(x) - 1| above this is bad input. Measured |sum(x) - 1| at most 1.3e-15 over every stored input the checks feed
+# (truth starts, paths and their mixes, panel P, the yardstick, the derivative boxes) and 1.3e-15 over the
+# solver's own outputs (60-call chains, both default networks): far above rounding, far below the densities' effect on
+# a call (rtol 1e-3)
+X_SUM_TOL = 1e-10
 DRIFT = 1e-6  # default drift allowance (NCHO): relative change of an element's share left to rounding
 REC_STEPS = 10  # the recovery's tries, in units of the call's max_steps (40,000 at the default 4,000)
 DEFAULT_RTOL = 1e-3  # relative tolerance of a call
@@ -19,7 +24,7 @@ COUNTS = (
     "still_failed",
     "nonfinite_h",
 )
-EXPORT_FORMAT = 3  # raised by a change the export's reader depends on; cpp/maxichem.cpp refuses any other
+EXPORT_FORMAT = 4  # raised by a change the export's reader depends on; cpp/maxichem.cpp refuses any other
 # attempts stored per cell before the adjoint switches to segment checkpoints; a call may take max_steps up to
 # (2 CAP)^2 / REC_STEPS, 0.4 CAP^2, so this CAP's limit is DEFAULT_MAX_STEPS
 CAP = 100

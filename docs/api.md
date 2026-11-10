@@ -38,7 +38,7 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 
 | Member | Meaning |
 | --- | --- |
-| `solver(x, T, P, dt, h, rtol, atol, max_steps, J)` | Returns (x, h, done, accepted steps), with no host sync |
+| `solver(x, T, P, dt, h, rtol, atol, max_steps, J)` | Returns (x, h, done, accepted steps); raises if it refused a cell |
 | `launch(...)` | The same, with a per-cell flag: 0 passed the guard, 1 recomputed and passes, 2 recomputed and still fails |
 | `fallback` | The last call's counts, as a dict |
 | `check()` | The counts since construction; raises if any cell was below `T_MIN` |
@@ -48,9 +48,15 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 | `close()` | Unloads the kernels and drops the tables and scratch; the counts stay readable |
 
 J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells) and refused
-without it. A row with a negative or non-finite J or a negative mole fraction is bad input: not stepped, and counted. A non-finite h
-acts as dt and is counted in `nonfinite_h`. `launch` and a call both add their counts to `total`, which `check()` reads, so a cold cell in
-a `launch` makes `check()` raise.
+without it.
+
+A cell is refused when it is bad input (a negative or non-finite mole fraction, |sum(x) - 1| above `X_SUM_TOL`, no mole fraction
+above 0, a non-finite T, P <= 0, a negative or non-finite dt, or a negative or non-finite J) or below `T_MIN`. The kernels do not step
+it and count it. After the kernels, `launch` and a call read the counts back, the call's one host sync, and raise ValueError naming
+the counts, the limits and the first refused cell with its values. The counts are added to `total` first, and `fallback` reads them
+after the raise. `ADSolver`'s calls refuse the same cells. Inputs of the wrong shape, dtype or device raise before any launch.
+
+A non-finite h acts as dt and is counted in `nonfinite_h`. `launch` and a call both add their counts to `total`, which `check()` reads.
 
 ## `ADSolver(net, device, cap=CAP, drift=None, photo=False)`
 
@@ -76,9 +82,10 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 
 ## Constants in `kincuda`
 
-`ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `COUNTS`.
+`ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `X_SUM_TOL`, `COUNTS`.
 
 ## C++: `maxichem::Solver(folder, device)`
 
 Loads an export from `cpp/maxichem.hpp`. `chem(x, T, P, dt, h, J, rtol, atol, max_steps)` returns the new mole fractions, the next
-step sizes, done and the accepted steps. A negative `atol` takes the export's default.
+step sizes, done and the accepted steps. A negative `atol` takes the export's default. It refuses the cells `CudaSolver` refuses,
+with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits.

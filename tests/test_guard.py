@@ -19,15 +19,19 @@ def _settled(parity, x0, T, P):
     return helpers.tensor(settled["xs"], parity.device), helpers.tensor(settled["hs"], parity.device)
 
 
-def test_nan_input_is_counted_not_recomputed(parity, verdict):
+def test_nan_input_is_refused(parity, verdict, monkeypatch):
     cells = 64
     network = parity.network
     x0, T, P = parity.starts(cells, 1, 0.0)
     xs, hs = _settled(parity, x0, T, P)
     keep = torch.arange(cells, device=parity.device) != 3
     x = xs.clone()
-    x[3, 5] = float("nan")
-    y, _, d, _ = parity.solver(x, T, P, parity.full(cells, 1.0), hs)
+    x[3, 5] = float("nan")  # a NaN sum
+    with pytest.raises(ValueError, match=r"1 cells of bad input: .*\(first: cell 3: sum\(x\) - 1 = nan"):
+        parity.solver(x, T, P, parity.full(cells, 1.0), hs)
+    with monkeypatch.context() as m:  # what the kernels returned: the other cells untouched
+        m.setattr(parity.solver, "_refuse", lambda *_: None)
+        y, _, d, _ = parity.solver(x, T, P, parity.full(cells, 1.0), hs)
     counts = dict(parity.solver.fallback)
     stored = network.stored_call(libref.arrays("guard/nan", path=network.reference))["x"][keep]
     e = float(network.floored(y[keep][:, network.gas_index], stored).max())
@@ -110,22 +114,27 @@ def test_element_drift_is_recomputed(parity, verdict):
     )
 
 
-def test_cold_cell_raises_in_check(parity, verdict):
+def test_cold_cell_is_refused(parity, verdict, monkeypatch):
     cells = 4096
     x0, T, P = parity.starts(cells, 2, 1.0)
     t_cold = T.clone()
     t_cold[0] = 250.0
-    _, _, d, _ = parity.solver(x0, t_cold, P, parity.full(cells, 500.0), parity.full(cells, 1e-10))
-    with pytest.raises(ValueError, match="below") as raised:
+    args = (x0, t_cold, P, parity.full(cells, 500.0), parity.full(cells, 1e-10))
+    with pytest.raises(ValueError, match=r"1 cells below 300 K, .*\(first: cell 0, T = 250 K\)") as raised:
+        parity.solver(*args)
+    with pytest.raises(ValueError, match="below"):
         parity.solver.check()
+    with monkeypatch.context() as m:
+        m.setattr(parity.solver, "_refuse", lambda *_: None)
+        _, _, d, _ = parity.solver(*args)
     verdict(
-        "guard: T < 300 K raises in check()",
+        "guard: T < 300 K refused, and check() raises",
         parity.solver.fallback["cold"] == 1 and not bool(d[0]),
         f"cell 0 not stepped; ValueError: {raised.value}",
     )
 
 
-def test_bad_inputs_are_counted(parity, verdict):
+def test_bad_inputs_are_refused(parity, verdict, monkeypatch):
     cells = 64
     x0, T, P = parity.starts(cells, 1, 0.0)
     xb, p_bad, dtb, hb = x0.clone(), P.clone(), parity.full(cells, 50.0), parity.full(cells, 1e-10)
@@ -133,24 +142,35 @@ def test_bad_inputs_are_counted(parity, verdict):
     xb[7, 0] = -1e-3
     p_bad[5] = 0.0
     dtb[9] = -1.0
-    y, _, d, _ = parity.solver(xb, T, p_bad, dtb, hb)
+    xb[11] *= 0.9  # sum 0.9
+    xb[13] *= 1.0 + 0.9 * kincuda.X_SUM_TOL  # just inside the tolerance on either side: accepted
+    xb[15] *= 1.0 - 0.9 * kincuda.X_SUM_TOL
+    bad = [3, 5, 7, 9, 11]
+    with pytest.raises(ValueError, match=r"5 cells of bad input: .*\(first: cell 3: sum\(x\) - 1 = -1,"):
+        parity.solver(xb, T, p_bad, dtb, hb)
+    with pytest.raises(ValueError, match=r"1 cells of bad input: .*\(first: cell 0: sum\(x\) - 1 = -0.1,"):
+        parity.solver(xb[11:12], T[11:12], p_bad[11:12], dtb[11:12], hb[11:12])
+    with monkeypatch.context() as m:
+        m.setattr(parity.solver, "_refuse", lambda *_: None)
+        y, _, d, _ = parity.solver(xb, T, p_bad, dtb, hb)
     counts = dict(parity.solver.fallback)
     good = torch.ones(cells, dtype=torch.bool, device=parity.device)
-    good[[3, 5, 7, 9]] = False
+    good[bad] = False
     yr, _, dr, _ = parity.solver(xb[good], T[good], p_bad[good], dtb[good], hb[good])
     ok = (
-        counts["bad_input"] == 4
+        counts["bad_input"] == len(bad)
         and counts["nonfinite"] == 0
         and counts["recomputed"] == 0
-        and not bool(d[[3, 5, 7, 9]].any())
+        and not bool(d[bad].any())
+        and bool(d[[13, 15]].all())
         and bool(torch.equal(y[good], yr))
         and bool(torch.equal(d[good], dr))
     )
     verdict(
-        "guard: all-zero x row, negative x, P = 0, dt < 0",
+        "guard: all-zero x row, negative x, P = 0, dt < 0, sum(x) 0.9 refused; sum(x) 1 +- 0.9 X_SUM_TOL accepted",
         ok,
-        f"counts {counts}; rows 3, 5, 7, 9 counted as bad input and not done; the other {cells - 4} cells bitwise "
-        f"those of a batch without them",
+        f"counts {counts}; rows 3, 5, 7, 9, 11 counted as bad input and not done, rows 13 and 15 done; the other "
+        f"{cells - len(bad)} cells bitwise those of a batch without the refused ones",
     )
 
 

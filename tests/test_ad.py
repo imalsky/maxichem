@@ -31,6 +31,7 @@ DOT_P99 = 1e-6
 DOT_P99_LM = 1e-4  # a fast balanced reaction's multiplier changes nothing in exact arithmetic; this is its rounding
 DOT_MAX = 1e-3
 RC_BATCH = 1e-7  # relative: a sum over cells, reactions and columns
+SCALING_TANGENT = 1e-12  # relative to max x: the frozen tangent along x itself is 0 but rounding; measured <= 2.1e-14
 
 
 CELLS = 1024
@@ -208,7 +209,10 @@ class DerivativeChecks:
         drc: Any = None
         lit = (J > 0).any(1)
         if cls == "x":
+            # along sum(x) = 1: the call refuses a state whose sum is off 1 by more than X_SUM_TOL, so no difference can
+            # judge the part along x itself; test_scaling_x_has_no_frozen_tangent checks that part
             dx = x * rn(*x.shape)
+            dx = dx - x * dx.sum(1, keepdim=True)
         elif cls == "T":
             dT = T * rn(B)
         elif cls == "P":
@@ -370,6 +374,24 @@ def test_primal_is_the_call(checks, verdict):
             f"primal {name}",
             same,
             f"{x.shape[0]} cells ({int((J > 0).any(1).sum())} lit): jvp and vjp bitwise CudaSolver's: {same}",
+        )
+
+
+def test_scaling_x_has_no_frozen_tangent(checks, verdict):
+    # The state is N, molecules per starting molecule, and the right-hand side is homogeneous of degree 1 in N. With the
+    # step sizes held (adapt=False), N -> c N scales every stage, so the tangent of x along dx = x is 0 but for
+    # rounding. The adaptive tangent along x is not 0, since atol does not scale; it has no meaning for valid input,
+    # because the call refuses an x whose sum is off 1 by more than X_SUM_TOL.
+    for name, (x, T, P, J, dt) in checks.cases.items():
+        h, d = torch.full_like(T, 1e-10), torch.full_like(T, dt)
+        _, *others = checks.zt(x)
+        out = checks.ad.jvp(x, T, P, d, h, x, *others, J=J, adapt=False)
+        passed = checks.ad.flag != 2
+        worst = float((out[4].abs().amax(1) / out[0].abs().amax(1))[passed].max())
+        verdict(
+            f"frozen tangent along x itself, {name}",
+            worst <= SCALING_TANGENT,
+            f"largest |dx_out| / max x_out {worst:.1e} over {int(passed.sum())} cells (flag 2 left out)",
         )
 
 
@@ -725,16 +747,23 @@ def test_wrong_cotangents_name_the_argument(checks, argument):
         )
 
 
-def test_negative_x_is_bad_input(checks, verdict):
+def test_negative_x_is_refused(checks, verdict, monkeypatch):
     s = _directions(checks)
     j2 = checks.ad.jvp(s.x, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
     v2 = checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
     xneg = s.x.clone()
     xneg[0, 0] = -1e-3
-    jb = checks.ad.jvp(xneg, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
-    cj = checks.ad.fallback
-    vb = checks.ad.vjp(xneg, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
-    cv = checks.ad.fallback
+    refused = r"1 cells of bad input: .*\(first: cell 0: .*min\(x\) = -0.001,"
+    with pytest.raises(ValueError, match=refused):
+        checks.ad.jvp(xneg, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+    with pytest.raises(ValueError, match=refused):
+        checks.ad.vjp(xneg, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
+    with monkeypatch.context() as m:  # what the kernels returned: the other cells untouched
+        m.setattr(checks.ad, "_refuse", lambda *_: None)
+        jb = checks.ad.jvp(xneg, s.T, s.P, s.d, 2.0 * s.d, *s.tangents_with_h, lm=s.lm, dlm=s.dlm, dJ=s.dJ, J=s.J)
+        cj = checks.ad.fallback
+        vb = checks.ad.vjp(xneg, s.T, s.P, s.d, 2.0 * s.d, s.c, lm=s.lm, J=s.J)
+        cv = checks.ad.fallback
     negok = (
         cj["bad_input"] == 1
         and cv["bad_input"] == 1

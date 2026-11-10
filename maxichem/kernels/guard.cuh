@@ -83,8 +83,9 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
 #endif
   const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
   if (Tc < TMIN) return GUARD_COLD;
-  if (!(isfinite(p) && mx > 0.0 && forcing_fine(Tc, nd, dta[cell])))  // order-free: some x > 0, not the sum
-    return GUARD_BAD_INPUT;
+  // cell_fine's test; this thread sums x in the network's order, the call's warp in its own, so a sum within rounding
+  // of XSUMTOL may be judged differently by the two
+  if (!(fabs(p - 1.0) <= XSUMTOL && mx > 0.0 && forcing_fine(Tc, nd, dta[cell]))) return GUARD_BAD_INPUT;
   double s0 = 0.0, s1 = 0.0;
 #pragma unroll
   for (int e = 0; e < NEL; e++) {

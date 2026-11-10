@@ -24,9 +24,9 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation; a small network in every kernel | GPU |
 | `test_order.py` | Rodas3's order of accuracy | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
-| `test_guard.py` | The guard and recovery, bad inputs, independence from the batch, what a closed solver refuses and releases | GPU, data |
+| `test_guard.py` | The guard and recovery; refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases | GPU, data |
 | `test_ad.py` | Derivatives against finite differences and against each other | GPU, data, slow |
-| `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses another export format | GPU, CUDA toolkit, slow |
+| `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses the inputs the Python call refuses, with the same message and counts; it refuses another export format | GPU, CUDA toolkit, slow |
 | `test_vulcan_truth.py` | `bench/kintest.py quick` against VULCAN-0D | GPU, data, slow |
 
 `tests/data` holds invented networks with constant-Cp NASA-9 data, so a test can state its answer in closed form. Their `N_i`
@@ -43,7 +43,8 @@ multipliers are lm = 0.1 N(0, 1) per reaction unless named lm = 0.
 - **Non-finite derivatives.** Any cell whose tangents or finite differences are not finite fails its case, unless the guard flagged it 2;
   the errors below cannot judge such a cell, since its scale S is not finite. These cases run at the default max_steps, where any cell with
   flag 2 fails its case too.
-- **Tangents against central differences.** Per input class x, T, P, J, lm, rc, one random direction each. Per cell and step e in
+- **Tangents against central differences.** Per input class x, T, P, J, lm, rc, one random direction each; the x direction
+  keeps sum(x) = 1, since the call refuses a state off it. Per cell and step e in
   1e-4..1e-7: err_e = the largest difference over species (x > 1e-20) divided by S, the larger side's largest value. A plateau is where
   the steps agree: the same accepted-step count both sides, and two consecutive e within 1e-2 of S. The best err over the plateau counts.
 - **J in dark cells**, along dJ >= 0: 12 cases. Near 0, at the default atol: the tangent at J = 1e-8 dJ against central differences.
