@@ -21,12 +21,13 @@ CPP_COPIES = {
     "kDefaultMaxSteps": "DEFAULT_MAX_STEPS",
 }
 COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
-FLOAT = re.compile(r"(?<![\w.])(?:\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)(?![\w.])")
+FLOAT = re.compile(r"(?<![\w.])(\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)[fFlL]?(?![\w.])")
 # Floats a kernel may write bare: 0 and 1, a half (the tie of a min or max, a mean) and 2 (a +-2 stoichiometric
-# coefficient, a square's derivative, Rodas3's weight of K1 and 1 / GAMMA, all documented in docs/method.md). Any other
-# value is a setting, a constant or a formula's coefficient, and gets a name.
+# coefficient, a square's derivative, Rodas3's weight of K1 and 1 / GAMMA, all documented in docs/method.md, and the
+# guard's clamping allowance of 2 atol per accepted step). Any other value is a setting, a constant or a formula's
+# coefficient, and gets a name.
 BARE_FLOATS = {0.0, 0.5, 1.0, 2.0}
-SETTING_NAME = re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b|\b[A-Z]{4,}\b")  # T_MAX, FACACC; not T3 or CAP
+SETTING_NAME = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")  # T_MAX, CAP, FACACC; not T3 or ADSolver
 
 
 def test_cpp_copies_equal_the_python_settings():
