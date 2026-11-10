@@ -1,14 +1,16 @@
 """The edge to the chemistry solver: its pressure unit, and the stop when a call leaves cells unfinished.
 
 A cell the call did not finish holds a state for the wrong elapsed time, so the run stops; the message names the cause
-from the call's own counts, and the fix that matches it. docs/architecture.md places this module.
+from the call's own counts, and the fix that matches it. The call itself raises on refused cells (cold, hot, bad
+input), so here those are seen only where that raise was switched off; the cells left are those still failing after
+the recovery. docs/architecture.md places this module.
 """
 
 from collections.abc import Mapping
 
 import torch
 
-from maxichem.kincuda import REC_STEPS, T_MIN
+from maxichem.kincuda import REC_STEPS, T_MAX, T_MIN, X_SUM_TOL
 
 __all__ = ["PA_TO_DYN_CM2", "UnfinishedCellsError", "require_finished"]
 
@@ -20,18 +22,23 @@ class UnfinishedCellsError(RuntimeError):
 
 
 def _causes(counts: Mapping[str, int]) -> list[str]:
-    """Return the cause and fix of each count that leaves a cell not done (the call's other counts lead to these)."""
+    """Return the cause and fix of each count that leaves a cell not done.
+
+    The call's other counts (non-finite, unfinished, drift) lead to still_failed, or to nothing once recovered.
+    """
     out = []
-    if counts.get("cold"):
-        out.append(
-            f"{counts['cold']} cell(s) below the solver's {T_MIN:g} K domain. No solver setting helps: the flow made "
-            "them this cold; look at the deck (its lid, its radiation) where they are"
-        )
+    for name, side, edge in (("cold", "below", T_MIN), ("hot", "above", T_MAX)):
+        if counts.get(name):
+            out.append(
+                f"{counts[name]} cell(s) {side} the solver's {T_MIN:g}-{T_MAX:g} K domain (refused at {edge:g} K). "
+                f"No solver setting helps: the flow made them this {name}; look at the deck (its lid, its radiation) "
+                "where they are"
+            )
     if counts.get("bad_input"):
         out.append(
-            f"{counts['bad_input']} cell(s) with bad input (non-finite or negative mole fractions, none above 0, "
-            "P <= 0, a non-finite T, dt < 0 or a bad J). The driver's inputs to the call are wrong there: check the "
-            "cells' tracers, T and P"
+            f"{counts['bad_input']} cell(s) with bad input (non-finite or negative mole fractions, |sum(x) - 1| above "
+            f"{X_SUM_TOL:g}, none above 0, P <= 0, a non-finite T, dt < 0 or a bad J). The driver's inputs to the "
+            "call are wrong there: check the cells' tracers, their normalization, T and P"
         )
     if counts.get("still_failed"):
         out.append(
