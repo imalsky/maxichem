@@ -14,6 +14,8 @@ pytestmark = pytest.mark.gpu
 
 T_GOOD, P_GOOD, DT, J_GOOD = 1500.0, 1e6, 1e-3, 1e-4  # K, dyn cm^-2, s, s^-1
 FEW_TRIES = 10  # max_steps that leaves the good cells unfinished, so the recovery's copies run (and finish)
+RECOVERED_TOLERANCE = 1e-6  # relative: a recovered cell against the ordinary call, rounding of two factorizations
+RECOVERED_FLOOR = 1e-20  # mole fraction: below it the two are not compared
 STATUS = {"good": 0, "cold": 1, "bad input": 2, "hot": 3}  # the kernels' screening results (common.cuh)
 # Each cell's (T, dt, h) and what it is; the first is the reference for those that differ only in h
 CELLS = {
@@ -96,5 +98,14 @@ def test_every_copy_returns_the_same_cells(read_network, gpu, monkeypatch, max_s
     assert (int(status[c]), bool(done[c]), float(steps[c])) == (STATUS["good"], True, 0.0)
     assert counts["cold"] == counts["hot"] == counts["bad_input"] == 1
     assert counts["nonfinite_h"] == 2
+    stepped = [c for c, q in enumerate(names) if q not in ("cold", "bad input", "hot", "dt = 0")]
+    assert bool(done[stepped].all())  # every stepped cell finishes, through the recovery at FEW_TRIES
     if max_steps == FEW_TRIES:
-        assert counts["recomputed"] >= len(names) - 5  # every good cell but dt = 0 ran out of tries
+        assert counts["recomputed"] == counts["recovered"] == len(stepped)  # each ran out of tries, then recovered
+        net = read_network("synthetic_small")
+        *inputs, J = _inputs(net, gpu)
+        with kincuda.CudaSolver(net, gpu, photo=True) as solver:
+            _kept(solver, monkeypatch)
+            trusted = solver.launch(*inputs, J=J)[0]  # the ordinary call with its default tries
+        # the recovery's dense factors against the call's sparse ones: rounding apart
+        assert torch.allclose(x[stepped], trusted[stepped], rtol=RECOVERED_TOLERANCE, atol=RECOVERED_FLOOR)
