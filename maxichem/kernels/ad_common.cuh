@@ -147,11 +147,11 @@ __device__ __forceinline__ void rate_law_partials(const double* q, int fl, doubl
                e1 = (fl & FL_SECOND_K0) ? exp(q[3] + q[4] * lT - q[5] * iT) : 0.0;
   const double kl = e0 + e1, w0 = kl > 0.0 ? e0 / kl : 0.0, w1 = kl > 0.0 ? e1 / kl : 0.0;
   double ph = 1.0, pc = 0.0, fT = 0.0;  // d ln k / d ln k_low, d ln k / d ln k_inf, d ln F / dT through Fc
-  if (fl & FL_FALLOFF) {
+  if ((fl & FL_FALLOFF) && kl > 0.0) {  // as law(): k0 = 0 has no rate; Pr = inf the high-pressure rate 0
     const double rr = kl * nd / exp(q[6] + q[7] * lT - q[8] * iT);
     ph = 1.0 / (1.0 + rr);
-    pc = rr / (1.0 + rr);
-    if ((fl & FL_TROE) && rr > 0.0) {
+    pc = isfinite(rr) ? rr / (1.0 + rr) : 1.0;
+    if ((fl & FL_TROE) && rr > 0.0 && isfinite(rr)) {
       const double ea = (1.0 - q[9]) * exp(-Tc / q[10]), eb = q[9] * exp(-Tc / q[11]), ec = exp(-q[12] / Tc);
       const double fc = ea + eb + ec, f = log10(fc), z = log10(rr), nn = TROE_N0 - TROE_N1 * f;
       const bool vm = (fl & FL_VM11) != 0;
@@ -162,6 +162,11 @@ __device__ __forceinline__ void rate_law_partials(const double* q, int fl, doubl
       pc -= sz;
       // ln F = ln 10 log10 F; df/dT = Fc' / (Fc ln 10)
       fT = tf * (-ea / q[10] - eb / q[11] + ec * q[12] * iT * iT) / fc;
+    } else if ((fl & FL_TROE) && !(fl & FL_VM11) && rr == 0.0) {
+      // Pr = 0: law()'s limit F = Fc^s, s = d^2 / (1 + d^2), no Pr dependence; d ln F / dT = s Fc' / Fc (VM11: F = 1)
+      const double ea = (1.0 - q[9]) * exp(-Tc / q[10]), eb = q[9] * exp(-Tc / q[11]), ec = exp(-q[12] / Tc);
+      const double s = TROE_D * TROE_D / (1.0 + TROE_D * TROE_D);
+      fT = s * (-ea / q[10] - eb / q[11] + ec * q[12] * iT * iT) / (ea + eb + ec);
     }
   }
   D[0] = ph * w0;

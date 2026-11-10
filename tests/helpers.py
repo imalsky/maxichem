@@ -10,6 +10,9 @@ import torch
 from maxichem import _checks, kincuda, kinvulcan, paths
 
 H2S_PER_H2_RECORDED = 2.7e-5  # the sulfur the stored references' recorded starts were made with; part of their digest
+# The known answers' constants, typed here so that a wrong constant in the solver cannot also move the answer
+BOLTZMANN = 1.380649e-16  # erg K^-1 (the SI value, exact since 2019, in cgs)
+STANDARD_PRESSURE = 1.0e6  # dyn cm^-2: 1 bar, the NASA-9 standard state
 
 REFERENCES = {"NCHO_photo_network.txt": paths.libref, "SNCHO_photo_network_2025.txt": paths.libref_sulfur}
 CHAIN_PATHS = 256
@@ -66,6 +69,80 @@ def on_the_tolerance(rows: list[list[float]], perm: list[int], tolerance: float,
             if (warp > tolerance >= plain) if warp_above else (plain > tolerance >= warp):
                 return scaled
     raise RuntimeError("no row scales to put the two orders of the sum on either side of the tolerance")
+
+
+def number_density(T: Any, P: Any) -> Any:
+    """Return n_tot = P / (k_B T) in cm^-3, from T in K and P in dyn cm^-2, with k_B typed here, not the solver's."""
+    return np.asarray(P) / (BOLTZMANN * np.asarray(T))
+
+
+def enthalpy_entropy(a: Any, T: float) -> tuple[float, float]:
+    """Return H / RT and S / R from one NASA-9 range a1..a7, b1, b2 (McBride et al. 2002), written out here."""
+    enthalpy = (
+        -a[0] / T**2 + a[1] * np.log(T) / T + a[2] + a[3] * T / 2 + a[4] * T**2 / 3 + a[5] * T**3 / 4 + a[6] * T**4 / 5
+    ) + a[7] / T
+    entropy = (
+        -a[0] / T**2 / 2 - a[1] / T + a[2] * np.log(T) + a[3] * T + a[4] * T**2 / 2 + a[5] * T**3 / 3 + a[6] * T**4 / 4
+    ) + a[8]
+    return float(enthalpy), float(entropy)
+
+
+def gibbs_rt(a: Any, T: float) -> float:
+    """Return G / RT from one NASA-9 range a1..a7, b1, b2."""
+    enthalpy, entropy = enthalpy_entropy(a, T)
+    return enthalpy - entropy
+
+
+def constant_cp(enthalpy_r: float, cp_r: float = 3.5) -> list[float]:
+    """Return one NASA-9 range of constant Cp / R whose H / R is enthalpy_r (K) plus Cp T / R, and S / R constant 0."""
+    return [0.0, 0.0, cp_r, 0.0, 0.0, 0.0, 0.0, enthalpy_r, 0.0]
+
+
+def write_network(folder: Any, text: str, thermo: dict[str, Any]) -> kinvulcan.VulcanNetwork:
+    """Write an invented network and its NASA-9 files into folder and read them with the public reader.
+
+    thermo maps each species to one range (both sides of the split) or a pair (below, above).
+    """
+    nasa = folder / "NASA9"
+    nasa.mkdir()
+    for name, ranges in thermo.items():
+        low, high = ranges if isinstance(ranges, tuple) else (ranges, ranges)
+        # a file holds a1..a7, an unused entry, b1, b2 for each range, five numbers per line
+        numbers = [*low[:7], 0.0, *low[7:], *high[:7], 0.0, *high[7:]]
+        rows = [" ".join(f"{q:.17g}" for q in numbers[i : i + 5]) for i in range(0, 20, 5)]
+        (nasa / f"{name}.txt").write_text("\n".join(rows) + "\n")
+    (folder / "network.txt").write_text(text)
+    return kinvulcan.VulcanNetwork(folder / "network.txt", nasa)
+
+
+RECOMBINATION = """# Invented test network: H + H + M -> H2 + M, the dissociation negligible
+
+# 3-body reactions without high-pressure rates
+1 [ H + H + M -> H2 + M ] 1.0E-32 0.0 0.0
+
+# reverse stops
+"""
+RECOMBINATION_K0 = 1.0e-32  # cm6 s^-1
+RECOMBINATION_T = 1000.0  # K
+H2_BOUND = -2.0e5  # K: H / R of H2 below that of 2 H, so the dissociation is negligible
+
+
+def recombination(folder: Any) -> tuple[kinvulcan.VulcanNetwork, dict[str, Any]]:
+    """Return the network of H + H + M -> H2 + M, and its NASA-9 ranges by species."""
+    atom = constant_cp(0.0, 2.5)
+    thermo = {"H": atom, "H2": constant_cp(H2_BOUND), "He": atom}
+    return write_network(folder, RECOMBINATION, thermo), thermo
+
+
+def recombination_time(n: Any, P: float) -> Any:
+    """Return t (s) at which N_H = n, from pure H at RECOMBINATION_T and P (dyn cm^-2).
+
+    With N per starting molecule, N_H2 = (1 - N) / 2 and sum N = (1 + N) / 2, so dN/dt = -2 k0 n_tot^2 N^2 / sum N,
+    and 1 / N - ln N = 1 + 4 k0 n_tot^2 t. The mole fraction of H is 2 N / (1 + N). The sum N / n_tot factor of the
+    constant-pressure form is what makes it differ from the constant-volume answer 1 / N = 1 + 2 k0 n_tot^2 t.
+    """
+    nd = number_density(RECOMBINATION_T, P)
+    return (1.0 / n - np.log(n) - 1.0) / (4.0 * RECOMBINATION_K0 * nd**2)
 
 
 def decay_answer(t: Any) -> tuple[Any, Any]:

@@ -20,6 +20,33 @@ namespace {
 constexpr int kExportFormat = 6;              // EXPORT_FORMAT in maxichem/_constants.py: any other export is refused
 constexpr int kGuardBlockThreads = 128;       // any size works; this one packs cells densely
 constexpr size_t kCountSlotsAroundNames = 2;  // the two cell queues around the export's "counts" names
+constexpr char const* kPhotolysisArgument = "Jin";  // PHOTOLYSIS_ARGUMENT in maxichem/_constants.py
+// The kernel parameters a call supplies besides the export's tables and J; operator() fills exactly these.
+constexpr std::array<char const*, 20> kCallArguments{"x0",    "Ta",   "Pa",        "dta",     "hin",    "hio",   "xout",
+                                                     "doneo", "noko", "status",    "redo",    "list",   "count", "B",
+                                                     "rtol",  "atol", "max_steps", "scratch", "sround", "jround"};
+// Each kernel's parameters in order, as KERNEL_ARGUMENTS in maxichem/_constants.py, so that an export with another
+// contract is refused before anything runs; call and recover take J last with photolysis. Kept here as well because
+// the caller must know what it can supply; every test_export_cpp case exports from Python and loads it here, so a
+// difference between the two lists fails them all.
+struct KernelArguments {
+  char const* kernel;
+  std::vector<char const*> names;
+  bool photolysis;
+};
+std::array<KernelArguments, 3> const kKernelArguments{{
+    {"call",
+     {"x0",    "Ta",      "Pa",   "dta",  "hio",       "xout", "doneo",  "noko",  "status",
+      "count", "B",       "rtol", "atol", "max_steps", "perm", "blob",   "rc",    "rf",
+      "nasa",  "scratch", "sst",  "jt",   "lu",        "optr", "sround", "jround"},
+     true},
+    {"guard", {"x0", "xout", "doneo", "noko", "status", "atoms", "redo", "list", "count", "B", "atol"}, false},
+    {"recover",
+     {"x0",   "Ta",   "Pa",      "dta",  "hin",  "xout",      "hio",   "doneo",  "noko",
+      "redo", "list", "count",   "rtol", "atol", "max_steps", "perm",  "blob",   "rc",
+      "rf",   "nasa", "scratch", "sst",  "jt",   "didx",      "atoms", "sround", "jround"},
+     true},
+}};
 
 void check(CUresult r, char const* what) {
   if (r != CUDA_SUCCESS) {
@@ -106,21 +133,51 @@ torch::Tensor read_table(std::string const& folder, std::vector<std::string> con
   return cpu;
 }
 
+// Refuse an export whose kernel argument lists differ from the ones this caller supplies (each name once, in order,
+// J only where a kernel takes it, every table listed), naming the kernel and the argument.
+void check_arguments(std::map<std::string, std::vector<std::string>> const& arguments,
+                     std::vector<std::vector<std::string>> const& tables, bool photolysis) {
+  auto refuse = [](std::string const& kernel, std::string const& what) {
+    throw std::runtime_error("maxichem: kernel " + kernel + " " + what + "; export again with this version");
+  };
+  for (auto const& [kernel, names, takes_j] : kKernelArguments) {
+    std::vector<std::string> want(names.begin(), names.end());
+    if (takes_j && photolysis) want.emplace_back(kPhotolysisArgument);
+    auto it = arguments.find(kernel);
+    if (it == arguments.end()) refuse(kernel, "has no args line in meta.txt");
+    auto const& got = it->second;
+    for (auto const& name : got) {
+      if (std::find(want.begin(), want.end(), name) == want.end())
+        refuse(kernel, "takes argument " + name + ", which this caller does not supply");
+      if (std::count(got.begin(), got.end(), name) > 1) refuse(kernel, "lists argument " + name + " twice");
+    }
+    for (auto const& name : want)
+      if (std::find(got.begin(), got.end(), name) == got.end()) refuse(kernel, "lacks argument " + name);
+    for (size_t i = 0; i < want.size(); ++i)
+      if (got[i] != want[i])
+        refuse(kernel, "has argument " + got[i] + " at position " + std::to_string(i) + ", where this caller passes " +
+                           want[i]);
+    for (auto const& name : want) {
+      bool const supplied =
+          name == kPhotolysisArgument ||
+          std::find(kCallArguments.begin(), kCallArguments.end(), name) != kCallArguments.end() ||
+          std::any_of(tables.begin(), tables.end(), [&](auto const& t) { return t.size() > 1 && t[1] == name; });
+      if (!supplied) refuse(kernel, "takes table " + name + ", which meta.txt does not list");
+    }
+  }
+}
+
 }  // namespace
 
 Solver::Solver(std::string const& folder, torch::Device device) : device_(device) {
   TORCH_CHECK(device.is_cuda(), "maxichem::Solver: a CUDA device");
-  c10::cuda::CUDAGuard guard(device);
-  device_ = torch::Device(torch::kCUDA, guard.current_device().index());  // "cuda": the current one
-  device = device_;
-  torch::zeros({1}, torch::TensorOptions().device(device));  // torch's context is current
-
+  // every check of meta.txt comes before any CUDA work
   std::map<std::string, std::string> meta;
   std::vector<std::vector<std::string>> tables;
   std::map<std::string, std::vector<std::string>> lists;
   read_meta(folder + "/meta.txt", meta, tables, arguments_, lists);
-  species = lists["species"];
-  elements = lists["elements"];
+  species_ = lists["species"];
+  elements_ = lists["elements"];
   auto geti = [&](char const* k) {
     auto it = meta.find(k);
     if (it == meta.end()) throw std::runtime_error(std::string("maxichem: meta.txt lacks ") + k);
@@ -129,8 +186,8 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
   if (geti("export_format") != kExportFormat)
     throw std::runtime_error("maxichem: export format " + meta.at("export_format") + ", this code reads " +
                              std::to_string(kExportFormat) + "; export again with this version");
-  ns = static_cast<int>(geti("ns"));
-  nj = static_cast<int>(geti("nj"));
+  ns_ = static_cast<int>(geti("ns"));
+  nj_ = static_cast<int>(geti("nj"));
   w_ = static_cast<int>(geti("w"));
   cpb_ = static_cast<int>(geti("cpb"));
   smem_ = static_cast<int>(geti("smem"));
@@ -140,7 +197,7 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
   sround_ = static_cast<int>(geti("sround"));
   jround_ = static_cast<int>(geti("jround"));
   rec_steps_ = static_cast<int>(geti("rec_steps"));
-  default_atol = std::stod(meta.at("atol"));
+  default_atol_ = std::stod(meta.at("atol"));
   t_min_ = std::stod(meta.at("t_min"));
   t_max_ = std::stod(meta.at("t_max"));
   x_sum_tol_ = std::stod(meta.at("x_sum_tol"));
@@ -153,10 +210,15 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
   bad_input_slot_ = slot("bad_input");
   cold_slot_ = slot("cold");
   hot_slot_ = slot("hot");
-  if (static_cast<int>(species.size()) != ns)
-    throw std::runtime_error("maxichem: meta.txt lists " + std::to_string(species.size()) + " species, ns is " +
-                             std::to_string(ns));
+  if (static_cast<int>(species_.size()) != ns_)
+    throw std::runtime_error("maxichem: meta.txt lists " + std::to_string(species_.size()) + " species, ns is " +
+                             std::to_string(ns_));
+  check_arguments(arguments_, tables, nj_ > 0);
 
+  c10::cuda::CUDAGuard guard(device);
+  device_ = torch::Device(torch::kCUDA, guard.current_device().index());  // "cuda": the current one
+  device = device_;
+  torch::zeros({1}, torch::TensorOptions().device(device));  // torch's context is current
   int sms = multiprocessors_on(device_.index(), meta.at("arch"));
 
   std::string cubin = read_file(folder + "/kernel.cubin");
@@ -178,8 +240,8 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
     scratch_ = torch::empty({max_blocks_ * cpb_ * stride_}, f64);
     scratch_rec_ = torch::empty({rec_blocks_ * stride_rec_}, f64);
     const int64_t slots = static_cast<int64_t>(lists["counts"].size() + kCountSlotsAroundNames);
-    count = torch::zeros({slots}, torch::TensorOptions().dtype(torch::kInt32).device(device));
-    total = torch::zeros({slots}, torch::TensorOptions().dtype(torch::kInt64).device(device));
+    count_ = torch::zeros({slots}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    total_ = torch::zeros({slots}, torch::TensorOptions().dtype(torch::kInt64).device(device));
   } catch (...) {
     cuModuleUnload(mod);
     module_ = nullptr;
@@ -201,13 +263,13 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   for (auto const& [name, a] : given)
     TORCH_CHECK(a->device() == device_ && a->scalar_type() == torch::kFloat64, "maxichem: ", name, ": float64 on ",
                 device_, " expected, got ", a->scalar_type(), " on ", a->device());
-  TORCH_CHECK(x.dim() == 2 && x.size(1) == ns, "maxichem: x: [B, ", ns, "] expected, got ", x.sizes());
+  TORCH_CHECK(x.dim() == 2 && x.size(1) == ns_, "maxichem: x: [B, ", ns_, "] expected, got ", x.sizes());
   TORCH_CHECK(x.size(0) <= std::numeric_limits<int>::max(), "maxichem: at most 2^31 - 1 cells per call, got ",
               x.size(0));
   for (auto const& [name, a] : given)
     TORCH_CHECK(a == &x || (a->dim() == 1 && a->size(0) == x.size(0)), "maxichem: ", name, ": [", x.size(0),
                 "] expected, got ", a->sizes());
-  if (atol < 0) atol = default_atol;
+  if (atol < 0) atol = default_atol_;
   TORCH_CHECK(std::isfinite(rtol) && rtol > 0 && std::isfinite(atol) && atol > 0,
               "maxichem: rtol and atol finite and positive");
   TORCH_CHECK(max_steps >= 1 && max_steps <= std::numeric_limits<int>::max() / rec_steps_,
@@ -219,15 +281,15 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   P = P.contiguous();
   dt = dt.contiguous();
   h = h.contiguous();
-  if (nj == 0) {
-    TORCH_CHECK(!J.defined(), "maxichem: this solver has no photolysis");
-  } else {
-    TORCH_CHECK(J.defined(), "maxichem: J [B, ", nj, "] is required for a network exported with photo=True");
+  // a defined J is float64 [B, nj] on the device, so [B, 0] without photolysis; only a network without one may omit it
+  if (J.defined()) {
     TORCH_CHECK(J.device() == device_ && J.scalar_type() == torch::kFloat64 && J.dim() == 2 && J.size(0) == B &&
-                    J.size(1) == nj,
-                "maxichem: J: float64 [", B, ", ", nj, "] on ", device_, " expected, got ", J.scalar_type(), " ",
-                J.sizes(), " on ", J.device());
+                    J.size(1) == nj_,
+                "maxichem: J: float64 [", B, ", ", nj_, "] on ", device_, " expected, got ", J.scalar_type(), " ",
+                J.sizes(), " on ", J.device(), nj_ ? "" : " (this export has no photolysis: pass no J, or [B, 0])");
     J = J.contiguous();
+  } else {
+    TORCH_CHECK(nj_ == 0, "maxichem: J [B, ", nj_, "] is required for a network exported with photo=True");
   }
   auto xo = torch::empty_like(x);
   auto ho = h.clone();
@@ -235,7 +297,7 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   auto done = torch::empty({B}, i32), redo = torch::empty({B}, i32), lst = torch::empty({B}, i32),
        status = torch::empty({B}, i32);
   auto nok = torch::empty({B}, x.options());
-  count.zero_();
+  count_.zero_();
   CUstream stream = reinterpret_cast<CUstream>(at::cuda::getCurrentCUDAStream().stream());
 
   // the address of each kernel parameter's value, by name; meta.txt gives each kernel's order
@@ -258,9 +320,9 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
                                                                        {"status", &status},
                                                                        {"redo", &redo},
                                                                        {"list", &lst},
-                                                                       {"count", &count}}};
+                                                                       {"count", &count_}}};
   for (auto const& [name, t] : inputs) tensor(name, *t);
-  if (nj) tensor("Jin", J);
+  if (nj_) tensor(kPhotolysisArgument, J);
   values["B"] = &B;
   values["rtol"] = &rtol;
   values["atol"] = &atol;
@@ -283,14 +345,14 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   tensor("scratch", scratch_rec_);
   launch(recover_, "recover", std::max(1, std::min(B, rec_blocks_)), 32 * w_, smem_rec_);
 
-  total += count;
+  total_ += count_;
   refuse(x, T, P, dt, J, status);
   return {xo, ho, done.to(torch::kBool), nok};
 }
 
 void Solver::refuse(torch::Tensor const& x, torch::Tensor const& T, torch::Tensor const& P, torch::Tensor const& dt,
                     torch::Tensor const& J, torch::Tensor const& status) const {
-  auto counts = count.cpu();  // the call's one host sync
+  auto counts = count_.cpu();  // the call's one host sync
   int const bad = counts[bad_input_slot_].item<int>(), cold = counts[cold_slot_].item<int>(),
             hot = counts[hot_slot_].item<int>();
   if (bad == 0 && cold == 0 && hot == 0) return;
@@ -321,7 +383,7 @@ void Solver::refuse(torch::Tensor const& x, torch::Tensor const& T, torch::Tenso
       << " (added in another order than the kernel's, so it can differ in the last bits), min(x) = "
       << x[i].min().item<double>() << ", T = " << T[i].item<double>() << " K, P = " << P[i].item<double>()
       << " dyn cm^-2, dt = " << dt[i].item<double>() << " s";
-    if (nj) m << ", min(J) = " << J[i].min().item<double>() << " s^-1";
+    if (nj_) m << ", min(J) = " << J[i].min().item<double>() << " s^-1";
     m << "); pass x normalized to sum 1 in float64, clamped at 0";
   }
   throw std::invalid_argument(m.str());

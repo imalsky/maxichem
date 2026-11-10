@@ -99,9 +99,12 @@ counts = solver.check()  # guard counts; raises if a cell was outside 300-3000 K
   - `J` [cells, branches]: photolysis rates in s^-1, one column per branch in the order of `net.photo` (each entry
     names its absorber and branch index as in the network file). Required with `photo=True`; use zeros at night.
 - Outputs: the new `x`, the step size to keep, a per-cell `done` flag (the call finished and its result passed the
-  guard) and the number of accepted steps.
-- Tolerances are arguments of every call, in Python (`rtol=1e-3, atol=1e-25`) and in the C++ caller (`rtol`, `atol`;
-  a negative `atol` takes the export's default). The default atol, `kincuda.ATOL` = 1e-25 in mole fraction, follows
+  guard) and the number of accepted steps, as a named tuple (`CallResult`: `x`, `h`, `done`, `steps`), which
+  unpacks as before.
+- Tolerances are arguments of every call, in Python keyword only (`rtol=1e-3, atol=1e-25`; also `max_steps=` and
+  `J=`) and in the C++ caller (`rtol`, `atol`; a negative `atol` takes the export's default). Interface change: a
+  Python call that passes `rtol`, `atol`, `max_steps` or `J` by position now raises TypeError; name them, as also the
+  constructors' `drift`, `photo` and `cap`. The default atol, `kincuda.ATOL` = 1e-25 in mole fraction, follows
   trace species down to that level. A smaller atol (for example 1e-30) follows seeds of trace species further, at the
   cost of more steps: in one cool, thin, lit sulfur box (386 K, 9e-5 bar) S2 is off by 0.15 dex at 1e-25 and by 0.002
   dex at 1e-30 against a tight Radau reference. A GCM coupling should pass atol through as a setting.
@@ -124,7 +127,9 @@ counts = solver.check()  # guard counts; raises if a cell was outside 300-3000 K
   the export and launches the same kernels with the same arguments, so a call gives the same bits as in Python.
   Export on the machine that runs it (a cubin is for one GPU architecture). Build: `cmake -S cpp -B cpp/build
   -DPython3_EXECUTABLE=<python with torch> -DCUDAToolkit_ROOT=<CUDA toolkit>`. Check: `tests/test_export_cpp.py` writes
-  an export and one call, and compares the C++ call with it bit for bit.
+  an export and one call, and compares the C++ call with it bit for bit. Interface change: the C++ solver's sizes,
+  names and counts are read-only accessors now (`chem.ns()`, `chem.nj()`, `chem.species()`, `chem.count()`, ...; the
+  tensors come back as copies), and an export without photolysis takes no J or an empty [B, 0] one.
 
 ## Accuracy
 

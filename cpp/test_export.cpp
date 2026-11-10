@@ -6,7 +6,9 @@
 // max_steps.txt. The call runs twice, and both are compared in full (counts included); the second is timed. At the
 // default max_steps it uses the default arguments, so they answer for the Python defaults too. If the case holds
 // refused.txt, the Python call refused it: the C++ call must throw std::invalid_argument with that message and the
-// same counts.
+// same counts. A thermal export is also called with an empty [B, 0] J, which must give the same bits, and with a
+// [B, 1] J, which must be refused. Then the tensors the accessors return are changed in place, and a further call must
+// still give the same bits and the solver's own totals and atoms table.
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -37,16 +39,17 @@ int main(int argc, char** argv) {
   std::string ex = argv[1], cs = argv[2];
   torch::Device dev(torch::kCUDA, 0);
   maxichem::Solver chem(ex, dev);
+  std::cout << "export loaded; " << std::flush;  // an export the constructor refuses never gets here
   int64_t B = 0;
   if (!(std::ifstream(cs + "/B.txt") >> B) || B < 1) throw std::runtime_error("cannot read " + cs + "/B.txt");
   auto f64 = torch::kFloat64;
-  auto x = load(cs + "/x.bin", {B, chem.ns}, f64).to(dev);
+  auto x = load(cs + "/x.bin", {B, chem.ns()}, f64).to(dev);
   auto T = load(cs + "/T.bin", {B}, f64).to(dev);
   auto P = load(cs + "/P.bin", {B}, f64).to(dev);
   auto dt = load(cs + "/dt.bin", {B}, f64).to(dev);
   auto h = load(cs + "/h.bin", {B}, f64).to(dev);
   torch::Tensor J;
-  if (chem.nj) J = load(cs + "/J.bin", {B, chem.nj}, f64).to(dev);
+  if (chem.nj()) J = load(cs + "/J.bin", {B, chem.nj()}, f64).to(dev);
   int max_steps = 0;
   if (!(std::ifstream(cs + "/max_steps.txt") >> max_steps) || max_steps < 1)
     throw std::runtime_error("cannot read " + cs + "/max_steps.txt");
@@ -64,25 +67,25 @@ int main(int argc, char** argv) {
     }
     std::string const prefix = "maxichem: ";
     bool const same_message = message.rfind(prefix, 0) == 0 && message.substr(prefix.size()) == expected;
-    auto co = load(cs + "/counts_out.bin", {chem.count.size(0)}, torch::kInt32);
-    bool const same_counts = torch::equal(chem.count.cpu(), co);
+    auto co = load(cs + "/counts_out.bin", {chem.count().size(0)}, torch::kInt32);
+    bool const same_counts = torch::equal(chem.count().cpu(), co);
     std::cout << "C++ call " << (same_message && same_counts ? "refused as the Python call" : "DIFFERENT")
-              << "; message: " << message << "; counts " << chem.count.cpu().view({1, -1}) << std::endl;
+              << "; message: " << message << "; counts " << chem.count().cpu().view({1, -1}) << std::endl;
     return same_message && same_counts ? 0 : 1;
   }
   auto r = call();
-  auto counts = chem.count.cpu().clone();
+  auto counts = chem.count().cpu();
   torch::cuda::synchronize();
   auto t0 = std::chrono::steady_clock::now();
   auto r2 = call();
-  auto counts2 = chem.count.cpu().clone();
+  auto counts2 = chem.count().cpu();
   torch::cuda::synchronize();
   double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  auto xo = load(cs + "/x_out.bin", {B, chem.ns}, f64);
+  auto xo = load(cs + "/x_out.bin", {B, chem.ns()}, f64);
   auto ho = load(cs + "/h_out.bin", {B}, f64);
   auto so = load(cs + "/steps_out.bin", {B}, f64);
   auto dn = load(cs + "/done_out.bin", {B}, torch::kInt8).to(torch::kBool);
-  auto co = load(cs + "/counts_out.bin", {chem.count.size(0)}, torch::kInt32);
+  auto co = load(cs + "/counts_out.bin", {chem.count().size(0)}, torch::kInt32);
   auto same = [](torch::Tensor a, torch::Tensor b) {
     return torch::equal(a.cpu().contiguous().view(torch::kInt64), b.contiguous().view(torch::kInt64));
   };
@@ -90,7 +93,30 @@ int main(int argc, char** argv) {
     return same(q[0], xo) && same(q[1], ho) && same(q[3], so) && torch::equal(q[2].cpu(), dn) && torch::equal(c, co);
   };
   bool ok = all_same(r, counts) && all_same(r2, counts2);
-  std::cout << "cells " << B << ", species " << chem.ns << ", branches " << chem.nj << ": C++ call "
+  if (chem.nj() == 0) {  // without photolysis an empty [B, 0] J is no J; any other J is refused before a launch
+    auto r3 = chem(x, T, P, dt, h, torch::zeros({B, 0}, x.options()), maxichem::kDefaultRtol, -1.0, max_steps);
+    bool const same_empty = all_same(r3, chem.count().cpu());
+    bool refused = false;
+    try {
+      chem(x, T, P, dt, h, torch::zeros({B, 1}, x.options()), maxichem::kDefaultRtol, -1.0, max_steps);
+    } catch (c10::Error const&) {
+      refused = true;
+    }
+    ok = ok && same_empty && refused;
+    std::cout << "J [B, 0] " << (same_empty ? "gives the same bits" : "DIFFERENT") << ", J [B, 1] "
+              << (refused ? "refused" : "NOT REFUSED") << "; ";
+  }
+  // what the accessors return is the caller's to change: the solver's counts and tables stay as they were
+  auto const total_before = chem.total().cpu(), atoms_before = chem.atoms().cpu();
+  chem.count().resize_({1});
+  chem.total().zero_();
+  chem.atoms().zero_();
+  auto r4 = call();
+  bool const own = torch::equal(chem.total().cpu(), total_before + co.to(torch::kInt64)) &&
+                   torch::equal(chem.atoms().cpu(), atoms_before) && all_same(r4, chem.count().cpu());
+  ok = ok && own;
+  std::cout << (own ? "accessors return copies" : "ACCESSORS SHARE THE SOLVER'S TENSORS") << "; ";
+  std::cout << "cells " << B << ", species " << chem.ns() << ", branches " << chem.nj() << ": C++ call "
             << (ok ? "bitwise identical to the Python call" : "DIFFERENT") << "; second call " << ms << " ms ("
             << 1e3 * ms / B << " us per cell)"
             << "; max_steps " << max_steps << (defaults ? " (default arguments)" : "") << "; counts "

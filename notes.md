@@ -1783,6 +1783,153 @@ sorted-file digest 13162af0 (120 files), libref8 9b27b5fd, libref9_SNCHO25 1dc74
 - The truth sets, the truth generator (vulcan-truth/science.py) and the parity references libref8 and libref9_SNCHO25
   still carry the old rule. The new rule cannot be validated against them; it needs truth made with it.
 
+### 2026-11-10 00:28 to 06:10: independent known-answer tests, two kernel hazards, the coupling stop's causes
+Branch known-answers, from 0c7f7df. A review found that the tests catch regressions but prove little on their own: parity
+compares with an earlier copy of the same formulas, CI runs no GPU test, and of eight deliberate breaks of the physics two
+were seen by an independent test. The new tests take every expected value from a formula written out in the test, with k_B
+(1.380649e-16 erg/K), the standard pressure (1 bar) and K_COLL (1e-9 cm3/s) typed there, so a wrong constant in the solver
+fails them. Networks and NASA-9 files other than tests/data are written by the test (helpers.write_network) and read by the
+public reader.
+- Rate laws (test_rate_laws.py). Each law drives an isomerization CO_i -> CO_j beside spectators it does not change, so x
+  relaxes to the pair's equilibrium at lambda = (k_f + k_r) times the spectators' densities, exactly; one cell per law and
+  (T, P), dt = 1 / lambda, at (600 K, 1e4), (1500 K, 1e6) and (2600 K, 1e8 dyn cm^-2). Laws: Arrhenius; low-pressure only;
+  low-pressure only with effi, traced in pure H2 so that k = eff k0 under any reading of the efficiency; Lindemann and Troe
+  falloff, Pr 8e-4 to 20; the special law's two k0 terms and Visscher-Moses width (OH traced in CH3); the collision limit
+  on a direction of two molecules (the reverse the larger, K < 1) and of three. The rows without Troe run again in a network
+  with no Troe line, so both compiled falloff forms are seen. A direction of one molecule and M stays below 0.1 K_COLL under
+  the current rule and the coming one (q = k), so that rule is not pinned. Worst error on lambda 1.0e-9 (limit 1e-6) at rtol
+  1e-9. The Troe constants are those of Venot et al. (2012, Appendix C), which the code cites; the paper was not opened here. Every shipped network carries the special CH3OH law, so every one compiles the Troe form: the plain falloff arm, and fix A's edit of it, are seen only by these tests, not by the byte-identity dumps.
+- NASA-9 ranges (test_known_answers.py). CO_1 has different low and high sets with every polynomial term non-zero, the high
+  b1 and b2 set so that H and S meet at 1000 K. CO_2 / CO_1 after a 1e10 s call against exp(G_1 - G_2) from the NASA-9
+  polynomials written in helpers.py: at 900, 1100 and 2500 K within 4e-15 (limit 1e-12).
+- Photolysis mapping: three absorbers, one with two branches, J 0.7, 2.3, 0.4 and 1.1 s^-1 looked up by (absorber, branch)
+  in net.photo; every species against the closed form at 0.3, 1 and 3 s, worst 6.3e-8 (limit 1e-6) at rtol 1e-8.
+- Step control: the decay A -> 2 B with a first try h = dt at J dt = 5 and rtol 1e-6, within 2e-5 of the closed form; the
+  same call with max_steps equal to its 118 accepted steps is unfinished, so a try was rejected (it finishes at 120).
+- Constant pressure: H + H + M -> H2 + M from pure H, 1 / N - ln N = 1 + 4 k0 n_tot^2 t, x_H = 2 N / (1 + N); calls ending at
+  N = 0.8, 0.5, 0.3 within 6e-9 (limit 1e-6). Rodas3's order on it with every try accepted: slope 2.92 (band 2.7-3.3), next to
+  2.96 on the linear decay.
+- The four copies of setup and tail (test_kernel_copies.py): one batch through call, jvp and vjp with h NaN, +inf and 10 dt,
+  dt = 0, cold, hot and bad-input cells beside good ones and a first try rejected twice running; x, h, done, steps, status,
+  flag and counts bitwise equal across the kernels, and h NaN, +inf and 10 dt bitwise the h = dt cell. At max_steps 10 the 7
+  good cells go through recover, jvp_rec and vjp_rec, all recovered. A dt = 0 cell returns done, 0 steps and h = H_MIN.
+- The guard's allowance (test_guard.py): the guard kernel alone on a state and results whose He share moved by 0.5, 0.99,
+  1.01 and 2 times the allowance: flagged [0, 0, 1, 1].
+- Mutants: each a fresh copy of the tests' commit (6b26b49) with one replacement found exactly once; every new test also
+  passed on the unchanged copy. The review's eight, and what kills each (the failing assertion):
+  kb_x10: test_forward_rate_coefficients (lambda off by 0.99 relative), the recombination and its order;
+  constp_dropped: the recombination (and the decay, the equilibria, photolysis, step control, the order with w, and the
+  kernel copies, whose derivative kernels keep the term);
+  nasa_split_1200: test_equilibrium_follows_each_nasa9_range[1100] (1.21401 against 1.20948);
+  kcoll_x10: test_forward_rate_coefficients, the capped rows (lambda off by 9.0);
+  photo_shift: test_each_photolysis_branch_takes_its_own_rate (0.1114 against 0.1800);
+  step_error_ignored: test_a_rejected_first_try_is_retried (x_A 3.327e-3 against 3.380e-3; it still rejects on negative
+  states) and the rate laws (5.7e-5);
+  guard_drift_off: test_drift_beyond_the_allowance_is_flagged (none flagged). Before it, only
+  test_element_drift_is_recomputed failed here, and on an empty comparison of the stored data, not on its count;
+  radiation_sign: test_heating_sign_and_column_budget (CPU).
+  None survives. Further breaks, each killed: the high NASA-9 set ignored (1100 and 2500 K), Troe d 0.15, the second k0 term
+  dropped, the efficiency dropped, the limit from the forward direction only, the plain falloff's Pr halved (the plain form
+  only), the Jacobian's constant-pressure term w zeroed in the call kernel (order 1.11, and the recombination), prej left
+  false in the call, recover, jvp and vjp tails, and the vjp's non-finite h taken as H_MIN.
+- Fix A (common.cuh law(), ad_common.cuh rate_law_partials). A falloff row with k0 = k_inf = 0 gave Pr = 0 / 0, and the Troe
+  factor at Pr = 0 (k_inf overflowing) or Pr = inf (k_inf = 0) took log10 of it: each made k NaN, and one such row made every
+  cell of a call non-finite (12 of 12 cells not done in the new test). Now k0 = 0 gives no rate, and the factor is 1 where Pr
+  is 0 or not finite: k = k0 at Pr = 0, k = 0 (the high-pressure rate) at Pr = inf. The partials take the same limits, so the
+  tangents are finite; with the forward kernel fixed alone they were NaN. Test: k0 = 0, k_inf underflowing and k0 = k_inf = 0
+  (x unchanged, tangent 0), k_inf overflowing (decay at k0 n_tot; the T tangent against -t k0 n_tot (B0 + C0/T - 1)/T), in
+  both compiled forms. A k0 that overflows (above 1e308) still gives NaN, which the guard flags. Troe's form itself tends to
+  Fc^(d^2/(1+d^2)), about Fc^0.019, as Pr -> 0 or inf, not to 1; F = 1 holds only at the end points, as in the partials before.
+- Fix B (recover.cuh dense_lu). After the last shuffle every lane read A[k][k] for the exchange test while lane k & 31
+  writes A[k][k] at j = k inside the exchange, with nothing between: under independent thread scheduling a late lane could
+  read the exchanged entry, skip its share of the exchange and leave a mixed pair of rows. The search's reads come before the
+  shuffles by their data, and every other cross-lane access is behind a __syncwarp, so this was the only race. The decision is
+  now taken into a register, then __syncwarp, then the exchange. No failure was seen before or after, and no test can force
+  the race. Test (test_dense_lu.py, harness tests/dense_lu_check.cu): 8 row-shuffled dominant 42 x 42 matrices (34-39
+  exchanges) and 8 random ones with every other diagonal 1e-3 (6-11 exchanges, 25-33 rows kept where plain partial pivoting
+  would exchange); row order equal to the rule written in numpy, |PA - LU| / (|L||U|) at most 1.0e-15, the solve within
+  5.9e-13 of numpy's. It passes on the code before the fix; PIVTAU 1 and one lane skipping its share of the exchange fail it.
+- Byte identity: valid-input outputs (x, h, done, steps, flags, counts, tangents, cotangents) dumped at 0c7f7df and at each
+  fix: the two default networks' export, parity-start, lit, chain, jvp and vjp cases, and for every other network the reader
+  takes (CHO_photo, CHO_photo_lowT, NCHO_full_photo, NCHO_photo_lowT_Jupiter, NCHO_thermo, SNCHO_DMS_Tsai2024, SNCHO_photo_C3,
+  SNCHO_photo) its export cases and a jvp and vjp on 256 solar starts: 26,401,783 numbers, 0 differ after fix A and after B.
+- Coupling: require_finished names the hot cause and the sum tolerance among bad inputs, and says that refused cells reach it
+  only where the call's raise was switched off. Its test runs every count of COUNTS: a named cause gives only its own fix, the
+  others are listed as leading to one. On the previous code its cold and hot cases fail; with the hot cause removed, hot fails.
+- Checks on c3276ab: CPU 96 passed in 25 s; slow CPU 4 passed in 100 s; parity and guard 44 passed in 222 s; known answers,
+  order, rate laws, kernel copies and dense LU 23 passed in 301 s; test_vulcan_truth 2 passed in 205 s (NCHO 0 misses, worst
+  0.014 dex on boxes; sulfur pins held); test_ad 81 passed in 995 s (285 verdicts pass); test_export_cpp 14 passed in 391 s (with the project's CUDA toolkit on PATH); pre-commit on all files
+  passes with the kernel header written.
+- Not covered independently: the efficiency inside a falloff's Pr (the code multiplies the finished k, so at high pressure it
+  gives eff k_inf; the convention is not pinned); the collision limit's rule for one molecule and M; the recovery's dense
+  path inside a real call against an outside answer (the LU alone, and the copies' agreement); J changing within a call;
+  anything above 3000 K.
+
+### 2026-11-10 00:30 to 02:19: the call interface: keyword-only settings, named results, a read-only C++ solver
+Branch call-interface, on 0c7f7df. An interface change; no number moves and no reference was regenerated.
+- Python (breaking). `rtol`, `atol`, `max_steps` and `J` are keyword only in the call and `launch`; in `jvp` everything after
+  `dh`, in `vjp` everything after `gx` (so `gh` too). `solver(x, T, P, dt, h, 1e-25, 1e-3)` had swapped the tolerances and passed
+  every check; it now raises TypeError. The results are named tuples in the old order (`CallResult` x, h, done, steps;
+  `LaunchResult` adds flag; `JvpResult` adds dx, dh; `VjpResult` adds the cotangents dict), so unpacking and indexing are
+  unchanged. Every caller in the repository and the three GCM drivers already passed the settings by keyword.
+- The flag. Both solvers keep the last per-cell flag in `solver.flag`; `launch` also returns it. Not taken: a flag field in the
+  `jvp`/`vjp` results, which would change their arity (five 6-name unpackings in test_ad). The names `fallback` and `launch`'s
+  counts are unchanged (2026-11-06 entries). The bench takes its guard counts as differences of `check()`, not `total[1:-1]`.
+- C++ (breaking). `ns`, `nj`, `species`, `elements`, `default_atol`, `count` and `total` are private behind accessors; `count()`,
+  `total()` and `atoms()` return copies. Assigning a one-slot `count` had pointed the kernels' atomics past its end. The
+  constructor refuses an export whose kernels name an argument the call does not supply, naming kernel and argument; before,
+  a renamed recovery argument stopped the call with a bare `map::at` after the call kernel ran. A defined J must be float64
+  [B, nj] on the device; an undefined J only when nj = 0, so a thermal export takes [B, 0] (as the C++ box driver passes) and
+  refuses [B, 1]. The C++ box drivers (2026-11-04_cpp, 2026-11-05_e2e) use the old members and will need `()`.
+- Shown to fail without the change: the positional-settings test on the code without `*` (4 of 4) and on the base (import);
+  the misuses (`chem.count = ...`, `chem.ns = 5`, `chem.nj = 0`, `chem.total = ...`, `chem.species.clear()`) compile on the old
+  header and not on the new; on the old caller a renamed `didx` gives `map::at` and a [B, 0] J "this solver has no photolysis".
+  In-place work on the returned copies leaves the members as they were (12 count slots, atoms sum 289).
+- Checks: CPU 92 passed; parity and guard 45 passed in 216 s (worst 2.8e-8 dex); known answers and order 9 passed in 112 s;
+  test_export_cpp 15 passed in 401 s, bitwise on every case, counts included; test_vulcan_truth 2 passed in 203 s (0 misses,
+  worst 0.004 dex on paths, 0.014 on boxes); test_ad 81 passed in 992 s, 0 FAIL.
+- Review follow-up (02:20 to 03:55, two commits). (1) `solver.flag` was set before the refusal raised, so a caught
+  ValueError left flag 0 (passed) on the refused cells, and a call refused on the host kept the previous call's flag: it is
+  None from the start of every call until the call returns (both solvers). (2) The constructors' `drift`, `photo` and `cap`
+  are keyword only (`CudaSolver(net, device, True)` set drift to 1 with photolysis off); no caller here or in the GCM drivers
+  passed them by position. (3) The C++ constructor checked names only against a whitelist: a missing `didx` failed in the
+  driver after the call kernel ran, a repeated `atol` or a `Jin` on the guard ran with "bitwise identical" results, and Ta/Pa
+  swapped fed the wrong slots. Each kernel's list must now equal `KERNEL_ARGUMENTS` (J last for call and recover with
+  photolysis), and every meta.txt check runs before any CUDA work; all five edits are refused at construction, naming kernel
+  and argument. (4) The interface test checks each optional parameter's kind; the C++ test changes what the accessors return
+  in place and checks the solver is unchanged (a build whose accessors share the tensors aborts). Shown failing on the code
+  before: the flag tests (guard 2 of 2, test_ad 3 of 3), the parameter-kind test (the constructors; one optional made
+  positional again in a scratch copy). Checks: CPU 98 passed; parity and guard 47 passed in 215 s; test_export_cpp 19
+  passed in 501 s, bitwise on every case; test_vulcan_truth 2 passed in 203 s (0 misses, worst 0.004 dex on paths, 0.014 on
+  boxes); test_ad 81 passed in 993 s, 0 FAIL; pre-commit on all files passes.
+- Not done: the C++ call still takes rtol and atol by position; `meta.at` lookups give no key name; Python's `count` and `total`
+  are still mutable attributes; Python refuses a [B, 0] J without photolysis.
+
+### 2026-11-10 06:30 to 09:11: the known-answer tests' review, four fixes; main merged
+An independent review of branch known-answers confirmed the tests' derivations and the eight kills and found four holes;
+each was checked first and is real. Each new test or expectation failed on a copy of the code before (1a7020f) or under
+the break named, and passes now.
+- Troe's end point. As Pr -> 0 or inf, (z + c) / (N - d (z + c)) -> -1 / d, so F -> Fc^(d^2/(1+d^2)): 0.98459, 0.97828,
+  0.97772 for the fixture at 600, 1500, 2600 K, not the F = 1 of 9910b1f. The call and the partials now take that limit
+  for the standard form (VM11 tends to 1), d ln F / dT = s Fc' / Fc; the limit test expects F k0 n_tot and the matching T
+  tangent (fails on 1a7020f). A first form of the partials moved 17 dumped derivative arrays by rounding (at most 1.5e-15
+  relative in dx); the finite-Pr block is the earlier text again, the limit a separate branch.
+- The equilibrium oracle took G / RT from the reader and P0 from kinvulcan; it now reads the NASA-9 files and types 1 bar.
+  With P0 x 10 the old tests pass and the six equilibrium cases fail.
+- Rejection for error alone. The old case's first trial is negative (N_A = -712/7203, exact). New: J dt = 1/10, the exact
+  Rodas3 trial positive; rtol 6.2e-6 puts the error RMS at 10, rtol 1.5e-4 the RMS at 0.42 and only the largest error,
+  the first try's norm, at 2.4. The first-try max norm (common.cuh try_error) is a real path: removing it passes the old
+  tests and fails the second case.
+- The kernel copies must finish: every stepped cell done, every recomputed cell recovered, recovered states within 1e-6 of
+  the ordinary call. With REC_STEPS 1 the old test passes and the new fails.
+- A tie in the dense LU's column 0 across two lanes must go to the lower row; reversed, the old test passes and the new
+  fails. docs/testing.md lists what no independent test covers.
+- Merged local main (b1d2640, keyword-only call interface) with a merge commit; one test passed rtol by position and now
+  passes it by keyword. Valid-input outputs at the merged head bitwise those of 0c7f7df: 26,401,783 numbers, 0 differ.
+- Checks on the merged head (2a3daee): CPU 107 passed in 24 s; slow CPU 4 passed in 100 s; parity and guard 48 passed in
+  225 s; known answers, order, rate laws, kernel copies, dense LU 25 passed in 336 s; test_vulcan_truth 2 passed in 204 s;
+  test_export_cpp 19 passed in 532 s; test_ad 81 passed in 1006 s (285 verdicts pass, 0 fail); pre-commit on all files passes with the header written.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.

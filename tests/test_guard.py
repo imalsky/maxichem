@@ -1,12 +1,14 @@
 """The guard and the recovery, input checks, and the independence of results from the batch."""
 
+import ctypes
+
 import helpers
 import libref
 import numpy as np
 import pytest
 import torch
 
-from maxichem import kincuda, kincuda_ad
+from maxichem import _cuda, kincuda, kincuda_ad
 
 pytestmark = pytest.mark.gpu
 CLOSED_SOLVER_BYTES = 4096  # the counts stay readable after close: two small tensors, in allocator blocks
@@ -245,6 +247,36 @@ def test_launch_adds_to_the_total(parity):
     assert torch.equal(parity.solver.total - before, parity.solver.count.to(torch.int64))
 
 
+def test_call_and_launch_name_their_results(parity):
+    cells = 8
+    x, T, P = parity.starts(cells, 2, 1.0)
+    args = (x, T, P, parity.full(cells, 50.0), parity.full(cells, 1e-10))
+    launched = parity.solver.launch(*args, max_steps=2)  # few tries: the guard recomputes cells, so flags are not all 0
+    assert isinstance(launched, kincuda.LaunchResult)
+    assert parity.solver.flag is launched.flag
+    assert bool((launched.flag != 0).any())
+    called = parity.solver(*args, max_steps=2)
+    assert isinstance(called, kincuda.CallResult)
+    assert all(torch.equal(getattr(called, name), getattr(launched, name)) for name in called._fields)
+    assert torch.equal(parity.solver.flag, launched.flag)  # the call keeps the flag too
+
+
+def test_flag_is_none_after_a_call_that_raised(parity):
+    cells = 8
+    x, T, P = parity.starts(cells, 2, 1.0)
+    dt = h = parity.full(cells, 1.0)
+    bad = x.clone()
+    bad[3, 0] = float("nan")
+    parity.solver(x, T, P, dt, h)
+    with pytest.raises(ValueError, match="refused cells"):
+        parity.solver.launch(bad, T, P, dt, h)
+    assert parity.solver.flag is None  # the guard gives a refused cell flag 0, which would read as passed
+    parity.solver(x, T, P, dt, h)
+    with pytest.raises(ValueError, match=r"^T: "):  # refused on the host, before any launch
+        parity.solver(x[:5], T[:5].cpu(), P[:5], dt[:5], h[:5])
+    assert parity.solver.flag is None  # not the previous call's 8-cell flag
+
+
 def test_wrong_inputs_raise_before_any_launch(parity):
     cells = 64
     x, T, P = parity.starts(cells, 2, 1.0)
@@ -306,3 +338,50 @@ def test_results_do_not_depend_on_the_batch(parity, verdict):
         f"128 cells alone bitwise inside 8,192 {alone}; one cell alone bitwise {one}; 8,192 cells permuted "
         f"bitwise {order}",
     )
+
+
+ALLOWANCE = 1e-6  # the drift allowance given to the solver: DRIFT of docs/method.md
+ATOMS = {"H": {"H": 1}, "H2": {"H": 2}, "OH": {"H": 1, "O": 1}, "H2O": {"H": 2, "O": 1}, "O": {"O": 1}, "He": {"He": 1}}
+DRIFTS = (0.5, 0.99, 1.01, 2.0)  # the largest relative change of an element's share, in units of the allowance
+
+
+def test_drift_beyond_the_allowance_is_flagged(read_network, gpu):
+    # The guard alone, on hand-made pairs of a state and a result whose He share moved by r times the allowance
+    net = read_network("synthetic_small")
+    x0 = np.array([{"H": 0.1, "H2": 0.6, "OH": 0.05, "H2O": 0.1, "O": 0.05, "He": 0.1}[q] for q in net.species])
+    atoms = np.array([[ATOMS[q].get(e, 0) for e in ("H", "O", "He")] for q in net.species], dtype=float)
+    share = (x0 @ atoms) / (x0 @ atoms).sum()
+    he = net.species.index("He")
+    f = share[2]
+    results = []
+    for r in DRIFTS:
+        # He's share (1 + d) f / (1 + f d) moves by r ALLOWANCE relative; the others by less
+        d = r * ALLOWANCE / (1.0 - f - f * r * ALLOWANCE)
+        x = x0.copy()
+        x[he] *= 1.0 + d
+        moved = (x @ atoms) / (x @ atoms).sum() / share - 1.0
+        assert np.abs(moved).max() == pytest.approx(r * ALLOWANCE, rel=1e-6)
+        results.append(x)
+    cells = len(DRIFTS)
+    with kincuda.CudaSolver(net, gpu, drift=ALLOWANCE) as solver:
+        values = {
+            **solver._tables,
+            "x0": helpers.tensor([x0] * cells, gpu),
+            "xout": helpers.tensor(results, gpu),
+            "doneo": torch.ones(cells, dtype=torch.int32, device=gpu),
+            "noko": helpers.full(cells, 1.0, gpu),
+            "status": torch.zeros(cells, dtype=torch.int32, device=gpu),
+            "redo": torch.zeros(cells, dtype=torch.int32, device=gpu),
+            "list": torch.zeros(cells, dtype=torch.int32, device=gpu),
+            "count": solver.count,
+            "B": ctypes.c_int(cells),
+            "atol": ctypes.c_double(kincuda.ATOL),
+        }
+        solver.count.zero_()
+        stream = torch.cuda.current_stream(gpu).cuda_stream
+        with torch.cuda.device(gpu):
+            _cuda.launch_kernel(solver._guard_kernel, 1, cells, 0, stream, solver._arguments("guard", values))
+        counts = dict(solver.fallback)
+    print(f"drift {DRIFTS} allowances: flagged {values['redo'].tolist()}; counts {counts}")
+    assert values["redo"].tolist() == [int(r > 1.0) for r in DRIFTS]
+    assert counts["drift"] == counts["recomputed"] == sum(r > 1.0 for r in DRIFTS)
