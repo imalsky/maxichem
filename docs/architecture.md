@@ -21,9 +21,18 @@ How the code is laid out, and why the kernels look as they do. [method.md](metho
 | `paths.py` | Data locations of the checks and benches |
 | `_checks.py` | What the checks and benches share: the scored gases and their floors, the start gas |
 
-Outside the package, `coupling/` holds the tested pieces of the snapy coupling drivers: `radiation.py` turns two-stream
-fluxes into the heating of each layer, $-\partial(F_\uparrow - F_\downarrow)/\partial z$ per unit volume, also on a sphere, and checks
-each column's energy budget. Weighting plane-parallel fluxes by face areas would add a false $2F/r$.
+Outside the package, `coupling/` holds the pieces that the snapy coupling drivers (scripts in `experiments/`) share, each
+held once and tested on the CPU. The drivers stay scripts and may print; these modules raise, with the offending value and the
+fix, and never fall back silently. They import torch and numpy, and `chemistry.py` imports maxichem's constants; none imports
+snapy or pyharp. The GCM side is in SI units; `chemistry.PA_TO_DYN_CM2` converts the pressure at the solver's edge.
+
+| Module | Job |
+| --- | --- |
+| `composition.py` | Molar masses from a network's atoms table and pyharp's atomic weights; mass mixing ratios (kg per kg of gas) to mole fractions and back, each cell keeping its tracer mass; element moles and the tracers' totals; the gas constant; the start gas from element ratios per H nucleus (`START_PER_H`), all C in CO, the rest of O in H2O, N in N2, S in H2S, refusing a network that lacks a carrier |
+| `radiation.py` | The heating of each layer from two-stream fluxes, $-\partial(F_\uparrow - F_\downarrow)/\partial z$ per unit volume, also on a sphere (weighting plane-parallel fluxes by face areas would add a false $2F/r$); each column's budget, which refuses non-finite fluxes or heating and a residual above round-off; the face temperatures for the longwave ($1.5 T_0 - 0.5 T_1$ at the ends of a uniform grid); `RadiationClock`, a fixed schedule whose mean cadence is the period |
+| `chemistry.py` | The solver's pressure unit, and `require_finished`: a call that leaves cells not done stops the run, with the cause from the call's counts (cold, bad input, still failing after the recovery) and its fix |
+| `flow_file.py` | Spun-up flows and start columns saved with the gas (composition, cv_R, the model's molar mass) and grid they were made for; loading refuses another gas or grid, and a file with no record |
+| `photolysis.py` | The stand-in J of a stored table: the layer nearest in log pressure on the day side, zero at night, with the day-side cells beyond the table's range counted |
 
 ## From a network to a kernel
 

@@ -15,7 +15,11 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_tables_source.py` | The term streams hold the stoichiometry, on a small network too; the header selects the rate-law forms; the argument table matches every kernel's signature; a hand-built reverse law, `drift`, `cap` and a constructor that fails | CPU |
 | `test_kernels_compile.py` | Every form of the kernels compiles, including forms no real network reaches | CPU |
 | `test_paths.py` | Data locations follow the environment; missing data give a clear error | CPU |
-| `test_coupling_radiation.py` | The column heating: none from a height-constant flux on a sphere, where the area-weighted form gives some; cooling where the net upward flux grows; each column's budget to round-off | CPU |
+| `test_coupling_radiation.py` | The column heating: none from a height-constant flux on a sphere, where the area-weighted form gives some; cooling where the net upward flux grows; each column's budget to round-off; the budget check refuses a NaN flux, naming its column, and the area-weighted heating; face temperatures exact for a linear T(z); the radiation's firing times for 70 s steps and a 300 s period, the first step at or after each multiple | CPU |
+| `test_coupling_composition.py` | A hand-worked H2, He, H2O mixture; q to x and back, and the tracer mass and element moles kept through a reaction; the start gas's element ratios equal `START_PER_H` with and without N and S; a missing carrier and unusable input refused | CPU |
+| `test_coupling_chemistry.py` | The unfinished-cell stop names the counted cause (cold, bad input, still failing) and only its fix | CPU |
+| `test_coupling_flow_file.py` | A saved flow or start column loads into its own deck; another gas, grid or shape, and an old file with no record, are refused | CPU |
+| `test_coupling_photolysis.py` | The stand-in J: nearest layer in log pressure, zero at night, day-side cells above and below the table counted | CPU |
 | `test_packaging.py` | The built wheel holds the kernels and assembles them without the checkout | CPU, slow |
 | `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation; a small network in every kernel | GPU |
 | `test_order.py` | Rodas3's order of accuracy | GPU |
