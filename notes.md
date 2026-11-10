@@ -1665,8 +1665,10 @@ Branch sweep-fixes (one commit per fix). Scratch data of the measurements are no
   0.067 %); sulfur 690.24 against 690.16 ms, +0.012 % (sd 0.012 %). Below the 1 % rule; kept.
 - The derivative test's x direction now keeps sum(x) = 1, since the call refuses a state off it. The part along x itself,
   which no difference can judge now, is checked apart: with the step sizes held the tangent along dx = x is 0 but for rounding
-  (largest |dx_out| / max x_out 2.1e-14; limit 1e-12). The adaptive tangent along x is not 0 (atol does not scale) and has no
-  meaning for valid input.
+  (largest |dx_out| / max x_out 2.1e-14; limit 1e-12). No longer checked: the adaptive tangent along dx = x itself (the step
+  control's response to scaling x through atol, which does not scale), which the central differences judged before. A
+  difference along x moves x off sum(x) = 1, which the call refuses, and the derivative has no meaning for valid input, which
+  must sum to 1 and so cannot move along x.
 - Upper temperature bound. VULCAN's NASA-9 files hold only coefficients, no ranges. T_MAX = 3000 K (the owner's choice: the
   edge of what is checked against VULCAN; the fits themselves run to 6000 K). Every stored check input lies within 300-3000 K,
   both ends reached exactly (qual_ncho, panel P, yardstick: 300.0-3000.0 K). Cells above are counted as hot and refused;
@@ -1683,8 +1685,8 @@ Branch sweep-fixes (one commit per fix). Scratch data of the measurements are no
   Panel P on the sulfur network gets H2S = 1.41e-5 H2.
 - Sulfur quick tier, reproducing the 2026-11-04 scores: boxes_sncho25 1 box with a miss, box 1939 at 4.341 dex in S2 (VULCAN's
   error); boxes_sncho25p 1, box 96 at 0.155 dex in S2 (maxichem's at atol 1e-25); next worst boxes 0.030 / 0.021 dex; paths 0
-  misses over 245,328 stored states, worst 0.0068 dex; guard nothing recomputed; wall 112 s. The two misses are pinned with
-  their reasons; any other miss, or a pinned one gone or moved by more than 0.01 dex, fails the run.
+  misses over 245,328 stored states, worst 0.0068 dex; guard nothing recomputed; wall 112 s. Pinned point by point (see the
+  review follow-up below).
 - Not covered by kintest: the day-night path sets (daynight_ncho, daynight_sncho25). Their J changes every call, and the
   path calls here are dark; adding per-call J for 64 paths was left out. The one-off scoring of 2026-11-04 covered them.
 - The floored error, the scored gases and the miss thresholds (0.1 and 1 dex) are one copy in maxichem/_checks.py for the
@@ -1697,6 +1699,24 @@ Branch sweep-fixes (one commit per fix). Scratch data of the measurements are no
   bad-input and range cases (4) and the C++ sum and hot cases; with the tangent's normalization dropped, the scaling check on
   every case; with a pin moved by 0.02 dex or a pin removed, the sulfur quick tier exits 1.
 - Open: the day-night sets in kintest; T_MAX is a constant, not each species' range (the files hold none).
+- Review follow-up (two commits after this entry's first). (1) The call kernel and the guard judged sum(x) in different
+  orders: a sum 1 + 1.000000082740371e-10 in the warp's order and 1 + 9.999978622943217e-11 in the network's (found on both
+  networks' permutations) was refused by the call, counted by the guard as unfinished only, still failed in the recovery, and
+  the call returned without raising. Now the kernel that steps a cell (call, jvp, vjp) screens it once and writes its status;
+  the guard counts refused cells from it without screening again, the recovery steps only listed cells, and the host names the
+  first refused cell of each kind from the status. (2) A refused cell at dt = 0 came back done and could not be named; a
+  refused cell is now never done. New tests: the straddling sum is refused and its mirror accepted (Python, both networks; C++
+  NCHO), T one float64 step outside each end at dt 0 and 500 s is refused and named (Python), T just above 3000 K at dt 0 is
+  named in C++; all failed on the previous code (Python 4 of 4, C++ 2 of 2). The message's printed sum is the host's, added
+  in another order (9.99998e-11 for that cell), and now says so. Valid outputs still bitwise the base
+  commit's: 12,264,022 numbers, 0 differ. EXPORT_FORMAT 6. (3) Pins were per box: a new miss in another gas of box 1939
+  would have passed under its larger S2 miss. KNOWN_MISSES now holds the gas and each missed stored state with its error
+  (box 1939: S2 after calls 41-47, 1.647 to 4.341 dex, its other gases at most 0.018 dex; box 96: S2 after call 45, 0.155 dex);
+  any other missed point in any gas of any box fails, as does a pinned point gone or moved by 0.01 dex. On the saved run
+  with edits: a 1-dex CO miss in box 1939, its S2 misses moved to CO, and one more missed S2 state each fail; unchanged
+  passes. Checks: CPU 66 passed; slow CPU 4 passed; parity and guard 43 passed in 219 s; known answers and order 9 passed;
+  test_ad 81 passed in 1003 s; test_export_cpp 14 passed in 408 s; test_vulcan_truth 2 passed in
+  205 s with both pins held.
 
 ## References (by topic)
 
