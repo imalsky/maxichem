@@ -1622,6 +1622,31 @@ snapy's docs on tracers, and the papers below. One independent review of the sam
   --load): re-spin under the deck first. A budget error names the column within its panel, not the panel. The drivers'
   lint (ruff finds hundreds of style findings in each, as before; pyflakes clean). re_start.py repeats the deck's g, F
   and opacities. The C++ box twin is unchanged.
+- An independent review's fixes (each test shown to fail on the old behaviour: proof_of_failure/review/, 14 breaks):
+  - Clock: with `tsim += dt` and a fixed slack, 70.1 s steps missed the firing due at step 72,000 (summed time
+    5,047,199.999999401 s) and 0.1 s steps the one at 39,900 s (verified on the committed code). The clock now keeps its
+    own time as the exact sum of its steps (a fraction), allowing half an ulp per step and per multiple for decimal
+    steps and periods; the drivers call `due()` and `advance(dt)`. Test: 200,000-500,000 steps of 70, 70.1, 0.1 and
+    35.7 s (periods 300, 300.1 s) fire exactly at ceil(k P / dt), worked out in decimal fractions.
+  - Photolysis: a NaN table entry gave NaN on the night side and an integer mask of 2 doubled J (verified); now refused
+    (NaN or negative rates, empty table, non-boolean mask), and the night side is set by `torch.where`.
+  - Conversions: a molar-mass vector of shape [S, 1] broadcast over the cells (verified); `mass` of shape [2, 1] was
+    already refused (the review's example of it was wrong). Added: mw [S] finite and positive, per-cell arrays exactly
+    [cells] and not negative, negative x refused in `mole_to_mass` (the call clamps accepted states at 0 and the guard
+    scales by positive factors, so a returned x is never negative), non-finite atoms, one precision for q, mw and atoms.
+  - Start columns: 2 levels with nz 4 loaded (verified); levels now checked as [nz + 1], finite and positive, on save
+    and on load, with nz required in the grid.
+  - Budget: dz [inf, 1] gave a NaN residual that passed (verified); thicknesses are checked, a non-finite residual
+    raises, and inputs other than float64 are refused (the bound is for float64 without underflow).
+  - Tests: hand-worked absolute element totals with unequal cell masses; the start's ratios pinned to the solar
+    file's rows typed in the test (within five-digit rounding, 4e-5, which the drivers' old C 2.7761e-4 fails);
+    composition, cv_R and molar mass each alone refused.
+  - The dumps' signed conversion is `coupling.composition.signed_mole_fractions` (output only). The ghost refresh and
+    wall mirror stay in each driver, with a comment: they drive snapy's Mesh, which coupling/ does not import.
+  - CPU tier 87 passed; coupling/ 100 % of 276 statements; mypy and pre-commit clean.
+  - Box smoke test again (smoke3.sh, started once GPU1 had no other process; 20 spin steps, 5 coupled steps, dark):
+    both parts end normally; the same step counts, sum(q) range, column check (2.07e-16), radiation calls and peak
+    memory (16.59 GB) as the first box smoke test above.
 
 ## References (by topic)
 
