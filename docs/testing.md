@@ -21,8 +21,9 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_coupling_flow_file.py` | A saved flow or start column loads into its own deck; another gas (composition, cv_R or molar mass alone), grid or shape, a start column whose levels are not [nz + 1], finite and positive, and an old file with no record, are refused | CPU |
 | `test_coupling_photolysis.py` | The stand-in J: nearest layer in log pressure, zero at night, day-side cells above and below the table counted; a NaN or negative table, an empty table and a mask that is not boolean refused | CPU |
 | `test_packaging.py` | The built wheel holds the kernels and assembles them without the checkout | CPU, slow |
-| `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium; element conservation; a small network in every kernel | GPU |
-| `test_order.py` | Rodas3's order of accuracy | GPU |
+| `test_rate_laws.py` | The forward rate coefficient of every law the reader takes, at three (T, P), against the law written out in the test: Arrhenius, low-pressure only with and without an efficiency, Lindemann and Troe falloff, the special law's two k0 terms and its Troe width, and the collision limit on directions of two and three molecules; once with the kernels' Troe form and once with their plain falloff | GPU |
+| `test_known_answers.py` | First-order decay at constant pressure; long calls against the NASA-9 equilibrium, also from ranges that differ below and above the split; element conservation; a small network in every kernel; photolysis branches each at its own J; a first try too long, rejected and retried; H + H + M at constant pressure | GPU |
+| `test_order.py` | Rodas3's order of accuracy, on a linear problem and on one where the constant-pressure term of the Jacobian is not zero | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
 | `test_guard.py` | The guard and recovery; refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases | GPU, data |
 | `test_ad.py` | Derivatives against finite differences and against each other | GPU, data, slow |
@@ -32,6 +33,18 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 `tests/data` holds invented networks with constant-Cp NASA-9 data, so a test can state its answer in closed form. Their `N_i`
 reactions have zero rates: they take a network past the 32 rows of the trailing block, so the sparse leading part runs too;
 `synthetic_small` has none.
+
+## Known answers
+
+The known-answer tests (`test_rate_laws.py`, `test_known_answers.py`, `test_order.py`) state each expected value from a
+formula written out in the test: the rate laws, the Troe factor (Gilbert et al. 1983; the special law's width as in
+docs/method.md), the NASA-9 polynomials (McBride et al. 2002) and closed-form solutions of small reactors. k_B, the
+standard pressure and `K_COLL` are typed in `helpers.py` and the tests, not imported from the solver, so that a wrong
+constant there fails them. Tests that need other data than `tests/data` write their network and NASA-9 files into a
+temporary folder (`helpers.write_network`) and read them with the public reader. The rate laws are seen through
+isomerizations beside unchanged spectators, whose decay to equilibrium is exactly exponential at (k_f + k_r) times the
+spectators' densities. A direction of one molecule and M stays far below the collision limit, so the limit's rule for it
+is not pinned.
 
 ## The derivative cases
 
