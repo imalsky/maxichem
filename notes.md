@@ -1722,6 +1722,88 @@ Branch sweep-fixes (one commit per fix). Scratch data of the measurements are no
   files passes, clang-tidy included; CPU 66 passed; parity and guard 43 passed; test_export_cpp 14 passed; valid outputs
   bitwise the base's (12,264,022 numbers, 0 differ).
 
+### 2026-11-10 00:28 to 06:10: independent known-answer tests, two kernel hazards, the coupling stop's causes
+Branch known-answers, from 0c7f7df. A review found that the tests catch regressions but prove little on their own: parity
+compares with an earlier copy of the same formulas, CI runs no GPU test, and of eight deliberate breaks of the physics two
+were seen by an independent test. The new tests take every expected value from a formula written out in the test, with k_B
+(1.380649e-16 erg/K), the standard pressure (1 bar) and K_COLL (1e-9 cm3/s) typed there, so a wrong constant in the solver
+fails them. Networks and NASA-9 files other than tests/data are written by the test (helpers.write_network) and read by the
+public reader.
+- Rate laws (test_rate_laws.py). Each law drives an isomerization CO_i -> CO_j beside spectators it does not change, so x
+  relaxes to the pair's equilibrium at lambda = (k_f + k_r) times the spectators' densities, exactly; one cell per law and
+  (T, P), dt = 1 / lambda, at (600 K, 1e4), (1500 K, 1e6) and (2600 K, 1e8 dyn cm^-2). Laws: Arrhenius; low-pressure only;
+  low-pressure only with effi, traced in pure H2 so that k = eff k0 under any reading of the efficiency; Lindemann and Troe
+  falloff, Pr 8e-4 to 20; the special law's two k0 terms and Visscher-Moses width (OH traced in CH3); the collision limit
+  on a direction of two molecules (the reverse the larger, K < 1) and of three. The rows without Troe run again in a network
+  with no Troe line, so both compiled falloff forms are seen. A direction of one molecule and M stays below 0.1 K_COLL under
+  the current rule and the coming one (q = k), so that rule is not pinned. Worst error on lambda 1.0e-9 (limit 1e-6) at rtol
+  1e-9. The Troe constants are Gilbert et al. (1983) as the code cites them; the paper was not opened here.
+- NASA-9 ranges (test_known_answers.py). CO_1 has different low and high sets with every polynomial term non-zero, the high
+  b1 and b2 set so that H and S meet at 1000 K. CO_2 / CO_1 after a 1e10 s call against exp(G_1 - G_2) from the NASA-9
+  polynomials written in helpers.py: at 900, 1100 and 2500 K within 4e-15 (limit 1e-12).
+- Photolysis mapping: three absorbers, one with two branches, J 0.7, 2.3, 0.4 and 1.1 s^-1 looked up by (absorber, branch)
+  in net.photo; every species against the closed form at 0.3, 1 and 3 s, worst 6.3e-8 (limit 1e-6) at rtol 1e-8.
+- Step control: the decay A -> 2 B with a first try h = dt at J dt = 5 and rtol 1e-6, within 2e-5 of the closed form; the
+  same call with max_steps equal to its 118 accepted steps is unfinished, so a try was rejected (it finishes at 120).
+- Constant pressure: H + H + M -> H2 + M from pure H, 1 / N - ln N = 1 + 4 k0 n_tot^2 t, x_H = 2 N / (1 + N); calls ending at
+  N = 0.8, 0.5, 0.3 within 6e-9 (limit 1e-6). Rodas3's order on it with every try accepted: slope 2.92 (band 2.7-3.3), next to
+  2.96 on the linear decay.
+- The four copies of setup and tail (test_kernel_copies.py): one batch through call, jvp and vjp with h NaN, +inf and 10 dt,
+  dt = 0, cold, hot and bad-input cells beside good ones and a first try rejected twice running; x, h, done, steps, status,
+  flag and counts bitwise equal across the kernels, and h NaN, +inf and 10 dt bitwise the h = dt cell. At max_steps 10 the 7
+  good cells go through recover, jvp_rec and vjp_rec, all recovered. A dt = 0 cell returns done, 0 steps and h = H_MIN.
+- The guard's allowance (test_guard.py): the guard kernel alone on a state and results whose He share moved by 0.5, 0.99,
+  1.01 and 2 times the allowance: flagged [0, 0, 1, 1].
+- Mutants: each a fresh copy of the tests' commit (6b26b49) with one replacement found exactly once; every new test also
+  passed on the unchanged copy. The review's eight, and what kills each (the failing assertion):
+  kb_x10: test_forward_rate_coefficients (lambda off by 0.99 relative), the recombination and its order;
+  constp_dropped: the recombination (and the decay, the equilibria, photolysis, step control, the order with w, and the
+  kernel copies, whose derivative kernels keep the term);
+  nasa_split_1200: test_equilibrium_follows_each_nasa9_range[1100] (1.21401 against 1.20948);
+  kcoll_x10: test_forward_rate_coefficients, the capped rows (lambda off by 9.0);
+  photo_shift: test_each_photolysis_branch_takes_its_own_rate (0.1114 against 0.1800);
+  step_error_ignored: test_a_rejected_first_try_is_retried (x_A 3.327e-3 against 3.380e-3; it still rejects on negative
+  states) and the rate laws (5.7e-5);
+  guard_drift_off: test_drift_beyond_the_allowance_is_flagged (none flagged). Before it, only
+  test_element_drift_is_recomputed failed here, and on an empty comparison of the stored data, not on its count;
+  radiation_sign: test_heating_sign_and_column_budget (CPU).
+  None survives. Further breaks, each killed: the high NASA-9 set ignored (1100 and 2500 K), Troe d 0.15, the second k0 term
+  dropped, the efficiency dropped, the limit from the forward direction only, the plain falloff's Pr halved (the plain form
+  only), the Jacobian's constant-pressure term w zeroed in the call kernel (order 1.11, and the recombination), prej left
+  false in the call, recover, jvp and vjp tails, and the vjp's non-finite h taken as H_MIN.
+- Fix A (common.cuh law(), ad_common.cuh rate_law_partials). A falloff row with k0 = k_inf = 0 gave Pr = 0 / 0, and the Troe
+  factor at Pr = 0 (k_inf overflowing) or Pr = inf (k_inf = 0) took log10 of it: each made k NaN, and one such row made every
+  cell of a call non-finite (12 of 12 cells not done in the new test). Now k0 = 0 gives no rate, and the factor is 1 where Pr
+  is 0 or not finite: k = k0 at Pr = 0, k = 0 (the high-pressure rate) at Pr = inf. The partials take the same limits, so the
+  tangents are finite; with the forward kernel fixed alone they were NaN. Test: k0 = 0, k_inf underflowing and k0 = k_inf = 0
+  (x unchanged, tangent 0), k_inf overflowing (decay at k0 n_tot; the T tangent against -t k0 n_tot (B0 + C0/T - 1)/T), in
+  both compiled forms. A k0 that overflows (above 1e308) still gives NaN, which the guard flags. Troe's form itself tends to
+  Fc^(d^2/(1+d^2)), about Fc^0.019, as Pr -> 0 or inf, not to 1; F = 1 holds only at the end points, as in the partials before.
+- Fix B (recover.cuh dense_lu). After the last shuffle every lane read A[k][k] for the exchange test while lane k & 31
+  writes A[k][k] at j = k inside the exchange, with nothing between: under independent thread scheduling a late lane could
+  read the exchanged entry, skip its share of the exchange and leave a mixed pair of rows. The search's reads come before the
+  shuffles by their data, and every other cross-lane access is behind a __syncwarp, so this was the only race. The decision is
+  now taken into a register, then __syncwarp, then the exchange. No failure was seen before or after, and no test can force
+  the race. Test (test_dense_lu.py, harness tests/dense_lu_check.cu): 8 row-shuffled dominant 42 x 42 matrices (34-39
+  exchanges) and 8 random ones with every other diagonal 1e-3 (6-11 exchanges, 25-33 rows kept where plain partial pivoting
+  would exchange); row order equal to the rule written in numpy, |PA - LU| / (|L||U|) at most 1.0e-15, the solve within
+  5.9e-13 of numpy's. It passes on the code before the fix; PIVTAU 1 and one lane skipping its share of the exchange fail it.
+- Byte identity: valid-input outputs (x, h, done, steps, flags, counts, tangents, cotangents) dumped at 0c7f7df and at each
+  fix: the two default networks' export, parity-start, lit, chain, jvp and vjp cases, and for every other network the reader
+  takes (CHO_photo, CHO_photo_lowT, NCHO_full_photo, NCHO_photo_lowT_Jupiter, NCHO_thermo, SNCHO_DMS_Tsai2024, SNCHO_photo_C3,
+  SNCHO_photo) its export cases and a jvp and vjp on 256 solar starts: 26,401,783 numbers, 0 differ after fix A and after B.
+- Coupling: require_finished names the hot cause and the sum tolerance among bad inputs, and says that refused cells reach it
+  only where the call's raise was switched off. Its test runs every count of COUNTS: a named cause gives only its own fix, the
+  others are listed as leading to one. On the previous code its cold and hot cases fail; with the hot cause removed, hot fails.
+- Checks on c3276ab: CPU 96 passed in 25 s; slow CPU 4 passed in 100 s; parity and guard 44 passed in 222 s; known answers,
+  order, rate laws, kernel copies and dense LU 23 passed in 301 s; test_vulcan_truth 2 passed in 205 s (NCHO 0 misses, worst
+  0.014 dex on boxes; sulfur pins held); test_ad 81 passed in 995 s (285 verdicts pass); test_export_cpp 14 passed in 391 s (with the project's CUDA toolkit on PATH); pre-commit on all files
+  passes with the kernel header written.
+- Not covered independently: the efficiency inside a falloff's Pr (the code multiplies the finished k, so at high pressure it
+  gives eff k_inf; the convention is not pinned); the collision limit's rule for one molecule and M; the recovery's dense
+  path inside a real call against an outside answer (the LU alone, and the copies' agreement); J changing within a call;
+  anything above 3000 K.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
