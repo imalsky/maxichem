@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from ._ad_tables import GATHER_FIELDS, layout, scratch_sizes
+from ._ad_tables import GATHER_FIELDS, layout, scratch_layouts, scratch_sizes
 from ._constants import (
     ARRH_BLOCK_THREADS,
     CALL_END,
@@ -40,13 +40,7 @@ from ._constants import (
     WARP_LANES,
     X_SUM_TOL,
 )
-from ._tables import (
-    pack_small_tables,
-    rates_fit_in_block,
-    scratch_strides,
-    shared_doubles_per_cell,
-    shared_doubles_recover,
-)
+from ._tables import call_layout, pack_small_tables, rate_slots, recovery_layout, regions, scratch_layout
 
 _KERNELS = Path(__file__).parent / "kernels"
 _HEADER = "network.h"
@@ -101,6 +95,11 @@ def _two_bit_field(name: str, values: list[int]) -> str:
     return f"#define {name}(q) {macro}"
 
 
+def _offset_macros(layouts: dict[str, dict[str, int]]) -> dict[str, int]:
+    """Return each region's array offsets as REGION_ARRAY macros (_tables.regions)."""
+    return {f"{region}_{name}": offset for region, names in layouts.items() for name, offset in names.items()}
+
+
 def _pattern_macros(tab: dict[str, Any]) -> list[str]:
     """Return the macros that describe the LU pattern and the widest reaction sides.
 
@@ -151,10 +150,18 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
     """Return network.h for the call, guard and recovery kernels; wsh: the recovery holds W in shared memory."""
     ns, nnz, tb0, law = tab["ns"], tab["nnz"], tab["tb0"], tab["law"]
     blob, offsets = pack_small_tables(tab)
-    call_stride, recover_stride = scratch_strides(tab, wsh)
+    # each region's offsets, named after its region, and its size
+    rate_offsets, rate_size = regions(rate_slots(tab["nr"]))
+    call, perc = call_layout(tab)
+    recovery, perwr = recovery_layout(tab, wsh)
+    call_scratch, call_stride = scratch_layout(tab, 0)
+    recovery_scratch, recover_stride = scratch_layout(tab, 0 if wsh else ns * ns)
+    layouts = {"RATE": rate_offsets, "C": call, "R": recovery, "S": call_scratch, "SR": recovery_scratch}
     macros = {
         "CALL_STRIDE": call_stride,
         "RECOVER_STRIDE": recover_stride,
+        "RATE_SLOTS": rate_size,
+        **_offset_macros(layouts),
         "NS": ns,
         "NR": tab["nr"],
         "NRT": tab["nrt"],
@@ -168,8 +175,7 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         "RCW": tab["rc"].shape[1],
         "CPB": cpb,
         "W": tab["warps"],
-        "PERC": shared_doubles_per_cell(tab),
-        "VOFF": tb0 if rates_fit_in_block(tab) else nnz + 10 * ns + 3,
+        "PERC": perc,
         "TBYTES": len(blob),
         "JSMAX": tab["jsmax"],
         "NFIX": tab["nfix"],
@@ -186,9 +192,8 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         # repr gives the double back exactly
         **{f"{name}_VALUE": repr(float(value)) for name, value in _METHOD_SETTINGS.items()},
         "WSH": int(wsh),
-        "VR": max(tab["nr"], ns + 1),
         "RPD": -(-ns // WARP_LANES),
-        "PERWR": shared_doubles_recover(tab, wsh),
+        "PERWR": perwr,
         "HAS_TROE": int("troe" in law),
         "HAS_EFF": int("eff" in law),
         **{f"O_{name.upper()}": offset for name, offset in offsets.items()},
@@ -219,6 +224,7 @@ def derivative_header(tab: dict[str, Any], ext: dict[str, Any], kind: str, wpb: 
         "PX_SLOTS": ", ".join(map(str, ext["px"])),
         "ARRH_BLOCK_THREADS": ARRH_BLOCK_THREADS,
         **scratch_sizes(tab, cap),
+        **_offset_macros({region: names for region, (names, _) in scratch_layouts(tab).items()}),
         **GATHER_FIELDS,
         **{f"A_{name}": offset for name, offset in offsets.items()},
     }

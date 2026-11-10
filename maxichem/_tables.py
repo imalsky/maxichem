@@ -320,7 +320,7 @@ def _jacobian_stream(
                     | int(e == len(piece) - 1) << o_end
                 )
                 q += 1
-        words[q:, lane] = 2 * nr | ns << o_a | ns << (o_a + widths["s"])
+        words[q:, lane] = regions(rate_slots(nr))[0]["ZERO"] | ns << o_a | ns << (o_a + widths["s"])
     finished = [[pieces[it][0] for it in its] for its in assigned]
     most = max(len(its) for its in finished)
     per_lane = np.zeros((lanes, most), np.uint16)
@@ -402,8 +402,9 @@ def tables(net: VulcanNetwork, warps: int, photo: bool = False) -> dict[str, Any
     slot, lead, tb0 = _slots(pattern, k0, ns)
     nnz = len(slot)
     rx, rc, rf, law = _reaction_tables(reac, reactants, products, pos, ns, nrt)
-    # descriptor widths: reaction, rate (kf, kr, the zero rate 2 nr), species (padding ns), LU slot, S v piece
-    widths = {"r": _bits(nr - 1), "k": _bits(2 * nr), "s": _bits(ns), "slot": _bits(nnz - 1)}
+    # descriptor widths: reaction, rate (kf, kr, the zero rate: rate_slots), species (padding ns), LU slot, S v piece
+    zero_rate = regions(rate_slots(nr))[0]["ZERO"]
+    widths = {"r": _bits(nr - 1), "k": _bits(zero_rate), "s": _bits(ns), "slot": _bits(nnz - 1)}
     sst, xp, npart = _sv_stream(S, perm, live, lanes, widths)
     terms = _jacobian_terms(entries, rate_terms, slot, pos, ns, nnz)
     jt, jround, jsmax, nfix = _jacobian_stream(terms, nr, ns, lanes, widths)
@@ -450,7 +451,7 @@ def tables_for_device(net: VulcanNetwork, photo: bool, shared_memory: int) -> di
     if cells_per_block(tab, shared_memory) < 1:
         blob = pack_small_tables(tab)[0]
         raise ValueError(
-            f"one cell needs {DOUBLE_BYTES * shared_doubles_per_cell(tab) + len(blob)} B of shared memory per block; "
+            f"one cell needs {DOUBLE_BYTES * call_layout(tab)[1] + len(blob)} B of shared memory per block; "
             f"the device has {shared_memory}"
         )
     return tab
@@ -458,7 +459,7 @@ def tables_for_device(net: VulcanNetwork, photo: bool, shared_memory: int) -> di
 
 def cells_per_block(tab: dict[str, Any], shared_memory: int) -> int:
     """Return the cells per block the shared memory (bytes) holds."""
-    return int((shared_memory - len(pack_small_tables(tab)[0])) // (DOUBLE_BYTES * shared_doubles_per_cell(tab)))
+    return int((shared_memory - len(pack_small_tables(tab)[0])) // (DOUBLE_BYTES * call_layout(tab)[1]))
 
 
 def pack_small_tables(tab: dict[str, Any]) -> tuple[bytes, dict[str, int]]:
@@ -477,33 +478,61 @@ def rates_fit_in_block(tab: dict[str, Any]) -> bool:
     return bool(max(tab["nr"], tab["ns"] + 1) + tab["npart"] <= nt * nt)
 
 
-def scratch_strides(tab: dict[str, Any], wsh: bool) -> tuple[int, int]:
-    """Return the doubles of global scratch per cell slot of the call kernel and per block of the recover kernel.
+# The kernels' memory regions. Each is an ordered list of (array, doubles); an array's offset is the sum of the sizes
+# before it, the region's size their sum, and network.h names each offset after its region (_kernel_header.py).
+def regions(sizes: Iterable[tuple[str, int]]) -> tuple[dict[str, int], int]:
+    """Return each array's offset in a region laid out in this order, and the region's size (doubles)."""
+    offsets, total = {}, 0
+    for name, size in sizes:
+        offsets[name] = total
+        total += int(size)
+    return offsets, total
 
-    Each holds the rate coefficients (2 NR + 2) and the copy of F, u and -Jn kept for the try after a rejection; the
-    recover kernel also W when it is not in shared memory.
+
+def rate_slots(nr: int) -> list[tuple[str, int]]:
+    """Return a cell's rate coefficients as the Jacobian stream indexes them (RATE_*, RATE_SLOTS).
+
+    Forward, reverse, then the zero rate of the padding words (at 2 nr) and one spare.
+    """
+    return [("KF", nr), ("KR", nr), ("ZERO", 2)]
+
+
+def call_layout(tab: dict[str, Any]) -> tuple[dict[str, int], int]:
+    """Return the call kernel's shared memory per cell (C_*, PERC).
+
+    M (leading slots and the trailing block), dinv (and c0), n, N, Y, F, u, K1-K4, one for the queue's next cell; then
+    v (or the G / RT of the species) with the S v pieces at v + NR, unless they fit in the trailing block's slots,
+    free while the block is in registers: V is then TB0.
     """
     ns, nr = tab["ns"], tab["nr"]
-    call = 2 * nr + 2 + 2 * ns + tab["nnz"]
-    return call, call + (0 if wsh else ns * ns)
+    fit = rates_fit_in_block(tab)
+    states = [(name, ns) for name in ("NN", "Y", "F", "U", "K1", "K2", "K3", "K4")]
+    rates = 0 if fit else max(nr, ns + 1) + tab["npart"]
+    offsets, total = regions([("M", tab["nnz"]), ("DINV", ns + 1), ("N0", ns + 1), *states, ("NEXT", 1), ("V", rates)])
+    if fit:
+        offsets["V"] = tab["tb0"]
+    return offsets, total
 
 
-def shared_doubles_per_cell(tab: dict[str, Any]) -> int:
-    """Return the shared-memory doubles per cell.
-
-    M (leading slots and the trailing block), dinv (and c0), n, N, Y, F, u, K1-K4, one for the queue's next cell; v and
-    the S v pieces when they do not fit in the trailing block.
-    """
-    ns = tab["ns"]
-    rates = 0 if rates_fit_in_block(tab) else max(tab["nr"], ns + 1) + tab["npart"]
-    return int(tab["nnz"] + ns + 1 + ns + 1 + 8 * ns + 1 + rates)
-
-
-def shared_doubles_recover(tab: dict[str, Any], wsh: bool) -> int:
-    """Return the shared-memory doubles of the recover kernel's cell (PERWR).
+def recovery_layout(tab: dict[str, Any], wsh: bool) -> tuple[dict[str, int], int]:
+    """Return the recover kernel's shared memory (R_*, PERWR).
 
     W when wsh (else in global memory), dinv, n, v (or the G / RT of the species), N, Y, F, u, K1-K4, the S v pieces,
-    the row order of the pivoting and the next list entry (as ints).
+    the row order of the pivoting and the next list entry (ns + 1 ints).
     """
     ns = tab["ns"]
-    return int((ns * ns if wsh else 0) + 10 * ns + 1 + max(tab["nr"], ns + 1) + tab["npart"] + (ns + 2) // 2)
+    states = [(name, ns) for name in ("NN", "Y", "F", "U", "K1", "K2", "K3", "K4")]
+    return regions([
+        ("W", ns * ns if wsh else 0), ("DINV", ns), ("N0", ns + 1), ("V", max(tab["nr"], ns + 1)), *states,
+        ("PART", tab["npart"]), ("PR", (ns + 2) // 2),
+    ])  # fmt: skip
+
+
+def scratch_layout(tab: dict[str, Any], w: int) -> tuple[dict[str, int], int]:
+    """Return the global scratch of a call kernel's cell slot or a recover kernel's block (S_*, SR_*; the strides).
+
+    The rates (rate_slots), W (w doubles: 0 for the call, the recovery's W when it is not in shared memory), and the
+    copy of F, u and -Jn kept for the try after a rejection.
+    """
+    ns, nr = tab["ns"], tab["nr"]
+    return regions([("RATES", regions(rate_slots(nr))[1]), ("W", w), ("RSC", 2 * ns + tab["nnz"])])

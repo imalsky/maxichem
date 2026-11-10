@@ -227,11 +227,11 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
   const size_t wid = (size_t)blockIdx.x * WPB + wib;
   double* kf = scratch + wid * (JVP_STRIDE + D * JVP_DIRECTION_STRIDE);
   // dk and Ng, per direction: d kf, d kr; the state tangent
-  double *kr = kf + NR, *va = kr + NR + 2, *cw = va + NR, *dk = cw + 2 * NR, *Ng = dk + 2 * NR * D;
+  double *kr = kf + RATE_KR, *va = kf + JS_VA, *cw = kf + JS_CW, *dk = kf + JVP_STRIDE, *Ng = dk + 2 * NR * D;
   double* Wd = DN ? wscr + wid * NS * NS : nullptr;
   const Streams streams = {sst, jt, lu, optr, didx, nullptr, nullptr, sround, jround, 0};
   const Tolerance tol = {rtol, atol};
-  if (lane == 0) kf[2 * NR] = 0.0;          // the zero rate of the Jacobian's padding words
+  if (lane == 0) kf[RATE_ZERO] = 0.0;       // the zero rate of the Jacobian's padding words
   double hd[DMAX], tdot[DMAX], dlnd[DMAX];  // per direction: h, t, ln nd tangents (warp-uniform)
   double pend[DMAX], phad[DMAX];            // the previous attempt's error and size tangents
   const int nc = DN ? count[COUNT_RECOMPUTED] : B;

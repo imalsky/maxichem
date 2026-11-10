@@ -136,25 +136,26 @@ struct CellArrays {
   double *M, *dinv, *n, *N, *Y, *F, *u, *K1, *K2, *K3, *K4, *v, *part, *kf, *kr, *rsc;
 };
 
-// The arrays of the recovery's one cell in shared memory, and its slot of the global scratch; M is the dense W.
+// The arrays of the recovery's one cell in shared memory, and its slot of the global scratch; M is the dense W
+// (_tables.recovery_layout, scratch_layout).
 __device__ __forceinline__ CellArrays recover_arrays(double* smem, double* scratch, size_t slot) {
   CellArrays a;
   a.kf = scratch + slot * RECOVER_STRIDE;
-  a.kr = a.kf + NR;
-  a.M = WSH ? smem : a.kf + 2 * NR + 2;
-  a.rsc = a.kf + 2 * NR + 2 + (WSH ? 0 : NS * NS);  // F, u, -Jn's slots of the last fresh evaluation
-  a.dinv = smem + (WSH ? NS * NS : 0);
-  a.n = a.dinv + NS;
-  a.v = a.n + NS + 1;
-  a.N = a.v + VR;
-  a.Y = a.N + NS;
-  a.F = a.Y + NS;
-  a.u = a.F + NS;
-  a.K1 = a.u + NS;
-  a.K2 = a.K1 + NS;
-  a.K3 = a.K2 + NS;
-  a.K4 = a.K3 + NS;
-  a.part = a.K4 + NS;
+  a.kr = a.kf + RATE_KR;
+  a.M = WSH ? smem + R_W : a.kf + SR_W;
+  a.rsc = a.kf + SR_RSC;  // F, u, -Jn's slots of the last fresh evaluation
+  a.dinv = smem + R_DINV;
+  a.n = smem + R_N0;
+  a.v = smem + R_V;
+  a.N = smem + R_NN;
+  a.Y = smem + R_Y;
+  a.F = smem + R_F;
+  a.u = smem + R_U;
+  a.K1 = smem + R_K1;
+  a.K2 = smem + R_K2;
+  a.K3 = smem + R_K3;
+  a.K4 = smem + R_K4;
+  a.part = smem + R_PART;
   return a;
 }
 
@@ -243,9 +244,9 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
   const int cl = (int)threadIdx.x, lane = cl & 31;
   const CellArrays a = recover_arrays(smem, scratch, (size_t)blockIdx.x);
   double* N = a.N;
-  int* pr = (int*)(a.part + NPART);
+  int* pr = (int*)(smem + R_PR);
   int* nextq = pr + NS;
-  if (cl == 0) a.kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
+  if (cl == 0) a.kf[RATE_ZERO] = 0.0;  // the zero rate of the Jacobian's padding words
   int q = (int)blockIdx.x;
   while (q < nfl) {
     const int cell = list[q];

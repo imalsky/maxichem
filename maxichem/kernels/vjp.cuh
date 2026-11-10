@@ -422,13 +422,13 @@ __device__ __forceinline__ double reverse_stages(double* work, const double* Wd,
 
 // One stored attempt (REC): the state before it and the step control's history.
 __device__ __forceinline__ void save_attempt(double* rp, const double* N, const StepState& s, int lane) {
-  for (int i = lane; i < NS; i += 32) rp[i] = N[i];
+  for (int i = lane; i < NS; i += 32) rp[REC_N + i] = N[i];
   if (lane == 0) {
-    rp[NS] = s.h;
-    rp[NS + 1] = s.t;
-    rp[NS + 3] = s.pen;
-    rp[NS + 4] = s.pha;
-    rp[NS + 5] = s.prej ? 1.0 : 0.0;
+    rp[REC_H] = s.h;
+    rp[REC_T] = s.t;
+    rp[REC_PEN] = s.pen;
+    rp[REC_PHA] = s.pha;
+    rp[REC_PREJ] = s.prej ? 1.0 : 0.0;
   }
 }
 
@@ -562,8 +562,8 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
          *K4 = work + A_K4;
   const size_t wid = (size_t)blockIdx.x * WPB + wib;
   double* kf = scratch + wid * VJP_STRIDE;
-  double *kr = kf + NR, *lbk = kr + NR + 2, *rho = lbk + 2 * NR, *cw = rho + 8 * NR;  // rho: 4 x 2 NR
-  if (lane == 0) kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
+  double *kr = kf + RATE_KR, *lbk = kf + VS_LBK, *rho = kf + VS_RHO, *cw = kf + VS_CW;  // rho: 4 x 2 NR
+  if (lane == 0) kf[RATE_ZERO] = 0.0;  // the zero rate of the Jacobian's padding words
   double* recA = rec + wid * 2 * CP * REC;
   double* recB = recA + CP * REC;
   double* Wd = DN ? wscr + wid * NS * NS : nullptr;
@@ -600,7 +600,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     while (run && na < max_steps && step.t < dt * CALL_END) {
       if (na < CP) save_attempt(recA + na * REC, N, step, lane);
       last = forward_step<DN>(work, c, Wd, step, dt, coef, tol, tab, streams, lane, myt);
-      if (na < CP && lane == 0) recA[na * REC + NS + 2] = last.ok ? 1.0 : 0.0;
+      if (na < CP && lane == 0) recA[na * REC + REC_OK] = last.ok ? 1.0 : 0.0;
       na++;
     }
     const double s = write_state(N, xout + (size_t)cell * NS, perm, lane, lane, 32);
@@ -645,29 +645,29 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       double* rb = recA;
       if (st > 1) {  // the segment's attempts, recomputed and stored
         __syncwarp();
-        for (int i = lane; i < NS; i += 32) N[i] = recA[g * REC + i];
-        step.h = recA[g * REC + NS];
-        step.t = recA[g * REC + NS + 1];
-        step.pen = recA[g * REC + NS + 3];
-        step.pha = recA[g * REC + NS + 4];
-        step.prej = recA[g * REC + NS + 5] != 0.0;
+        for (int i = lane; i < NS; i += 32) N[i] = recA[g * REC + REC_N + i];
+        step.h = recA[g * REC + REC_H];
+        step.t = recA[g * REC + REC_T];
+        step.pen = recA[g * REC + REC_PEN];
+        step.pha = recA[g * REC + REC_PHA];
+        step.prej = recA[g * REC + REC_PREJ] != 0.0;
         __syncwarp();
         for (int j = j0; j < j1; j++) {
           save_attempt(recB + (j - j0) * REC, N, step, lane);
           last = forward_step<DN>(work, c, Wd, step, dt, coef, tol, tab, streams, lane, myt);
-          if (lane == 0) recB[(j - j0) * REC + NS + 2] = last.ok ? 1.0 : 0.0;
+          if (lane == 0) recB[(j - j0) * REC + REC_OK] = last.ok ? 1.0 : 0.0;
         }
         rb = recB - j0 * REC;
       }
       for (int j = j1 - 1; j >= j0; j--) {
         __syncwarp();
         const double* rp = rb + j * REC;
-        if (!adapt && rp[NS + 2] == 0.0) continue;  // frozen steps: a rejected attempt has no effect
-        for (int i = lane; i < NS; i += 32) N[i] = rp[i];
-        const double hj = rp[NS], tj = rp[NS + 1], rem = dt - tj, ha = fmin(hj, rem);
+        if (!adapt && rp[REC_OK] == 0.0) continue;  // frozen steps: a rejected attempt has no effect
+        for (int i = lane; i < NS; i += 32) N[i] = rp[REC_N + i];
+        const double hj = rp[REC_H], tj = rp[REC_T], rem = dt - tj, ha = fmin(hj, rem);
         __syncwarp();
         double dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
-        Attempt a = {last.en, last.c0, rp[NS + 2] != 0.0};
+        Attempt a = {last.en, last.c0, rp[REC_OK] != 0.0};
         if (j < j1 - 1)  // else the attempt just run, still in place
           a = run_attempt<DN>(work, c, Wd, ha, tj == 0.0, coef, tol, tab, streams, lane, myt);
         const double c0 = a.c0, en = a.en;
@@ -677,7 +677,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
           for (int k = 0; k < NT; k++) M[TB0 + myt * NT + k] = c[k];
         }
         const double fac =
-            step_factor_partials(en, ok, rp[NS + 5] != 0.0, rp[NS + 3], rp[NS + 4], ha, dfe, dfh, dfp, dfq);
+            step_factor_partials(en, ok, rp[REC_PREJ] != 0.0, rp[REC_PEN], rp[REC_PHA], ha, dfe, dfh, dfp, dfq);
         double hab = adapt ? hb * fac + hb * ha * dfh + hac : 0.0;
         const double enb = adapt ? hb * ha * dfe + enc : 0.0;
         enc = adapt ? hb * ha * dfp : 0.0;  // to the previous attempt (the next one reversed)

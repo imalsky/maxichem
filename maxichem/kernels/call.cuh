@@ -19,17 +19,17 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
   double c[NT];                           // that row: M0, then its LU factors
 #pragma unroll
   for (int j = 0; j < NT; j++) c[j] = 0.0;
-  double* M = smem + grp * PERC;  // M0 by slot, then its LU factors (leading slots, then the block)
-  double *dinv = M + NNZ, *n = dinv + NS + 1, *N = n + NS + 1, *Y = N + NS, *F = Y + NS, *u = F + NS, *K1 = u + NS,
-         *K2 = K1 + NS, *K3 = K2 + NS, *K4 = K3 + NS;
-  // v and part sit in the trailing block's slots, free while that block is in registers, if they fit there (VOFF =
-  // TB0), else after the other arrays
-  double *v = M + VOFF, *part = v + NR;
-  int* nextc = (int*)(K4 + NS);
+  double* M = smem + grp * PERC + C_M;  // M0 by slot, then its LU factors (leading slots, then the block)
+  double *dinv = M + C_DINV, *n = M + C_N0, *N = M + C_NN, *Y = M + C_Y, *F = M + C_F, *u = M + C_U, *K1 = M + C_K1,
+         *K2 = M + C_K2, *K3 = M + C_K3, *K4 = M + C_K4;
+  // v and part sit in the trailing block's slots, free while that block is in registers, if they fit there (C_V =
+  // TB0), else after the other arrays (_tables.call_layout)
+  double *v = M + C_V, *part = v + NR;
+  int* nextc = (int*)(M + C_NEXT);
   double* kf = scratch + ((size_t)blockIdx.x * CPB + grp) * CALL_STRIDE;  // per cell slot: rates, the copy
-  double* kr = kf + NR;
-  double* rsc = kf + 2 * NR + 2;  // F, u, -Jn of the last fresh evaluation (a retry at the same state)
-  if (cl == 0) kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
+  double* kr = kf + RATE_KR;
+  double* rsc = kf + S_RSC;          // F, u, -Jn of the last fresh evaluation (a retry at the same state)
+  if (cl == 0) kf[RATE_ZERO] = 0.0;  // the zero rate of the Jacobian's padding words
   int cell = (int)(blockIdx.x * CPB + grp);
   while (cell < B) {
     const double Tc = Ta[cell], dt = dta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
