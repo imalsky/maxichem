@@ -735,6 +735,9 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
   step reads it from the deck).
 - 2026-11-04, the author, on the GCM-side work: do not ask; investigate, post findings and results in the snapy group's
   thread, and keep working. Still ask before an upstream PR or marking one ready.
+- 2026-11-09 ~16:56, snapy's author: maxichem's species go to passive scalars, not hydro species. Vapors and clouds add
+  to the total mass, so they are hydro variables in the Riemann solver; chemical tracers do not, so they are stored
+  apart and moved on the mass flux the hydro provides. The first of the open coupling decisions is settled.
 
 ## Log
 
