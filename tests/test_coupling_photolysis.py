@@ -24,3 +24,13 @@ def test_nearest_layer_dark_night_and_counted_edges():
         nearest_layer_rates(P, TABLE_P[:2], TABLE_J, day)
     with pytest.raises(ValueError, match=r"pressure must be finite and positive; its least value is 0\.0 Pa"):
         nearest_layer_rates(P * 0.0, TABLE_P, TABLE_J, day)
+    nan_table = TABLE_J.clone()
+    nan_table[0, 0] = float("nan")  # would reach the night side as NaN * 0
+    with pytest.raises(ValueError, match="table_rates must be finite and not negative"):
+        nearest_layer_rates(P, TABLE_P, nan_table, day)
+    with pytest.raises(ValueError, match="table_rates must be finite and not negative"):
+        nearest_layer_rates(P, TABLE_P, -TABLE_J, day)
+    with pytest.raises(ValueError, match="day must be a boolean mask"):  # a 2 in an integer mask doubled J
+        nearest_layer_rates(P, TABLE_P, TABLE_J, day.long() * 2)
+    with pytest.raises(ValueError, match="the table has no layers"):
+        nearest_layer_rates(P, TABLE_P[:0], TABLE_J[:0], day)

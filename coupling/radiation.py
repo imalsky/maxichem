@@ -6,6 +6,7 @@ volume, which grows as 1 / rho per mass and dominates near the lid. docs/archite
 """
 
 import math
+from fractions import Fraction
 
 import torch
 
@@ -17,10 +18,6 @@ __all__ = [
     "column_residual",
     "level_temperatures",
 ]
-
-# A step time that reaches a multiple of the period up to the round-off of summed step lengths has reached it; as a
-# fraction of the period.
-_TIME_SLACK = 1.0e-9
 
 
 class RadiationBudgetError(ArithmeticError):
@@ -79,7 +76,8 @@ def check_budget(heat: torch.Tensor, dz: torch.Tensor, net_up: torch.Tensor) -> 
     The residual telescopes: each layer's heat * dz is its flux difference with a few roundings, and the sum over nl
     layers adds at most nl more, each of at most 2 max|net_up| (twice the largest flux). So round-off stays below
     2 nl (nl + 3) eps max|net_up|, which is the limit here; the measured residual is about 2e-16 of max|net_up| (100
-    layers, float64). A larger one means the heating is not the flux divergence.
+    layers, float64). A larger one means the heating is not the flux divergence. The bound holds for float64
+    arithmetic throughout, without underflow, so other precisions are refused rather than mixed.
 
     Parameters
     ----------
@@ -95,6 +93,16 @@ def check_budget(heat: torch.Tensor, dz: torch.Tensor, net_up: torch.Tensor) -> 
     float
         The largest column residual relative to that column's largest |net_up|; 0 for a column with no flux.
     """
+    kinds = {name: a.dtype for name, a in (("heat", heat), ("dz", dz), ("net_up", net_up))}
+    if any(d != torch.float64 for d in kinds.values()):
+        raise ValueError(f"check_budget's round-off bound is for float64; got {kinds}: pass float64 arrays")
+    if heat.dim() != 2 or net_up.shape != (heat.shape[0], heat.shape[1] + 1) or dz.shape[-1] != heat.shape[1]:
+        shapes = [tuple(a.shape) for a in (heat, dz, net_up)]
+        raise ValueError(f"heat [ncol, nl], dz [ncol, nl] or [nl] and net_up [ncol, nl + 1] expected, got {shapes}")
+    if not bool((torch.isfinite(dz) & (dz > 0)).all()):
+        raise ValueError(
+            f"dz must be finite and positive; its least value is {float(dz.min())!r} m, largest {float(dz.max())!r} m"
+        )
     fine = torch.isfinite(net_up).all(-1) & torch.isfinite(heat).all(-1)
     if not bool(fine.all()):
         bad = torch.nonzero(~fine).flatten()
@@ -106,6 +114,11 @@ def check_budget(heat: torch.Tensor, dz: torch.Tensor, net_up: torch.Tensor) -> 
     scale = net_up.abs().amax(-1)
     rel = column_residual(heat, dz, net_up).abs() / torch.where(scale > 0, scale, 1.0)
     limit = 2.0 * nl * (nl + 3) * torch.finfo(heat.dtype).eps
+    if not bool(torch.isfinite(rel).all()):
+        raise RadiationBudgetError(
+            f"column {int(torch.nonzero(~torch.isfinite(rel))[0])} has a non-finite budget residual from finite "
+            "inputs (an overflow): check that column's fluxes"
+        )
     worst = float(rel.max())
     if worst > limit:
         raise RadiationBudgetError(
@@ -146,6 +159,10 @@ class RadiationClock:
     The schedule is fixed, so the mean cadence is the period whatever the step: 70 s steps and a 300 s period give
     0, 350, 630, 910, 1260 s, ... A step longer than the period fires once and skips the multiples it passed.
 
+    The clock keeps its own time as the exact sum of the steps it was given (a fraction, so a long run accumulates no
+    rounding). A step or period written in decimal (70.1 s) is a float up to half an ulp off; the clock allows exactly
+    that much per step and per multiple of the period, so a multiple the decimal steps reach exactly fires on time.
+
     Parameters
     ----------
     period_s : float
@@ -156,14 +173,23 @@ class RadiationClock:
         if not (math.isfinite(period_s) and period_s > 0):
             raise ValueError(f"the radiation period must be finite and positive, got {period_s!r} s")
         self.period_s = period_s
+        # the least decimal period this float stands for, s
+        self._period_low = Fraction(period_s) - Fraction(math.ulp(period_s)) / 2
+        self._time = Fraction(0)  # the exact sum of the steps taken, s
+        self._slack = Fraction(0)  # half an ulp of each step taken, s
         self._next = 0  # the next multiple of the period that fires
 
-    def due(self, t_s: float) -> bool:
-        """Return whether the radiation is due at step time ``t_s`` (s), and if so advance the schedule past it."""
-        if not math.isfinite(t_s):
-            raise ValueError(f"the step time must be finite, got {t_s!r} s")
-        reached = t_s / self.period_s + _TIME_SLACK
-        if reached < self._next:
+    def due(self) -> bool:
+        """Return whether the radiation is due at the clock's time, and if so advance the schedule past it."""
+        reached = self._time + self._slack
+        if reached < self._next * self._period_low:
             return False
-        self._next = math.floor(reached) + 1
+        self._next = math.floor(reached / self._period_low) + 1
         return True
+
+    def advance(self, step_s: float) -> None:
+        """Move the clock on by one step of ``step_s`` (s; finite, not negative)."""
+        if not (math.isfinite(step_s) and step_s >= 0):
+            raise ValueError(f"the step must be finite and not negative, got {step_s!r} s")
+        self._time += Fraction(step_s)
+        self._slack += Fraction(math.ulp(step_s)) / 2

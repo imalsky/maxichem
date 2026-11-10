@@ -17,6 +17,7 @@ __all__ = [
     "mass_to_mole",
     "molar_masses",
     "mole_to_mass",
+    "signed_mole_fractions",
     "start_mole_fractions",
     "tracer_totals",
 ]
@@ -43,9 +44,28 @@ _CARRIER = {"H": "H2", "He": "He", "C": "CO", "O": "H2O", "N": "N2", "S": "H2S"}
 _OPTIONAL = ("N", "S")  # a network without these elements starts without them
 
 
-def _check_rows(name: str, a: torch.Tensor, columns: int) -> None:
-    if a.dim() != 2 or a.shape[1] != columns:
-        raise ValueError(f"{name} must be [cells, {columns}], got shape {tuple(a.shape)}")
+def _check_molar_masses(mw: torch.Tensor) -> None:
+    if mw.dim() != 1:
+        raise ValueError(f"mw must be [S], got shape {tuple(mw.shape)}")
+    if not bool((torch.isfinite(mw) & (mw > 0)).all()):
+        raise ValueError(f"mw must be finite and positive, its least value is {float(mw.min())!r} kg/mol")
+
+
+def _check_cells(name: str, a: torch.Tensor, mw: torch.Tensor) -> None:
+    """Refuse a [cells, S] array of the wrong shape or with non-finite entries, and a bad molar-mass vector."""
+    _check_molar_masses(mw)
+    if a.dim() != 2 or a.shape[1] != mw.shape[0]:
+        raise ValueError(f"{name} must be [cells, {mw.shape[0]}], got shape {tuple(a.shape)}")
+    if not bool(torch.isfinite(a).all()):
+        raise ValueError(f"{name} holds {int((~torch.isfinite(a)).sum())} non-finite entries")
+
+
+def _check_per_cell(name: str, a: torch.Tensor, cells: int) -> None:
+    """Refuse a per-cell array that is not exactly [cells], or is negative or not finite."""
+    if a.shape != (cells,):
+        raise ValueError(f"{name} must be [{cells}], got shape {tuple(a.shape)}")
+    if not bool((torch.isfinite(a) & (a >= 0)).all()):
+        raise ValueError(f"{name} must be finite and not negative, its least value is {float(a.min())!r}")
 
 
 def molar_masses(atoms: np.ndarray | torch.Tensor, elements: Sequence[str]) -> torch.Tensor:
@@ -69,6 +89,8 @@ def molar_masses(atoms: np.ndarray | torch.Tensor, elements: Sequence[str]) -> t
     a = torch.as_tensor(atoms, dtype=torch.float64).cpu()
     if a.dim() != 2 or a.shape[1] != len(elements):
         raise ValueError(f"atoms must be [species, {len(elements)}], got shape {tuple(a.shape)}")
+    if not bool((torch.isfinite(a) & (a >= 0)).all()):
+        raise ValueError("atoms must be finite and not negative: check the network's atoms table")
     mw = a @ torch.tensor([ATOMIC_MASS[e] for e in elements], dtype=torch.float64)
     empty = torch.nonzero(mw <= 0).flatten().tolist()
     if empty:
@@ -91,9 +113,7 @@ def mass_to_mole(q: torch.Tensor, mw: torch.Tensor) -> torch.Tensor:
     torch.Tensor [cells, S]
         Mole fractions, summing to 1 in each cell.
     """
-    _check_rows("q", q, mw.numel())
-    if not bool(torch.isfinite(q).all()):
-        raise ValueError(f"q holds {int((~torch.isfinite(q)).sum())} non-finite entries: the transport broke first")
+    _check_cells("q", q, mw)
     if bool((q < 0).any()):
         raise ValueError(f"q holds negatives, the least {float(q.min()):.3g}: clamp them before the conversion")
     n = q / mw
@@ -104,28 +124,49 @@ def mass_to_mole(q: torch.Tensor, mw: torch.Tensor) -> torch.Tensor:
     return n / total
 
 
+def signed_mole_fractions(q: torch.Tensor, mw: torch.Tensor) -> torch.Tensor:
+    """Return mole fractions for output, keeping the transport's negatives; never feed these to the chemistry.
+
+    ``mass_to_mole`` refuses negative q; a state written for figures keeps them, so they stay visible.
+
+    Parameters
+    ----------
+    q : torch.Tensor [cells, S]
+        Mass mixing ratios, kg per kg of gas, signed.
+    mw : torch.Tensor [S]
+        Molar masses, kg/mol.
+
+    Returns
+    -------
+    torch.Tensor [cells, S]
+        n / sum(n) with n = q / mw, summing to 1 in each cell.
+    """
+    _check_cells("q", q, mw)
+    n = q / mw
+    return n / n.sum(1, keepdim=True)
+
+
 def mole_to_mass(x: torch.Tensor, mw: torch.Tensor, mass: torch.Tensor) -> torch.Tensor:
     """Return mass mixing ratios that hold each cell's given tracer mass.
 
     Parameters
     ----------
     x : torch.Tensor [cells, S]
-        Mole fractions, finite.
+        Mole fractions, finite and not negative.
     mw : torch.Tensor [S]
         Molar masses, kg/mol.
     mass : torch.Tensor [cells]
-        Each cell's tracer mass, sum of q, kg per kg of gas.
+        Each cell's tracer mass, sum of q, kg per kg of gas; finite and not negative.
 
     Returns
     -------
     torch.Tensor [cells, S]
         Mass mixing ratios, kg per kg of gas, summing to ``mass`` in each cell.
     """
-    _check_rows("x", x, mw.numel())
-    if mass.shape != x.shape[:1]:
-        raise ValueError(f"mass must be [{x.shape[0]}], got shape {tuple(mass.shape)}")
-    if not (bool(torch.isfinite(x).all()) and bool(torch.isfinite(mass).all())):
-        raise ValueError("x or mass holds non-finite entries: the chemistry call's result is not usable")
+    _check_cells("x", x, mw)
+    _check_per_cell("mass", mass, x.shape[0])
+    if bool((x < 0).any()):
+        raise ValueError(f"x holds negatives, the least {float(x.min()):.3g}: the call's result is not usable")
     xm = x * mw
     weight = xm.sum(1)
     if bool((weight <= 0).any()):
@@ -140,7 +181,7 @@ def element_moles(q: torch.Tensor, mw: torch.Tensor, atoms: torch.Tensor) -> tor
     Parameters
     ----------
     q : torch.Tensor [cells, S]
-        Mass mixing ratios, kg per kg of gas.
+        Mass mixing ratios, kg per kg of gas, finite (negatives from the transport are counted as they are).
     mw : torch.Tensor [S]
         Molar masses, kg/mol.
     atoms : torch.Tensor [S, E]
@@ -151,9 +192,13 @@ def element_moles(q: torch.Tensor, mw: torch.Tensor, atoms: torch.Tensor) -> tor
     torch.Tensor [cells, E]
         mol per kg of gas.
     """
-    _check_rows("q", q, mw.numel())
-    if atoms.shape[0] != mw.numel():
-        raise ValueError(f"atoms has {atoms.shape[0]} species rows, mw has {mw.numel()}")
+    _check_cells("q", q, mw)
+    if atoms.dim() != 2 or atoms.shape[0] != mw.shape[0]:
+        raise ValueError(f"atoms must be [{mw.shape[0]}, elements], got shape {tuple(atoms.shape)}")
+    if not bool(torch.isfinite(atoms).all()):
+        raise ValueError("atoms holds non-finite entries: check the network's atoms table")
+    if not (q.dtype == mw.dtype == atoms.dtype):
+        raise ValueError(f"q, mw and atoms must share one precision, got {q.dtype}, {mw.dtype}, {atoms.dtype}")
     return (q / mw) @ atoms
 
 
@@ -163,9 +208,9 @@ def tracer_totals(q: torch.Tensor, cell_mass: torch.Tensor, mw: torch.Tensor, at
     Parameters
     ----------
     q : torch.Tensor [cells, S]
-        Mass mixing ratios, kg per kg of gas.
+        Mass mixing ratios, kg per kg of gas, finite.
     cell_mass : torch.Tensor [cells]
-        Gas mass of each cell (density times volume), kg.
+        Gas mass of each cell (density times volume), kg; finite and not negative.
     mw : torch.Tensor [S]
         Molar masses, kg/mol.
     atoms : torch.Tensor [S, E]
@@ -176,11 +221,10 @@ def tracer_totals(q: torch.Tensor, cell_mass: torch.Tensor, mw: torch.Tensor, at
     torch.Tensor [1 + E]
         The tracer mass in kg, then the moles of each element in the atoms table's column order.
     """
-    if cell_mass.shape != q.shape[:1]:
-        raise ValueError(f"cell_mass must be [{q.shape[0]}], got shape {tuple(cell_mass.shape)}")
+    moles = element_moles(q, mw, atoms)
+    _check_per_cell("cell_mass", cell_mass, q.shape[0])
     mass = (q * cell_mass[:, None]).sum()
-    moles = (element_moles(q, mw, atoms) * cell_mass[:, None]).sum(0)
-    return torch.cat([mass.view(1), moles])
+    return torch.cat([mass.view(1), (moles * cell_mass[:, None]).sum(0)])
 
 
 def start_mole_fractions(species: Sequence[str], elements: Sequence[str]) -> torch.Tensor:

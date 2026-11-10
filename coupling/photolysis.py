@@ -57,11 +57,19 @@ def nearest_layer_rates(
     if table_rates.dim() != 2 or table_pressure.shape != table_rates.shape[:1]:
         shapes = (tuple(table_pressure.shape), tuple(table_rates.shape))
         raise ValueError(f"table_pressure [layers] and table_rates [layers, branches] disagree: {shapes}")
+    if day.dtype != torch.bool:
+        raise ValueError(f"day must be a boolean mask, got dtype {day.dtype}: pass cos z > 0")
+    if table_pressure.numel() == 0:
+        raise ValueError("the table has no layers: check the --jref file")
     for name, p in (("pressure", pressure), ("table_pressure", table_pressure)):
         if not bool((torch.isfinite(p) & (p > 0)).all()):
             raise ValueError(f"{name} must be finite and positive; its least value is {float(p.min())!r} Pa")
+    if not bool((torch.isfinite(table_rates) & (table_rates >= 0)).all()):
+        raise ValueError(
+            f"table_rates must be finite and not negative; its least value is {float(table_rates.min())!r}"
+        )
     i = (torch.log(pressure)[:, None] - torch.log(table_pressure)[None]).abs().argmin(1)
     top, bottom = table_pressure.min(), table_pressure.max()
     above = int((day & (pressure < top)).sum())
     below = int((day & (pressure > bottom)).sum())
-    return JLookup(J=table_rates[i] * day[:, None], above=above, below=below)
+    return JLookup(J=torch.where(day[:, None], table_rates[i], 0.0), above=above, below=below)

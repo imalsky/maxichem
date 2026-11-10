@@ -157,9 +157,21 @@ def save_start_column(path: str | Path, levels: np.ndarray, gas: DryGas, grid: d
     gas : DryGas
         The deck's dry gas.
     grid : dict
-        The column's grid, for example ``{"nz": 140, "depth_m": 8.4e6}``.
+        The column's grid with its layer count ``nz``, for example ``{"nz": 140, "depth_m": 8.4e6}``.
     """
+    _check_levels(Path(path), levels, grid)
     np.savez(path, L=levels, record=np.array(json.dumps(_record(gas, grid))))
+
+
+def _check_levels(path: Path, levels: np.ndarray, grid: dict[str, Any]) -> None:
+    """Refuse level temperatures that are not [nz + 1], finite and positive, or a grid without its layer count."""
+    nz = grid.get("nz")
+    if not isinstance(nz, int) or nz < 1:
+        raise FlowFileError(f"{path}: the column's grid must give its layer count as an integer nz >= 1, got {grid!r}")
+    if levels.shape != (nz + 1,):
+        raise FlowFileError(f"{path}: {nz} layers need {nz + 1} level temperatures, got shape {levels.shape}")
+    if not bool(np.all(np.isfinite(levels) & (levels > 0))):
+        raise FlowFileError(f"{path}: level temperatures must be finite and positive; the least is {levels.min()!r} K")
 
 
 def load_start_column(path: str | Path, gas: DryGas, grid: dict[str, Any]) -> np.ndarray:
@@ -184,4 +196,6 @@ def load_start_column(path: str | Path, gas: DryGas, grid: dict[str, Any]) -> np
         saved = json.loads(str(f["record"])) if "record" in f.files else None
         remake = "Make the column again with re_start.py under this deck's gas and grid, and start from that."
         _require_same(path, saved, gas, grid, remake)
-        return np.asarray(f["L"])
+        levels = np.asarray(f["L"])
+    _check_levels(path, levels, grid)
+    return levels

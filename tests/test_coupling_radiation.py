@@ -1,6 +1,7 @@
 """The column heating on a sphere, its budget check, the level temperatures and the radiation's schedule."""
 
 import math
+from fractions import Fraction
 
 import pytest
 import torch
@@ -62,6 +63,13 @@ def test_budget_check_refuses_nan_and_a_heating_off_the_divergence():
     old = -(area[1:] * net_up[:, 1:] - area[:-1] * net_up[:, :-1]) / ((r[1:] ** 3 - r[:-1] ** 3) / 3)
     with pytest.raises(RadiationBudgetError, match="not the flux divergence"):
         check_budget(old, dz, net_up)
+    # finite heating, fluxes and thicknesses whose budget overflows
+    with pytest.raises(RadiationBudgetError, match="column 0 has a non-finite budget residual"):
+        check_budget(
+            torch.tensor([[1.0e300, 0.0]], dtype=torch.float64),
+            torch.tensor([1.0e10, 1.0], dtype=torch.float64),
+            torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float64),
+        )
 
 
 def test_level_temperatures_exact_for_a_linear_profile():
@@ -73,16 +81,29 @@ def test_level_temperatures_exact_for_a_linear_profile():
     assert torch.allclose(levels, 1500.0 + slope * z_face, rtol=1e-14, atol=0)
 
 
-def test_radiation_clock_keeps_a_fixed_schedule():
-    dt, period = 70.0, 300.0
-    clock = RadiationClock(period)
-    fired = [n * dt for n in range(60) if clock.due(n * dt)]
-    # the first step time at or after each multiple of the period
-    expected = [dt * math.ceil(period * k / dt) for k in range(15) if period * k <= 59 * dt]
-    assert fired == expected
-    assert fired[:9] == [0.0, 350.0, 630.0, 910.0, 1260.0, 1540.0, 1820.0, 2100.0, 2450.0]
-    long_steps = RadiationClock(period)
-    assert all(long_steps.due(n * 700.0) for n in range(5))  # a step longer than the period fires every step
+def _fired_steps(step_s: float, period_s: float, steps: int) -> list[int]:
+    """Return the steps at which the radiation fires, driven as the drivers drive the clock."""
+    clock, fired = RadiationClock(period_s), []
+    for n in range(steps):
+        if clock.due():
+            fired.append(n)
+        clock.advance(step_s)
+    return fired
+
+
+@pytest.mark.parametrize(
+    ("step_s", "period_s", "steps"),
+    [(70.0, 300.0, 200_000), (70.1, 300.0, 200_000), (0.1, 300.0, 500_000), (35.7, 300.1, 200_000)],
+)
+def test_radiation_clock_fires_at_the_first_step_after_each_multiple(step_s, period_s, steps):
+    # the decimal step and period, as written: every multiple k P fires at step ceil(k P / dt)
+    dt, period = Fraction(repr(step_s)), Fraction(repr(period_s))
+    last = math.floor((steps - 1) * dt / period)
+    expected = sorted({math.ceil(k * period / dt) for k in range(last + 1)})
+    assert _fired_steps(step_s, period_s, steps) == expected
+    if step_s == 70.0:
+        assert [70 * n for n in expected[:9]] == [0, 350, 630, 910, 1260, 1540, 1820, 2100, 2450]
+    assert _fired_steps(700.0, 300.0, 5) == [0, 1, 2, 3, 4]  # a step longer than the period fires every step
 
 
 def test_refusals_name_the_value():
@@ -93,7 +114,10 @@ def test_refusals_name_the_value():
         (lambda: column_heating(net_up, -torch.ones(3)), "dz must be positive"),
         (lambda: level_temperatures(torch.ones((2, 1))), r"nl >= 2, got shape \(2, 1\)"),
         (lambda: RadiationClock(0.0), "finite and positive, got 0.0 s"),
-        (lambda: RadiationClock(300.0).due(float("nan")), "must be finite, got nan s"),
+        (lambda: RadiationClock(300.0).advance(float("nan")), "must be finite and not negative, got nan s"),
+        (lambda: check_budget(net_up[:, 1:], torch.tensor([float("inf"), 1.0, 1.0]).double(), net_up), "dz must be"),
+        (lambda: check_budget(net_up[:, 1:].float(), torch.ones(3).double(), net_up), "bound is for float64"),
+        (lambda: check_budget(net_up, torch.ones(3).double(), net_up), r"heat \[ncol, nl\]"),
     ]
     for call, message in cases:
         with pytest.raises(ValueError, match=message):
