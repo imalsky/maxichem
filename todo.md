@@ -40,3 +40,16 @@ Tasks put off to return to, with the date deferred.
   - Needed: refit both ranges with a physical Cp, starting from `experiments/2026-11-06_tih_thermo/direct_stat_mech.py`; decide
     where the corrected file lives, since it departs from VULCAN; update the test that expects the refusal. The dissociation
     energy's error still leaves TiH uncertain by about 0.5 dex at 1000 K.
+- 2026-11-09. Design debt in the kernels (found in a code review; no result is wrong because of it).
+  - The memory layout has two owners. Python sets the call kernel's array order (`VOFF = nnz + 10 * ns + 3`,
+    `maxichem/_kernel_header.py:132`); the scratch offset `kf + 2 * NR + 2` is written again in `call.cuh:31` and
+    `recover.cuh:141`, with its own forms in `jvp.cuh:229` and `vjp.cuh:565`, and in `_tables.py` / `_ad_tables.py`. Needed:
+    named offsets from the generator, as the `A_*` ones already are.
+  - Argument counts are far above the limit of 12: kernels take 26 to 48 parameters (`call` 26, `recover` 28, `jvp` 40,
+    `vjp` 43, `jvp_cells` / `jvp_rec` 45, `vjp_cells` / `vjp_rec` 48), helpers 15 to 21. `tools/check_size_limits.py` does
+    not count arguments and no exception is written. Needed: a struct for the per-cell streams and one for the step state,
+    then the count in the checker.
+  - The per-cell setup and the accept / step-control tail are each written four times (`call.cuh`, `recover.cuh`,
+    `jvp.cuh`, `vjp.cuh`) and no test ties the copies together (the derivative kernels' copies of the step itself are tied
+    by `test_primal_is_the_call`). Needed: one shared form, or a test that the four agree.
+  - Any of these changes the compiled kernels: each needs the bitwise proof on the saved cases and a speed check.
