@@ -1648,6 +1648,56 @@ snapy's docs on tracers, and the papers below. One independent review of the sam
     both parts end normally; the same step counts, sum(q) range, column check (2.07e-16), radiation calls and peak
     memory (16.59 GB) as the first box smoke test above.
 
+### 2026-11-09 19:16 to 22:06: four fixes from a code review: the equilibrium test's pressure, refused inputs, the upper temperature bound, kintest on both networks
+Branch sweep-fixes (one commit per fix). Scratch data of the measurements are not kept in the repository.
+- Equilibrium known answer. For H + H + M = H2 + M, K_p = (p_H2/P0)/(p_H/P0)^2 with p_i = x_i P, so x_H2/x_H^2 = K_p P/P0;
+  the test had K_p P0/P and passed only because it ran at P = P0. Now at 10 bar with the right factor. A kernel whose reverse
+  rates use the cell's P in place of P0 fails it in 6 of 6 cases (3.06e9 against 3.06e10); the old test passed on that kernel.
+- Refused inputs. An input summing to 0.9 raised every density by 11 % unseen. |sum(x) - 1| > X_SUM_TOL = 1e-10 is now bad
+  input. Measured |sum(x) - 1|: at most 1.3e-15 over every stored input the checks feed (boxes_ncho starts 6.7e-16; paths, mixes,
+  panel P, yardstick, derivative boxes at most 8.9e-16; sulfur stored states 1.3e-15) and over the solver's outputs (60-call
+  chains, both networks; export-check calls 8.9e-16 to 1.1e-15). Every refused cell (bad input of any kind, T out of range) now
+  raises in the Python call, the derivative calls and the C++ call, naming the counts, the limits and the first cell; the
+  kernels' counts and the other cells' results are still checked with the raise switched off. Valid-input outputs (x, h,
+  done, steps, flags, counts, tangents, cotangents) bitwise equal to the base commit: 12,264,022 numbers, 0 differ.
+- The read of the counts is the call's only host sync; before, a call read nothing back. Cost on an idle GPU, 1e6 settled
+  cells, 20 alternating rounds of 3 calls with the read on and off: NCHO 359.04 against 358.90 ms per call, +0.050 % (round sd
+  0.067 %); sulfur 690.24 against 690.16 ms, +0.012 % (sd 0.012 %). Below the 1 % rule; kept.
+- The derivative test's x direction now keeps sum(x) = 1, since the call refuses a state off it. The part along x itself,
+  which no difference can judge now, is checked apart: with the step sizes held the tangent along dx = x is 0 but for rounding
+  (largest |dx_out| / max x_out 2.1e-14; limit 1e-12). The adaptive tangent along x is not 0 (atol does not scale) and has no
+  meaning for valid input.
+- Upper temperature bound. VULCAN's NASA-9 files hold only coefficients, no ranges. T_MAX = 3000 K (the owner's choice: the
+  edge of what is checked against VULCAN; the fits themselves run to 6000 K). Every stored check input lies within 300-3000 K,
+  both ends reached exactly (qual_ncho, panel P, yardstick: 300.0-3000.0 K). Cells above are counted as hot and refused;
+  check() raises for cold and hot. EXPORT_FORMAT 5 (4 for the sum refusal alone). Outputs bitwise equal again (12,264,022
+  numbers; the 44 new hot counts all 0).
+- Checks on the upper-bound commit: CPU 66 passed; slow CPU 4 passed; parity and guard 39 passed in 219 s; known answers
+  and order 9 passed; test_ad 81 passed in 1015 s (all 285 verdicts pass); kintest quick NCHO 0 misses (worst 0.004 dex on
+  paths), 1 passed in 99 s.
+- kintest takes --network; the truth sets per network are declared in bench/kintest_truth.py. The 2025 sulfur network runs
+  boxes_sncho25 (1,930 scored), boxes_sncho25p (350 scored) and qual_sncho25 (QC 128, QCs 32, QC twins 32, QL 16; no QH, QHs,
+  QLc), and scores 16 gases. A set declares the boxes whose VULCAN run ended before a stop (117 and 54; the manifests' errors,
+  all "stop ... s not hit"), by count and ids' digest; any other error, a wrong count or other ids refuse the set (checked by
+  hand on the three wrong declarations). The truth's condensates S8_l_s and H2O_l_s are 0 in every state and are dropped.
+  Panel P on the sulfur network gets H2S = 1.41e-5 H2.
+- Sulfur quick tier, reproducing the 2026-11-04 scores: boxes_sncho25 1 box with a miss, box 1939 at 4.341 dex in S2 (VULCAN's
+  error); boxes_sncho25p 1, box 96 at 0.155 dex in S2 (maxichem's at atol 1e-25); next worst boxes 0.030 / 0.021 dex; paths 0
+  misses over 245,328 stored states, worst 0.0068 dex; guard nothing recomputed; wall 112 s. The two misses are pinned with
+  their reasons; any other miss, or a pinned one gone or moved by more than 0.01 dex, fails the run.
+- Not covered by kintest: the day-night path sets (daynight_ncho, daynight_sncho25). Their J changes every call, and the
+  path calls here are dark; adding per-call J for 64 paths was left out. The one-off scoring of 2026-11-04 covered them.
+- The floored error, the scored gases and the miss thresholds (0.1 and 1 dex) are one copy in maxichem/_checks.py for the
+  bench and the tests. kintest quick on NCHO is bitwise the base commit's: 45 arrays, 1,007,852 numbers, all but timings.
+- New stored reference: data/benches/kintest/quick_sncho25_ref1.npz, the sulfur quick tier on the final code. Final checks:
+  test_vulcan_truth.py 2 passed in 207 s (both networks); test_export_cpp.py 12 passed in 384 s (the C++ call refuses with
+  Python's message and counts: sum 0.9, NaN sum, T 3000.5 K; accepts sums 1 +- 0.9e-10 and T 300 and 3000 K, bitwise).
+- Each new or changed test fails with its change reverted: without the raise, the 8 refusal cases of test_guard and
+  test_parity, test_ad's negative x on 3 networks and the 3 refused C++ cases; without the kernels' sum and T_MAX tests, the
+  bad-input and range cases (4) and the C++ sum and hot cases; with the tangent's normalization dropped, the scaling check on
+  every case; with a pin moved by 0.02 dex or a pin removed, the sulfur quick tier exits 1.
+- Open: the day-night sets in kintest; T_MAX is a constant, not each species' range (the files hold none).
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
