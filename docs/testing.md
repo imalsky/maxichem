@@ -26,7 +26,7 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_order.py` | Rodas3's order of accuracy, on a linear problem and on one where the constant-pressure term of the Jacobian is not zero | GPU |
 | `test_kernel_copies.py` | The call, recovery, tangent and adjoint kernels return the same x, h, done, steps, status and flag on edge inputs: a non-finite or too long starting step, dt = 0, refused cells beside good ones, a first try rejected twice running | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
-| `test_guard.py` | The guard and recovery; refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases | GPU, data |
+| `test_guard.py` | The guard and recovery; the guard alone on hand-made results whose element share moved by 0.5 to 2 times the drift allowance (flagged only above it); refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases | GPU, data |
 | `test_ad.py` | Derivatives against finite differences and against each other | GPU, data, slow |
 | `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses the inputs the Python call refuses, with the same message and counts; it refuses another export format | GPU, CUDA toolkit, slow |
 | `test_vulcan_truth.py` | `bench/kintest.py quick` against VULCAN-0D, on both default networks | GPU, data, slow |
