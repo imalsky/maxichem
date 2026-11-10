@@ -1547,6 +1547,27 @@ snapy's docs on tracers, and the papers below. One independent review of the sam
   the energy kept; the heat of reaction that passive scalars leave out near a higher lid; no code path yet for J.
 - Open, not run: a 70 s against 35 s step comparison with the corrected heating and the new gas; the reruns.
 
+### 2026-11-09 18:20 to 18:40: #334's CI; the implicit share of the vertical transport; atomic H at the lid; cv_R 2.62 (experiments/2026-11-09_science_pass)
+- snapy #334 at head 7c0f54f9: CI passed (pre-commit; ubuntu 162 of 162 tests; macOS 4 of 4). CI builds with CUDA off.
+- Implicit share (implicit_share.py; the box on main bd40fd25 + #334, implicit-scheme 9, the 1-day spun-up flow of the H2
+  deck, 100 steps of 70 s, no heating; vertical acoustic Courant number 2.9-3.9, |w| up to 110 m/s). Per x1 face, the mass
+  moved by the implicit correction that tracers ride on (hydro.icorr.mass_corr[IV2]) against the explicit flux's (dt F1
+  A1), sums of magnitudes over all interior faces: 1.6-2.1 % in stage 0, 0.4-0.5 % in stage 1, 1.1-1.4 % in stage 2
+  (top 20 layers 0.2-1.9 %), steady over the run. Divided by the RK weights (1, 1/4, 2/3) every stage gives about 2 %. So
+  on this flow the donor-cell path carries about 2 % of the vertical mass transfer; the uniform-ratio test above ran on
+  the same flow, so it went through that path. Not measured: the sphere with day-night forcing; the path's order.
+- Atomic H at the lid (x_h_lid.py; the lid runs' day-2 states on the H2 deck; x_H from hot_cells.json's steady-state
+  grid, an upper bound; cells below 1,400 K take the 1,400 K value). 160 layers, top layer (0.001-0.1 mbar): day side T
+  1,211-1,508 K, x_H median 0.10 %, largest 0.18 %; night side largest 2.6 % (1,676 K). Top 20 layers: largest 4.6 % (160
+  layers) and 4.1 % (140 layers, the 1,913 K cell); above 1 % in 0.30 % and 0.13 % of night-side cells, in no day-side
+  cell; no cell above 5 %. A constant cp and molar mass hold for this deck at day 2; to be repeated on the new gas at
+  the last day of each run.
+- cv_R (the author's decision: the most reasonable value; cv_r_pick.py): 2.62. The new start mixture (2.3611 g/mol) has
+  frozen cp 12,149 / 12,503 / 12,895 / 13,264 / 13,595 J/kg/K at 1,000 / 1,250 / 1,500 / 1,750 / 2,000 K (NASA-9); the
+  deck's R is 3,562.5 J/kg/K, so cp is matched at 1,500 K by cv_R 2.6195 (cp/R by 2.662). With 2.62 the deck's cp is
+  12,896 J/kg/K: 6.1 % too high at 1,000 K, 5.1 % too low at 2,000 K, and cp/R is 1.1 % low. The four drivers and
+  re_start.py (cp = 3.62 R) use it; the 2.65 of the entry above is superseded.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
