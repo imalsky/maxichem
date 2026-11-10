@@ -17,10 +17,12 @@ namespace maxichem {
 
 namespace {
 
-constexpr int kExportFormat = 6;              // EXPORT_FORMAT in maxichem/_constants.py: any other export is refused
-constexpr int kGuardBlockThreads = 128;       // any size works; this one packs cells densely
-constexpr size_t kCountSlotsAroundNames = 2;  // the two cell queues around the export's "counts" names
-constexpr char const* kPhotolysisArgument = "Jin";  // PHOTOLYSIS_ARGUMENT in maxichem/_constants.py
+// Copies of maxichem/_constants.py, held equal by tests/test_constants_source.py.
+constexpr int kExportFormat = 6;                    // EXPORT_FORMAT: any other export is refused
+constexpr int kGuardBlockThreads = 128;             // GUARD_BLOCK_THREADS: any size works; this one packs cells densely
+constexpr int kWarpLanes = 32;                      // WARP_LANES: threads per warp on every CUDA GPU
+constexpr char const* kPhotolysisArgument = "Jin";  // PHOTOLYSIS_ARGUMENT
+constexpr size_t kCountSlotsAroundNames = 2;        // the two cell queues around the export's "counts" names
 // The kernel parameters a call supplies besides the export's tables and J; operator() fills exactly these.
 constexpr std::array<char const*, 20> kCallArguments{"x0",    "Ta",   "Pa",        "dta",     "hin",    "hio",   "xout",
                                                      "doneo", "noko", "status",    "redo",    "list",   "count", "B",
@@ -232,7 +234,7 @@ Solver::Solver(std::string const& folder, torch::Device device) : device_(device
     call_ = f[0];
     guard_ = f[1];
     recover_ = f[2];
-    int threads = 32 * w_;
+    int threads = kWarpLanes * w_;
     max_blocks_ = sms * blocks_per_multiprocessor(f[0], threads * cpb_, smem_);
     rec_blocks_ = sms * blocks_per_multiprocessor(f[2], threads, smem_rec_);
     for (auto const& t : tables) tab_[t[1]] = read_table(folder, t).to(device);
@@ -337,13 +339,13 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
 
   values["max_steps"] = &max_steps;
   tensor("scratch", scratch_);
-  launch(call_, "call", std::max(1, std::min((B + cpb_ - 1) / cpb_, max_blocks_)), 32 * w_ * cpb_, smem_);
+  launch(call_, "call", std::max(1, std::min((B + cpb_ - 1) / cpb_, max_blocks_)), kWarpLanes * w_ * cpb_, smem_);
   launch(guard_, "guard", std::max(1, (B + kGuardBlockThreads - 1) / kGuardBlockThreads), kGuardBlockThreads, 0);
 
   int recsteps = rec_steps_ * max_steps;
   values["max_steps"] = &recsteps;
   tensor("scratch", scratch_rec_);
-  launch(recover_, "recover", std::max(1, std::min(B, rec_blocks_)), 32 * w_, smem_rec_);
+  launch(recover_, "recover", std::max(1, std::min(B, rec_blocks_)), kWarpLanes * w_, smem_rec_);
 
   total_ += count_;
   refuse(x, T, P, dt, J, status);

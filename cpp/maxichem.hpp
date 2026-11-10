@@ -32,7 +32,7 @@
 
 namespace maxichem {
 
-// DEFAULT_RTOL and DEFAULT_MAX_STEPS in maxichem/_constants.py; tests/test_export_cpp.py calls with them.
+// DEFAULT_RTOL and DEFAULT_MAX_STEPS in maxichem/_constants.py, held equal by tests/test_constants_source.py.
 inline constexpr double kDefaultRtol = 1e-3;
 inline constexpr int kDefaultMaxSteps = 4000;
 
