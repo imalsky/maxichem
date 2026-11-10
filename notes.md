@@ -305,6 +305,9 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   regularization ceiling, not a measured rate. In NCHO_photo over 300-3000 K, 1e-5-100 bar it acts on CH + M, C2H + M,
   NH + M, NCO + NH2 and CN + C2H6. The CH + M reverse is capped below 563 K at 1 bar (655 K at 100 bar), the C2H + M
   reverse below 895 K (1828 K) (experiments/2026-11-03_overnight).
+- Superseded 2026-11-10 (log entry of that date): the four codes no longer agree. VULCAN-JAX (since 1c6afe1) and maxichem
+  on branch collision-limit count M as a collision partner, so a dissociation A + M is capped; the truth generator, the
+  truth sets made with it and the stored parity references keep the rule above, in which a one-molecule side never counts.
 - The CH3OH falloff uses the broadening of Visscher & Moses 2011 (the "vm11" width), as VULCAN-JAX and the generator do.
 - Networks disagree by more than 0.1 dex (HCN up to 4 dex between two networks; 1.5-3x in HCN / NH3 inside one GCM), so
   broadened models need more than one network's truth (2026-10-31 survey, 2026-10-31_broaden).
@@ -1721,6 +1724,64 @@ Branch sweep-fixes (one commit per fix). Scratch data of the measurements are no
   regenerated): removed; J is appended only to the call and recovery kernels (PHOTOLYSIS_KERNEL_NAMES). pre-commit on all
   files passes, clang-tidy included; CPU 66 passed; parity and guard 43 passed; test_export_cpp 14 passed; valid outputs
   bitwise the base's (12,264,022 numbers, 0 differ).
+
+### 2026-11-10 00:22 to 02:41: the collision limit counts M as a collision partner; the old-rule truth gate fails (experiments/2026-11-10_collision_limit)
+Branch collision-limit from main 0c7f7df. Pins: NCHO_photo 74d4f5c0, SNCHO_photo_network_2025 4e8d537a, the NASA9 folder's
+sorted-file digest 13162af0 (120 files), libref8 9b27b5fd, libref9_SNCHO25 1dc74011, VULCAN-JAX 36419e5 (clean).
+- The rule (VULCAN-JAX 1c6afe1). A direction counts when its molecules m plus M (b = 1) make two collision partners,
+  q = k n_tot^(b + m - 2) with k without M; for a dissociation A + M, q = k. The kernels fold M into the stored
+  coefficient, so such a side compares k_stored / n_tot; the derivative layer's density weight is
+  wE = (wA - wG)(mf - 2) + wG (mr - 2), -1 for A + M. The reader now refuses a line whose M is not on both sides of a
+  three-body law or on neither side of a two-body one (also a reaction changed by hand); every VULCAN-JAX network file and
+  every invented one still loads (TiSNCHO is refused for TiH, as before).
+- RED scan: the kernels' own final rates (a probe kernel around rate_pair and collision_limit), 901 T (300-3000 K, 3 K
+  steps) x 65 log P (1e-5-100 bar), judged by the new eligibility. Old rule: NCHO_photo C6H5 (20,738.6x the ceiling at
+  3000 K, 1e-5 bar), C6H6 576.1, C3H4 280.1, C4H5 47.3, C2H5 9.9; the 2025 sulfur network adds S4 (S2 + S2 + M, 1,441.0x),
+  CH3CCH 131.6, CH3SH 19.6, S8 1.99. New rule: largest final q 1.0000000000000002 times the ceiling, no pair above. The
+  numpy port of the same arithmetic agrees with the kernel to 2.3e-13.
+- Against VULCAN-JAX's own rates (its environment, float64, CPU; remove_list empty, low-T caps off; 109 T x 29 P, 390 and
+  532 pairs, M divided out of maxichem's coefficients): old kernel, the differences are exactly the 5 and 8 dissociation
+  pairs above (up to 2.07e4 relative); every other pair within 3.48e-7. New kernel: every pair within 3.48e-7. The 3.48e-7
+  is k_B: VULCAN-JAX's phy_const uses 1.38064852e-16, maxichem 1.380649e-16 (ratio - 1 = 3.4766e-7); pairs with no change
+  of moles agree to 1.2e-13.
+- Tests (each shown to fail): tests/test_collision_limit.py runs the derivative kernels' rate arithmetic through
+  tests/rate_probe.cu on tests/data/synthetic_collision_network.txt at 3000 K: capped dissociations forward (H2 + M) and
+  reverse (O2 + M) at K_COLL n_tot, the capped associations at 10 bar, a tie, the pair ratio, a first-order line and a
+  photolysis branch at 1e9 s^-1 left alone, and the tangent and adjoint of every coefficient along T at fixed P (-1/T for a
+  capped A + M) and along ln P (1). Largest errors 7e-16 (rates), 2.6e-15 (derivatives). It fails on the old code
+  (H2 + M 7.5e7 against 2.4e6), with the old density weight (tangent 0 against -1/T; adjoint alone too) and with every
+  one-molecule side counted (the first-order line capped). The associations at 10 bar and the photolysis branch pass on the
+  old code; the tie checks the capped value, not the 1/2 split of the weights. The reader's 4 refusals and the hand-built
+  refusal fail on the old code. CPU 92 passed; slow CPU 4 passed.
+- Where the new cap binds in the truth sets (CPU port at each box's T, P): boxes_ncho 18,295 of 131,072 boxes (14.0 %),
+  1879-3000 K; boxes_sncho25 912 of 1,930 (47.3 %), 1022-2999 K; boxes_sncho25p 103 of 350. Not in the pinned boxes 1939
+  and 96. test_ad's random cases hold 128-139 such cells per case on NCHO_photo and CHO_photo, 482-483 on the 2025 network.
+- Direct comparison at constant T and P, 47 checkpoints from 1e-6 to 1e8 s, every species above 1e-12: VULCAN-JAX's
+  network-built chemistry right-hand side with its rates and imposed J, Radau at rtol 1e-10 (1e-8 agrees within 5e-5 dex)
+  and the exact JAX Jacobian. Six hot C-rich NCHO cells (2582-2989 K, 1e-5 bar, dark and lit, the boxes' stored starts and
+  two 1-s states with C6H5, C6H6, C4H5, C3H4, C2H5 raised 1000x): new maxichem at rtol 1e-7 agrees within 5e-6 dex, at the defaults within
+  0.024 dex (C3H2 at 1e-6 s; scored gases 0.0036); old maxichem is off by 0.98-4.53 dex in transients (C3H4, C6H5, C2H5),
+  scored gases 0.0048 dex at most, 0 at 1e8 s. Sulfur cells (1298-2981 K, 3e-5-5.2 bar; in two, S4, S8, CH3SH, C6H5, C6H6 raised 1000x): new
+  maxichem at rtol 1e-7 within 5e-6 dex, at the defaults within 0.015 dex (S8 at 1e-6 s); old maxichem within 5e-5 dex of
+  VULCAN-JAX except the hot dense cell (box 1130, 2981 K, 5.2 bar), 0.097 dex in C2H5. The lit 1299 K, 0.003 bar sulfur
+  cell did not finish in VULCAN-JAX's Radau within 83 min and is not compared.
+- Gate against the existing truth (old rule; kintest quick, saved runs of the old code compared): NCHO_photo 0 misses
+  (worst box error 0.049 dex, was 0.014), paths unchanged (largest change 5e-5 dex), but 13 of 32,768 boxes' worst errors
+  rose by more than 0.01 dex (2 by more than 0.03; largest +0.048, box 20725). The 2025 sulfur network: misses and pins
+  unchanged, paths within 1e-4 dex, 2 boxes rose by more than 0.01 (box 117 of boxes_sncho25p +0.0169, box 1493 +0.0145).
+  The gate fails.
+- Diagnosis: the intended chemistry, not an implementation error. All 15 moved boxes are at 2772-2987 K and 2e-5-0.017
+  bar, mostly C/O >= 1, the error in C2H2 (one in HCN) at stops of 1e-6 to 7e-4 s, where the new cap lowers a pair by
+  97-14,100x (C2H2 + C4H3 + M -> C6H5 + M, S2 + S2 + M -> S4 + M). VULCAN-JAX integrated on their starts with the old rule
+  agrees with the stored truth within 0.0004 dex in every box; with its current rule it differs from that truth by
+  0.0105-0.0487 dex, box by box what new maxichem shows. New maxichem against VULCAN-JAX's current rule on these boxes:
+  0.0008 dex at most; old maxichem against the truth: 0.001 dex.
+- Not done, since the gate stopped the plan: new parity references (the torch generator's change of its eligibility masks,
+  mf + tb >= 2, agrees with VULCAN-JAX within 3.48e-7 and is kept as a patch in the experiment folder, the generator left
+  as it was), the loaders' rate-rule check (patch kept there), test_ad, the export test, speed, the final tiers. Parity and
+  test_vulcan_truth would fail on this branch (inferred, not run): the stored references and truth carry the old rule.
+- The truth sets, the truth generator (vulcan-truth/science.py) and the parity references libref8 and libref9_SNCHO25
+  still carry the old rule. The new rule cannot be validated against them; it needs truth made with it.
 
 ## References (by topic)
 
