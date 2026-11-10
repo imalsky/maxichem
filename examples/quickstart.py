@@ -42,7 +42,7 @@ x0 = x.clone()
 for k in range(5):
     Tk = T * (1.0 + 0.02 * torch.sin(torch.arange(B, **f64) + k))
     x, h, done, steps = solver(x, Tk, P, full(50.0), h, J=J)
-counts = solver.check()  # raises if a cell was below 300 K
+counts = solver.check()  # raises if a cell was outside 300-3000 K
 atoms = torch.as_tensor(net.atoms, **f64)
 
 

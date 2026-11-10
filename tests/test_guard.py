@@ -114,23 +114,26 @@ def test_element_drift_is_recomputed(parity, verdict):
     )
 
 
-def test_cold_cell_is_refused(parity, verdict, monkeypatch):
+def test_temperature_out_of_range_is_refused(parity, verdict, monkeypatch):
     cells = 4096
     x0, T, P = parity.starts(cells, 2, 1.0)
-    t_cold = T.clone()
-    t_cold[0] = 250.0
-    args = (x0, t_cold, P, parity.full(cells, 500.0), parity.full(cells, 1e-10))
-    with pytest.raises(ValueError, match=r"1 cells below 300 K, .*\(first: cell 0, T = 250 K\)") as raised:
+    t_out = T.clone()
+    t_out[0], t_out[1] = 250.0, kincuda.T_MAX + 0.5  # refused
+    t_out[2], t_out[3] = kincuda.T_MIN, kincuda.T_MAX  # the range's ends: accepted
+    args = (x0, t_out, P, parity.full(cells, 500.0), parity.full(cells, 1e-10))
+    refused = r"1 cells below 300 K, .*\(first: cell 0, T = 250 K\).*; 1 cells above 3000 K, .*cell 1, T = 3000.5 K\)"
+    with pytest.raises(ValueError, match=refused) as raised:
         parity.solver(*args)
-    with pytest.raises(ValueError, match="below"):
+    with pytest.raises(ValueError, match="1 cells below 300 K and 1 above 3000 K"):
         parity.solver.check()
     with monkeypatch.context() as m:
         m.setattr(parity.solver, "_refuse", lambda *_: None)
         _, _, d, _ = parity.solver(*args)
+    counts = dict(parity.solver.fallback)
     verdict(
-        "guard: T < 300 K refused, and check() raises",
-        parity.solver.fallback["cold"] == 1 and not bool(d[0]),
-        f"cell 0 not stepped; ValueError: {raised.value}",
+        "guard: T < T_MIN and T > T_MAX refused, check() raises; T = T_MIN and T = T_MAX accepted",
+        counts["cold"] == 1 and counts["hot"] == 1 and not bool(d[:2].any()) and bool(d[2:4].all()),
+        f"counts {counts}; cells 0 and 1 not stepped, cells 2 and 3 done {d[2:4].tolist()}; ValueError: {raised.value}",
     )
 
 

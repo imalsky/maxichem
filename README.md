@@ -85,7 +85,7 @@ th = "/path/to/VULCAN-JAX/src/vulcan3/thermo"
 net = VulcanNetwork(f"{th}/NCHO_photo_network.txt", f"{th}/NASA9")  # 69 species, He last
 solver = CudaSolver(net, torch.device("cuda"), photo=True)
 x, h, done, steps = solver(x, T, P, dt, h, J=J)  # float64 CUDA tensors, one row per cell
-counts = solver.check()  # guard counts; raises if a cell was below 300 K
+counts = solver.check()  # guard counts; raises if a cell was outside 300-3000 K
 ```
 
 ## Using it in a GCM
@@ -110,7 +110,8 @@ counts = solver.check()  # guard counts; raises if a cell was below 300 K
   elements and mass: a call that passes the guard puts every element's share back to its input value (except shares
   near atol, and elements tied together), so rounding does not build up over a long run. Keep `h` per cell between
   calls and in restart files.
-- The call refuses a cell below 300 K, or with a non-finite x, T, P or dt, a negative mole fraction (clamp at 0 before
+- The call refuses a cell below 300 K or above 3000 K (the NASA-9 fits reach 6000 K, but accuracy against VULCAN is
+  checked only up to 3000 K), or with a non-finite x, T, P or dt, a negative mole fraction (clamp at 0 before
   the call), mole fractions that do not sum to 1 within `kincuda.X_SUM_TOL` = 1e-10 (normalize in float64 before the
   call), no mole fraction above 0, P <= 0, dt < 0, or a negative or non-finite J: the kernels do not step it, and the
   call raises ValueError (C++: `std::invalid_argument`) naming the counts and the first such cell. Reading the counts

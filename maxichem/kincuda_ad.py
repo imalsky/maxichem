@@ -331,7 +331,7 @@ class ADSolver(Solver):
         Raises
         ------
         ValueError
-            As ``CudaSolver.launch``, if a cell was bad input or below ``T_MIN``.
+            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``].
         """
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         tangents = {"dx": dx, "dT": dT, "dP": dP, "ddt": ddt, "dh": dh, "dlm": dlm, "drc": drc, "dJ": dJ}
@@ -423,7 +423,7 @@ class ADSolver(Solver):
         Raises
         ------
         ValueError
-            As ``CudaSolver.launch``, if a cell was bad input or below ``T_MIN``.
+            As ``CudaSolver.launch``, if a cell was bad input or outside [``T_MIN``, ``T_MAX``].
         """
         B, (x, T, P, dt, h), lm, rc, J = self._prep(x, T, P, dt, h, lm, rc, J, max_steps, rtol, atol)
         check_tensor("gx", gx, (B, self.ns), self.dev)

@@ -253,13 +253,13 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
 #if NJ
     screen_J(Jin, cell, lane, 32, p);
 #endif
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
-    if (fin && !cold) cell_rates(a.v, a.kf, a.kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, 0);
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), outside = outside_range(Tc);
+    if (fin && !outside) cell_rates(a.v, a.kf, a.kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, 0);
     CSYNC(0);
     const double h0 = isfinite(hin[cell]) ? hin[cell] : dt;  // a non-finite h acts as dt (the call kernel counted it)
     double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;
-    int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;
+    int it = (dt > 0.0 && fin && !outside) ? 0 : max_steps;
     while (it < max_steps && t < dt * CALL_END) {
       const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
       if (prej)

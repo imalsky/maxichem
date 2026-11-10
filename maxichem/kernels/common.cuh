@@ -211,6 +211,9 @@ __device__ __forceinline__ void screen_J(const double* __restrict__ Jin, int cel
   }
 }
 
+// Outside the solver's temperature range [TMIN, TMAX] (not stepped); a NaN T is not, it is bad input.
+__device__ __forceinline__ bool outside_range(double Tc) { return Tc < TMIN || Tc > TMAX; }
+
 // The bad-input test's forcing: T and nd finite, P > 0, dt finite and at least 0.
 __device__ __forceinline__ bool forcing_fine(double Tc, double nd, double dt) {
   return isfinite(Tc) && isfinite(nd) && nd > 0.0 && isfinite(dt) && dt >= 0.0;

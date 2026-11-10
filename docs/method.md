@@ -40,6 +40,13 @@ $$k_r = \frac{k_f}{K} \left(\frac{k_B T}{P_0}\right)^{\sum_i S_i}, \qquad K = e^
 
 The low-temperature NASA-9 range applies below `NASA_SPLIT_T`.
 
+## Temperature range
+
+The solver takes T from `T_MIN` = 300 K to `T_MAX` = 3000 K, both ends included. The NASA-9 fits themselves run to 6000 K
+(McBride et al. 2002), and VULCAN's files carry no range of their own, only coefficients. The solver refuses cells above
+3000 K because nothing above it is checked: its accuracy against VULCAN is checked only up to 3000 K, the edge of the truth
+sets, and every stored input of the checks lies within 300-3000 K.
+
 ### Collision limit
 
 A direction of two or three molecules may not exceed `K_COLL` as a bimolecular-equivalent rate,
@@ -105,8 +112,8 @@ Each cell's arithmetic depends only on its inputs, so results are bitwise reprod
 ### Refused cells
 
 Each kernel screens its cells before stepping them. Bad input (a negative or non-finite x, $|\sum_i x_i - 1| >$ `X_SUM_TOL`,
-no x above 0, a non-finite T, P <= 0, a negative or non-finite dt, a negative or non-finite J) and cells below `T_MIN` are not
-stepped; the guard counts them and does not list them for recovery. The kernels' state is N, molecules per starting molecule,
+no x above 0, a non-finite T, P <= 0, a negative or non-finite dt, a negative or non-finite J) and cells below `T_MIN` or above
+`T_MAX` are not stepped; the guard counts them and does not list them for recovery. The kernels' state is N, molecules per starting molecule,
 so a sum of 0.9 would raise every density by 11 %: the call refuses it instead of renormalizing. `X_SUM_TOL` is 1e-10: every
 stored input the checks feed sums to 1 within 1.3e-15, and the solver's outputs within rounding too. The guard sums x in another
 order than the call's warps, so a sum within rounding of the tolerance may be judged differently by the two: a cell the call

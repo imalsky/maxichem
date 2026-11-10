@@ -4,9 +4,9 @@
         [network file, e.g. SNCHO_photo_network_2025.txt] [edit: a key of EDITS]
 
 photo 0 exports the thermal network (no J); a small max_steps (e.g. 2) leaves most cells unfinished, so the guard
-flags them and the recovery kernel recomputes them, and the counts are compared too. An edit scales x of cells 5 and
-6 before the 50-s call; if the Python call refuses the input, <folder>/case/refused.txt holds its message and only the
-counts are written.
+flags them and the recovery kernel recomputes them, and the counts are compared too. An edit changes x or T of cells 5
+and 6 before the 50-s call; if the Python call refuses the input, <folder>/case/refused.txt holds its message and only
+the counts are written.
 
 <folder>/export: CudaSolver.export; <folder>/case: x, T, P, dt, h, J of a GCM-like call (cells over 800-2000 K and
 1e-4 to 10 bar, H2S = 1.41e-5 x H2 on a sulfur network, relaxed to equilibrium, then 50 s with J = 1e-4 s^-1 above
@@ -22,14 +22,17 @@ import torch
 
 from maxichem import CudaSolver, VulcanNetwork, paths
 from maxichem._checks import H2S_PER_H2_SOLAR, SOLAR_START
-from maxichem.kincuda import X_SUM_TOL
+from maxichem.kincuda import T_MAX, T_MIN, X_SUM_TOL
 
-# factors on x of cells 5 and 6: a sum of 0.9 and a NaN sum are refused, sums within the tolerance are accepted
+# factors on x and temperatures (K; None keeps it) of cells 5 and 6: a sum of 0.9, a NaN sum and a T above T_MAX are
+# refused; sums within the tolerance and T at either end of the range are accepted
 EDITS = {
-    "none": (1.0, 1.0),
-    "sum": (0.9, 1.0),
-    "nan": (float("nan"), 1.0),
-    "inside": (1.0 + 0.9 * X_SUM_TOL, 1.0 - 0.9 * X_SUM_TOL),
+    "none": ((1.0, 1.0), (None, None)),
+    "sum": ((0.9, 1.0), (None, None)),
+    "nan": ((float("nan"), 1.0), (None, None)),
+    "inside": ((1.0 + 0.9 * X_SUM_TOL, 1.0 - 0.9 * X_SUM_TOL), (None, None)),
+    "hot": ((1.0, 1.0), (T_MAX + 0.5, None)),
+    "bounds": ((1.0, 1.0), (T_MIN, T_MAX)),
 }
 
 
@@ -61,7 +64,12 @@ def main() -> None:
         J[P < 3e4] = 1e-4
     dt = torch.full_like(T, 50.0)
     x = x.clone()
-    x[5:7] *= torch.tensor(EDITS[edit], **f64)[:, None]
+    factors, temperatures = EDITS[edit]
+    x[5:7] *= torch.tensor(factors, **f64)[:, None]
+    T = T.clone()
+    for cell, value in zip((5, 6), temperatures, strict=True):
+        if value is not None:
+            T[cell] = value
     case = out / "case"
     case.mkdir(parents=True, exist_ok=True)
     for name, t in (("x", x), ("T", T), ("P", P), ("dt", dt), ("h", h), ("J", J)):

@@ -52,7 +52,9 @@ def test_cpp_call_is_the_python_call(export_program, tmp_path, network, photo, t
     assert ("(default arguments)" in result.stdout) == (tries == _constants.DEFAULT_MAX_STEPS)
 
 
-@pytest.mark.parametrize(("edit", "refused"), [("sum", True), ("nan", True), ("inside", False)])
+@pytest.mark.parametrize(
+    ("edit", "refused"), [("sum", True), ("nan", True), ("inside", False), ("hot", True), ("bounds", False)]
+)
 def test_cpp_refuses_what_python_refuses(export_program, tmp_path, edit, refused):
     paths.need(paths.vulcan_thermo())
     network = "NCHO_photo_network.txt"

@@ -41,7 +41,7 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 | `solver(x, T, P, dt, h, rtol, atol, max_steps, J)` | Returns (x, h, done, accepted steps); raises if it refused a cell |
 | `launch(...)` | The same, with a per-cell flag: 0 passed the guard, 1 recomputed and passes, 2 recomputed and still fails |
 | `fallback` | The last call's counts, as a dict |
-| `check()` | The counts since construction; raises if any cell was below `T_MIN` |
+| `check()` | The counts since construction; raises if any cell was below `T_MIN` or above `T_MAX` |
 | `export(folder)` | Writes what `cpp/maxichem.hpp` loads |
 | `count`, `total` | The counts on the device: the last call's (int32), and those since construction (int64) |
 | `info` | The kernel's layout |
@@ -51,7 +51,8 @@ J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `p
 without it.
 
 A cell is refused when it is bad input (a negative or non-finite mole fraction, |sum(x) - 1| above `X_SUM_TOL`, no mole fraction
-above 0, a non-finite T, P <= 0, a negative or non-finite dt, or a negative or non-finite J) or below `T_MIN`. The kernels do not step
+above 0, a non-finite T, P <= 0, a negative or non-finite dt, or a negative or non-finite J) or outside [`T_MIN`, `T_MAX`] (counted
+as cold or hot). The kernels do not step
 it and count it. After the kernels, `launch` and a call read the counts back, the call's one host sync, and raise ValueError naming
 the counts, the limits and the first refused cell with its values. The counts are added to `total` first, and `fallback` reads them
 after the raise. `ADSolver`'s calls refuse the same cells. Inputs of the wrong shape, dtype or device raise before any launch.
@@ -82,7 +83,7 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 
 ## Constants in `kincuda`
 
-`ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `X_SUM_TOL`, `COUNTS`.
+`ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `T_MAX`, `X_SUM_TOL`, `COUNTS`.
 
 ## C++: `maxichem::Solver(folder, device)`
 

@@ -11,6 +11,7 @@ from ._constants import (
     PHOTOLYSIS_ARGUMENT,
     REC_STEPS,
     SOLVER_KERNEL_NAMES,
+    T_MAX,
     T_MIN,
     X_SUM_TOL,
 )
@@ -52,6 +53,7 @@ def write_export(solver: "CudaSolver", folder: str | Path) -> None:
         f"rec_steps {REC_STEPS}",
         f"atol {ATOL!r}",
         f"t_min {T_MIN!r}",
+        f"t_max {T_MAX!r}",
         f"x_sum_tol {X_SUM_TOL!r}",
         f"counts {' '.join(COUNTS)}",
         f"species {' '.join(solver._names[0])}",

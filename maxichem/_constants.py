@@ -1,6 +1,9 @@
 """Settings shared by the solver modules, the kernels' header and the export."""
 
 T_MIN = 300.0  # K: the solver's domain starts here (colder cells are counted, not stepped, and the call raises)
+# K: the domain ends here, as hotter cells do. The NASA-9 fits run to 6000 K (McBride et al. 2002); accuracy against
+# VULCAN is checked only up to 3000 K, the edge of the truth sets
+T_MAX = 3000.0
 # |sum(x) - 1| above this is bad input. Measured |sum(x) - 1| at most 1.3e-15 over every stored input the checks feed
 # (truth starts, paths and their mixes, panel P, the yardstick, the derivative boxes) and 1.3e-15 over the
 # solver's own outputs (60-call chains, both default networks): far above rounding, far below the densities' effect on
@@ -16,6 +19,7 @@ K_COLL = 1e-9  # cm3 s^-1: no thermal rate may exceed this as a bimolecular-equi
 COUNTS = (
     "bad_input",
     "cold",
+    "hot",
     "nonfinite",
     "unfinished",
     "drift",
@@ -24,7 +28,7 @@ COUNTS = (
     "still_failed",
     "nonfinite_h",
 )
-EXPORT_FORMAT = 4  # raised by a change the export's reader depends on; cpp/maxichem.cpp refuses any other
+EXPORT_FORMAT = 5  # raised by a change the export's reader depends on; cpp/maxichem.cpp refuses any other
 # attempts stored per cell before the adjoint switches to segment checkpoints; a call may take max_steps up to
 # (2 CAP)^2 / REC_STEPS, 0.4 CAP^2, so this CAP's limit is DEFAULT_MAX_STEPS
 CAP = 100

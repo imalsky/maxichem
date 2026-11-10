@@ -15,6 +15,7 @@ from ._constants import (
     PHOTOLYSIS_ARGUMENT,
     REC_STEPS,
     SOLVER_KERNEL_NAMES,
+    T_MAX,
     T_MIN,
     X_SUM_TOL,
 )
@@ -178,24 +179,25 @@ class Solver:
     ) -> None:
         """Raise ValueError if the call just launched refused a cell (one small copy from the device, a host sync).
 
-        The kernels decide: a refused cell is counted as bad input or cold, and returns done 0 with flag 0. The host
-        only names the first such cell of each kind.
+        The kernels decide: a refused cell is counted as bad input, cold or hot, and returns done 0 with flag 0. The
+        host only names the first such cell of each kind.
         """
         n = self.fallback
-        if not (n["bad_input"] or n["cold"]):
+        if not (n["bad_input"] or n["cold"] or n["hot"]):
             return
         refused = torch.logical_not(done.bool()) & (flag == 0)
-        cold = refused & (T < T_MIN)
+        cold, hot = refused & (T < T_MIN), refused & (T > T_MAX)
         problems = []
-        if n["cold"]:
-            i = _first(cold)
-            where = "not identified" if i is None else f"cell {i}, T = {float(T[i]):g} K"
-            problems.append(
-                f"{n['cold']} cells below {T_MIN:g} K, outside the solver's domain (first: {where}); leave them out "
-                "of the call"
-            )
+        for kind, cells, side in (("cold", cold, f"below {T_MIN:g} K"), ("hot", hot, f"above {T_MAX:g} K")):
+            if n[kind]:
+                i = _first(cells)
+                where = "not identified" if i is None else f"cell {i}, T = {float(T[i]):g} K"
+                problems.append(
+                    f"{n[kind]} cells {side}, outside the solver's range {T_MIN:g}-{T_MAX:g} K (first: {where}); "
+                    "leave them out of the call"
+                )
         if n["bad_input"]:
-            i = _first(refused & torch.logical_not(cold))
+            i = _first(refused & torch.logical_not(cold | hot))
             where = "not identified"
             if i is not None:
                 where = (
@@ -211,8 +213,11 @@ class Solver:
         raise ValueError("the call refused cells: " + "; ".join(problems))
 
     def check(self) -> dict[str, int]:
-        """Return the counts since construction (one small copy); raise if any cell was below T_MIN."""
+        """Return the counts since construction (one small copy); raise if any cell was outside [T_MIN, T_MAX]."""
         n = dict(zip(COUNTS, self.total[1:-1].tolist(), strict=True))
-        if n["cold"]:
-            raise ValueError(f"{n['cold']} cells below {T_MIN:g} K: outside the chemistry solver's domain")
+        if n["cold"] or n["hot"]:
+            raise ValueError(
+                f"{n['cold']} cells below {T_MIN:g} K and {n['hot']} above {T_MAX:g} K: outside the chemistry "
+                "solver's range"
+            )
         return n

@@ -19,6 +19,7 @@ from ._constants import (
     PHOTOLYSIS_ARGUMENT,
     REC_STEPS,
     SOLVER_KERNEL_NAMES,
+    T_MAX,
     T_MIN,
     X_SUM_TOL,
 )
@@ -49,7 +50,7 @@ from ._tables import (
 )
 from .kinvulcan import VulcanNetwork
 
-__all__ = ["ATOL", "COUNTS", "DRIFT", "REC_STEPS", "T_MIN", "X_SUM_TOL", "CudaSolver"]
+__all__ = ["ATOL", "COUNTS", "DRIFT", "REC_STEPS", "T_MAX", "T_MIN", "X_SUM_TOL", "CudaSolver"]
 MAX_THREADS_PER_BLOCK = 1024  # CUDA's limit
 MAX_NAMED_BARRIERS = 15  # per block: the hardware's named barriers, one per cell (bar.sync in common.cuh)
 REGISTER_ALLOCATION_UNIT = 8  # registers per thread are allocated in this unit
@@ -185,7 +186,7 @@ class CudaSolver(Solver):
         max_steps: int = DEFAULT_MAX_STEPS,
         J: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
-        """Launch the call, the guard and the recovery; read the counts, and refuse bad input and cold cells.
+        """Launch the call, the guard and the recovery; read the counts; refuse bad input and T out of range.
 
         The one host sync is the read of the counts, so the call can raise when it refused a cell.
 
@@ -212,8 +213,8 @@ class CudaSolver(Solver):
         Raises
         ------
         ValueError
-            If a cell was bad input or below ``T_MIN`` (docs/api.md): the message gives the counts, the limits and the
-            first such cell. The counts stay readable in ``fallback``.
+            If a cell was bad input or outside [``T_MIN``, ``T_MAX``] (docs/api.md): the message gives the counts,
+            the limits and the first such cell. The counts stay readable in ``fallback``.
         """
         self._require_open()
         B = check_inputs(self.dev, self.ns, x, T, P, dt, h, rtol, atol, max_steps)

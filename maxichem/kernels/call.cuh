@@ -40,14 +40,14 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
 #if NJ
     screen_J(Jin, cell, lane, 32, p);
 #endif
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
-    if (fin && !cold) cell_rates(v, kf, kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, grp);
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), outside = outside_range(Tc);
+    if (fin && !outside) cell_rates(v, kf, kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, grp);
     CSYNC(grp);
     const double h0 = isfinite(hio[cell]) ? hio[cell] : dt;  // a non-finite h acts as dt, and is counted
     if (cl == 0 && !isfinite(hio[cell])) atomicAdd(count + COUNT_NONFINITE_H, 1);
     double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
-    bool prej = false;                                    // the last try was rejected (its err pen, its size pha)
-    int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;  // no step for non-finite inputs or cold gas
+    bool prej = false;                                       // the last try was rejected (its err pen, its size pha)
+    int it = (dt > 0.0 && fin && !outside) ? 0 : max_steps;  // no step for bad input or gas outside the range
     while (it < max_steps && t < dt * CALL_END) {
       const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
       if (prej) {

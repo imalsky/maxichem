@@ -246,8 +246,8 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
     screen_J(Jin, cell, lane, 32, p);
     const double* lmc = lm ? lm + (size_t)cell * NR : nullptr;
     screen_lm(lmc, lane, p);
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
-    if (fin && !cold) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), outside = outside_range(Tc);
+    if (fin && !outside) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
     const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it), and is counted
     if (!DN && !hfin && lane == 0) atomicAdd(count + COUNT_NONFINITE_H, 1);
     const double hi = hfin ? hin[cell] : dt, m = fmin(hi, dt);
@@ -255,7 +255,7 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
       const size_t qd = (size_t)d * B + cell;
       const double dTc = dTa[qd], ddt = adapt ? ddta[qd] : 0.0, dhi = adapt ? dhin[qd] : 0.0;
       dlnd[d] = dPa[qd] / Pc - dTc / Tc;
-      if (fin && !cold)
+      if (fin && !outside)
         rates_tan(work, dk + 2 * NR * d, Tc, nd, dTc, dlnd[d], lmc, dlm ? dlm + qd * NR : nullptr,
                   dJin ? dJin + qd * NJ : nullptr, rc, drc ? drc + (size_t)d * NR * 9 : nullptr, rf, nasa, kf, kr, cw,
                   tab, lane);
@@ -268,7 +268,7 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
     __syncwarp();
     double h = fmax(m, H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;
-    int it = (dt > 0.0 && fin && !cold) ? 0 : max_steps;
+    int it = (dt > 0.0 && fin && !outside) ? 0 : max_steps;
     while (it < max_steps && t < dt * CALL_END) {
       const double rem = dt - t, ha = fmin(h, rem);
       double c0 = 0.0, dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;

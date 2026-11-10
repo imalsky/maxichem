@@ -25,6 +25,7 @@ FD_P90 = 1e-4
 FD_P99 = 1e-2
 FD_MAX = 1.0  # the worst cell: a plateau can sit near a branch of the step count, so this limit is loose
 FD_CASE_COVERAGE = 0.8  # a case with enough judged cells, for J near 0
+FD_STEPS = (1e-4, 1e-5, 1e-6, 1e-7)  # the central differences' relative steps, largest first
 # <c, J v> against <J^T c, v>: both sides are this code, so only rounding separates them. Measured: p99 at most 1.5e-7,
 # worst 9.8e-5.
 DOT_P99 = 1e-6
@@ -214,7 +215,9 @@ class DerivativeChecks:
             dx = x * rn(*x.shape)
             dx = dx - x * dx.sum(1, keepdim=True)
         elif cls == "T":
-            dT = T * rn(B)
+            # the differences' largest step keeps T within [T_MIN, T_MAX]: the call refuses a cell outside it
+            room = torch.minimum(T - kincuda.T_MIN, kincuda.T_MAX - T) / FD_STEPS[0]
+            dT = torch.maximum(torch.minimum(T * rn(B), room), -room)
         elif cls == "P":
             dP = P * rn(B)
         elif cls == "lm":
@@ -230,7 +233,7 @@ class DerivativeChecks:
         adl = tx / x1
         big = x1 > 1e-20
         fds, ks = [], []
-        for e in (1e-4, 1e-5, 1e-6, 1e-7):
+        for e in FD_STEPS:
             out = []
             for sg in (1.0, -1.0):
                 lmp = None if lm is None and cls != "lm" else (lm if lm is not None else 0.0 * dlm) + sg * e * dlm

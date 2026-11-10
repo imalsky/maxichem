@@ -9,12 +9,12 @@
 // x [B, ns] mole fractions in the network's species order, T [B] K, P [B] dyn cm^-2, dt [B] s, h [B] the
 // starting step sizes (all float64 on the solver's device); J [B, nj] s^-1, required for a network exported with
 // photo=True (zeros for dark cells). Returns the new mole fractions, the next step sizes, done (bool) and the accepted
-// steps per cell (float64). `count` holds the call's counts on the device (int32: queue, then bad_input, cold,
+// steps per cell (float64). `count` holds the call's counts on the device (int32: queue, then bad_input, cold, hot,
 // nonfinite, unfinished, drift, recomputed, recovered, still_failed, nonfinite_h, then the recovery's queue) and
 // `total` their sum since construction (int64). The call reads the counts back (its one host sync) and throws
 // std::invalid_argument if it refused a cell: bad input (x negative or non-finite, |sum(x) - 1| above the export's
-// x_sum_tol, no x above 0, T non-finite, P <= 0, dt negative or non-finite, J negative or non-finite) or T below
-// t_min. The message names the counts, the limits and the first such cell; the counts stay readable.
+// x_sum_tol, no x above 0, T non-finite, P <= 0, dt negative or non-finite, J negative or non-finite) or T outside
+// [t_min, t_max]. The message names the counts, the limits and the first such cell; the counts stay readable.
 //
 // The cubin is for one GPU architecture (meta.txt "arch"): export on the machine that runs it.
 // Calls share the scratch and the counts, so they run one at a time: on one stream, or synchronize before
@@ -57,8 +57,8 @@ class Solver {
   torch::Device device_;
   int w_ = 0, cpb_ = 0, smem_ = 0, smem_rec_ = 0, sround_ = 0, jround_ = 0;
   int rec_steps_ = 0;
-  double t_min_ = 0.0, x_sum_tol_ = 0.0;        // K; the refusal's limits, from meta.txt
-  int64_t bad_input_slot_ = 0, cold_slot_ = 0;  // their counts' slots
+  double t_min_ = 0.0, t_max_ = 0.0, x_sum_tol_ = 0.0;         // the refusal's limits (T in K), from meta.txt
+  int64_t bad_input_slot_ = 0, cold_slot_ = 0, hot_slot_ = 0;  // their counts' slots
   int64_t stride_ = 0, stride_rec_ = 0;
   int max_blocks_ = 0, rec_blocks_ = 0;
   void* module_ = nullptr;  // CUmodule
@@ -68,7 +68,7 @@ class Solver {
   std::map<std::string, torch::Tensor> tab_;
   std::map<std::string, std::vector<std::string>> arguments_;  // each kernel's parameters, in order
   torch::Tensor scratch_, scratch_rec_;
-  // throws std::invalid_argument if the call just launched refused a cell (bad input or below t_min)
+  // throws std::invalid_argument if the call just launched refused a cell (bad input or T out of range)
   void refuse(torch::Tensor const& x, torch::Tensor const& T, torch::Tensor const& P, torch::Tensor const& dt,
               torch::Tensor const& J, torch::Tensor const& done, torch::Tensor const& redo) const;
 };

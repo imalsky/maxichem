@@ -44,7 +44,8 @@ multipliers are lm = 0.1 N(0, 1) per reaction unless named lm = 0.
   the errors below cannot judge such a cell, since its scale S is not finite. These cases run at the default max_steps, where any cell with
   flag 2 fails its case too.
 - **Tangents against central differences.** Per input class x, T, P, J, lm, rc, one random direction each; the x direction
-  keeps sum(x) = 1, since the call refuses a state off it. Per cell and step e in
+  keeps sum(x) = 1, since the call refuses a state off it, and the T direction is shortened where the largest step would leave
+  [T_MIN, T_MAX]. The part of the x tangent along x itself is checked apart: with the step sizes held it is 0 but for rounding. Per cell and step e in
   1e-4..1e-7: err_e = the largest difference over species (x > 1e-20) divided by S, the larger side's largest value. A plateau is where
   the steps agree: the same accepted-step count both sides, and two consecutive e within 1e-2 of S. The best err over the plateau counts.
 - **J in dark cells**, along dJ >= 0: 12 cases. Near 0, at the default atol: the tangent at J = 1e-8 dJ against central differences.

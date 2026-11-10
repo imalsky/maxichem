@@ -17,6 +17,7 @@ from ._constants import (
     NO_SLOT,
     RATE_LAW_FLAGS,
     RATE_LAW_SHIFTS,
+    T_MAX,
     T_MIN,
     X_SUM_TOL,
 )
@@ -137,6 +138,7 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         "NEL": tab["atoms"].shape[1],
         "ETOT": repr(float(tab["atoms"].sum())),
         "TMIN": repr(T_MIN),
+        "TMAX": repr(T_MAX),
         "XSUMTOL": repr(X_SUM_TOL),
         "DRIFT": repr(float(drift)),
         "KCOLL": repr(K_COLL),

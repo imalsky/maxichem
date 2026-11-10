@@ -580,8 +580,8 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     }
     screen_J(Jin, cell, lane, 32, p);
     screen_lm(lmc, lane, p);
-    const bool fin = cell_fine(p, pm, Tc, nd, dt), cold = Tc < TMIN;
-    if (fin && !cold) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
+    const bool fin = cell_fine(p, pm, Tc, nd, dt), outside = outside_range(Tc);
+    if (fin && !outside) rates(work, kf, kr, cw, Tc, nd, lmc, Jin + (size_t)cell * NJ, rc, rf, nasa, tab, lane);
     __syncwarp();
     const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it), and is counted
     if (!DN && !hfin && lane == 0) atomicAdd(count + COUNT_NONFINITE_H, 1);
@@ -589,7 +589,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     double h = h0, t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
     bool prej = false;
     int na = 0;
-    const bool run = dt > 0.0 && fin && !cold;
+    const bool run = dt > 0.0 && fin && !outside;
     double en_l = 0.0, c0_l = 0.0;  // the last attempt run (its stages are in place)
     // forward: the state before each of the first CP attempts (and whether it was accepted)
     while (run && na < max_steps && t < dt * CALL_END) {

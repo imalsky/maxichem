@@ -1,8 +1,9 @@
 // The guard: checks each cell after the call, and puts its element shares back.
 
-// What the guard's test found in a cell: a value for the first two, bits for the others, 0 when it passed.
+// What the guard's test found in a cell: a value for the first three, bits for the others, 0 when it passed.
 constexpr int GUARD_COLD = 1;
 constexpr int GUARD_BAD_INPUT = 2;
+constexpr int GUARD_HOT = 3;
 constexpr int GUARD_NONFINITE = 4;
 constexpr int GUARD_UNFINISHED = 8;
 constexpr int GUARD_DRIFT = 16;
@@ -54,8 +55,8 @@ __device__ __forceinline__ void element_multipliers(const double* q, const doubl
   }
 }
 
-// The guard's test of one cell (network species order): GUARD_COLD, GUARD_BAD_INPUT, else the bits GUARD_NONFINITE,
-// GUARD_UNFINISHED, GUARD_DRIFT (0: passed). A cell that passes has its element shares put back
+// The guard's test of one cell (network species order): GUARD_COLD, GUARD_HOT, GUARD_BAD_INPUT, else the bits
+// GUARD_NONFINITE, GUARD_UNFINISHED, GUARD_DRIFT (0: passed). A cell that passes has its element shares put back
 // (docs/method.md): x' = x (1 + sum_e lambda_e a_ie). Explicit fma: x depends on these sums, and every kernel that
 // calls this must get the same bits.
 __device__ int check_cell(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
@@ -83,6 +84,7 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
 #endif
   const double Tc = Ta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
   if (Tc < TMIN) return GUARD_COLD;
+  if (Tc > TMAX) return GUARD_HOT;
   // cell_fine's test; this thread sums x in the network's order, the call's warp in its own, so a sum within rounding
   // of XSUMTOL may be judged differently by the two
   if (!(fabs(p - 1.0) <= XSUMTOL && mx > 0.0 && forcing_fine(Tc, nd, dta[cell]))) return GUARD_BAD_INPUT;
@@ -116,9 +118,9 @@ __device__ int check_cell(const double* __restrict__ x0, const double* __restric
 }
 
 // Checks of each cell after the call (one thread per cell); counts in count[1] to count[COUNT_RECOMPUTED]: bad input, T
-// < TMIN, else: non-finite state, unfinished, element drift, recompute. A cell to recompute gets redo = 1 and is
-// appended to list (the first count[COUNT_RECOMPUTED] entries; their order is not deterministic, the cells' results do
-// not depend on it).
+// < TMIN, T > TMAX, else: non-finite state, unfinished, element drift, recompute. A cell to recompute gets redo = 1 and
+// is appended to list (the first count[COUNT_RECOMPUTED] entries; their order is not deterministic, the cells' results
+// do not depend on it).
 extern "C" __global__ void guard(const double* __restrict__ x0, const double* __restrict__ Ta,
                                  const double* __restrict__ Pa, const double* __restrict__ dta,
                                  double* __restrict__ xout, const int* __restrict__ doneo,
@@ -131,6 +133,8 @@ extern "C" __global__ void guard(const double* __restrict__ x0, const double* __
   int r = 0;
   if (c == GUARD_COLD)
     atomicAdd(count + COUNT_COLD, 1);
+  else if (c == GUARD_HOT)
+    atomicAdd(count + COUNT_HOT, 1);
   else if (c == GUARD_BAD_INPUT)
     atomicAdd(count + COUNT_BAD_INPUT, 1);
   else {
