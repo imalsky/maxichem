@@ -27,7 +27,7 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_guard.py` | The guard and recovery; refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases | GPU, data |
 | `test_ad.py` | Derivatives against finite differences and against each other | GPU, data, slow |
 | `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses the inputs the Python call refuses, with the same message and counts; it refuses another export format | GPU, CUDA toolkit, slow |
-| `test_vulcan_truth.py` | `bench/kintest.py quick` against VULCAN-0D | GPU, data, slow |
+| `test_vulcan_truth.py` | `bench/kintest.py quick` against VULCAN-0D, on both default networks | GPU, data, slow |
 
 `tests/data` holds invented networks with constant-Cp NASA-9 data, so a test can state its answer in closed form. Their `N_i`
 reactions have zero rates: they take a network past the 32 rows of the trailing block, so the sparse leading part runs too;
@@ -63,6 +63,22 @@ multipliers are lm = 0.1 N(0, 1) per reaction unless named lm = 0.
 The limits, and why each is what it is, are at the top of `test_ad.py`.
 
 ## `bench/kintest.py`
+
+`--network` picks one of the two default networks; `TRUTH` in `bench/kintest_truth.py` names each one's truth sets.
+
+| Network | Boxes | Paths |
+| --- | --- | --- |
+| `NCHO_photo_network.txt` | boxes_ncho | qual_ncho: QC, QCs, QC twins, QH, QHs, QH twins, QL, QLc |
+| `SNCHO_photo_network_2025.txt` | boxes_sncho25, boxes_sncho25p | qual_sncho25: QC, QCs, QC twins, QL |
+
+The sulfur sets score 16 gases: the 12 and H2S, SO2, COS, S2 at 1e-10 (`maxichem/_checks.py`). Their truth holds two condensates the
+reader skips, which must be 0 in every state. A box set's manifest lists as errors the boxes whose VULCAN run ended before a stop, at the
+truth generator's step cap: `TRUTH` declares their count and a digest of their ids (117 and 54), kintest prints them and scores the rest,
+and it refuses a set with any other error or other such boxes. Misses that are understood are pinned in `KNOWN_MISSES` by set and box,
+with the worst error and the reason: box 1939 of boxes_sncho25 (VULCAN's error) and box 96 of boxes_sncho25p (maxichem's at atol 1e-25).
+The run fails on any other miss and on a pinned one that is gone or moved by more than 0.01 dex. On the sulfur network panel P's gas
+gets H2S = 1.41e-5 H2. The day-night path sets (daynight_ncho, daynight_sncho25) are not run: their J changes every call, and the
+paths' calls here are dark.
 
 Every panel is a block of cells with its own forcing (T, P, dt per call), mixes (x <- (1 - f) x + f y before a call), kick-twin starts
 and VULCAN truth. One loop of ticks: a block's call j runs on tick j * stride, and all scheduled cells go to the solver in one call per

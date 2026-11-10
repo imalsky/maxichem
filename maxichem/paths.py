@@ -17,6 +17,7 @@ __all__ = [
     "libref_sulfur",
     "need",
     "qual",
+    "truth",
     "vulcan_thermo",
     "yard",
 ]
@@ -25,6 +26,11 @@ __all__ = [
 def data() -> Path:
     """Return the data root: CHEM_DATA, or data/ beside this package (empty counts as unset)."""
     return Path(os.environ.get("CHEM_DATA") or Path(__file__).resolve().parents[1] / "data")
+
+
+def truth(name: str) -> Path:
+    """Return a VULCAN truth set by name: boxes (Sobol design, shards) or paths (QC, QCs, QL, ...)."""
+    return data() / "truth_v2" / name
 
 
 def qual() -> Path:

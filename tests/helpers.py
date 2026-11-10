@@ -9,8 +9,6 @@ import torch
 
 from maxichem import _checks, kincuda, kinvulcan, paths
 
-SULFUR_GASES = ["H2S", "SO2", "COS", "S2"]  # also scored on a sulfur network
-SULFUR_FLOOR = 1e-10
 H2S_PER_H2_RECORDED = 2.7e-5  # the sulfur the stored references' recorded starts were made with; part of their digest
 
 REFERENCES = {"NCHO_photo_network.txt": paths.libref, "SNCHO_photo_network_2025.txt": paths.libref_sulfur}
@@ -66,8 +64,7 @@ class Network:
     def floored(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         """Return per cell the worst |log10 max(a, S) - log10 max(b, S)| over the scored gases."""
         floor = torch.log10(torch.tensor(self.floors, dtype=torch.float64, device=self.device))
-        la = torch.maximum(torch.log10(a.clamp(min=1e-300)), floor)
-        lb = torch.maximum(torch.log10(b.clamp(min=1e-300)), floor)
+        la, lb = (_checks.floored_log10(q, floor, torch) for q in (a, b))
         return (la - lb).abs().max(1).values.nan_to_num(nan=np.inf)
 
     def stored_call(self, stored: dict[str, Any]) -> dict[str, torch.Tensor]:
@@ -142,10 +139,7 @@ class Parity:
         self.yard, self.panel = paths.yard() / "design", paths.designs() / "decision/P"
         paths.need(self.yard, self.panel, reference)
         net = kinvulcan.VulcanNetwork(thermo / name, thermo / "NASA9")
-        gases, floors = list(_checks.GASES), list(_checks.FLOORS)
-        if "S" in net.elements:
-            gases += SULFUR_GASES
-            floors += [SULFUR_FLOOR] * len(SULFUR_GASES)
+        gases, floors = _checks.scored_gases(net.elements)
         species = list(net.species)
         check_reference(reference, species, gases)
         signature = libref.netsig(thermo / name, thermo / "NASA9", species)

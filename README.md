@@ -247,8 +247,9 @@ under `CHEM_DATA`:
     benches/designs/decision/P/        test panel P (paths, starts, forcing)
     truth_v2/boxes_ncho/               VULCAN-0D truth boxes (Sobol design, 131,072 boxes, 0 to 1e8 s)
     truth_v2/qual_ncho/                VULCAN-0D truth paths (GCM-like forcing with mixing)
+    truth_v2/boxes_sncho25/, boxes_sncho25p/, qual_sncho25/   the same for SNCHO_photo_network_2025
     truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz   input states of the derivative check
-    benches/kintest/                   saved quick runs of bench/kintest.py
+    benches/kintest/                   saved quick runs of bench/kintest.py (quick_ref6.npz NCHO, quick_sncho25_ref1.npz sulfur)
 
 Each check stops with a message that names the missing files. Each stored reference of the parity tests
 carries a digest of its inputs, and the check refuses inputs that differ. `bench/kintest.py` refuses a truth set that
