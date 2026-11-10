@@ -1409,18 +1409,27 @@ Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
   steps 1.60 vs 1.61 per call (max 39 in both); element change per cell at most 2.6e-15 and the radiation column check 4.1e-16
   in both. No timing (the GPU was shared with the twin).
 
-### 2026-11-09 16:01: the 1 K seed twins; the box and tracer order on snapy main bd40fd25; the deck's gas against the tracers' gas (experiments/2026-11-07_lid, 2026-11-09_main_check, 2026-11-09_passive_check)
+### 2026-11-09 16:01 to 16:32: the 1 K seed twins (at rest and on the day-1 flow); the box and tracer order on snapy main bd40fd25; the deck's gas against the tracers' gas (experiments/2026-11-07_lid, 2026-11-09_main_check, 2026-11-09_passive_check)
 - Seed twins (`seed.sh`, `seed_compare.py`, seed_compare.json; `lid_run.py` gained `--perturb-top` and `--perturb-uniform`):
   eq140 again with the starting pressure times (1 + 7.6e-4 s) in the top 10 layers only, about 1 K at 1,316 K; s = N(0, 1)
   (seedn140) or s = 1, a coherent warming (seedu140). Same build as the lid runs (coupling branch 5be2af0, fusion off), 2 days.
   Against eq140, rms at 0.1-1 bar: day 1 3.3e-4 K and 7.5e-4 m/s (noise), 3.5e-4 K and 8.3e-4 m/s (coherent); day 2 0.23 K and
   2.0 m/s (noise; largest cell 15.7 K), 0.06 K and 0.39 m/s (coherent; 4.2 K). Day 2 at 0.02-0.1 bar: 1.2 K / 9.8 m/s and
   0.32 K / 2.1 m/s; above 0.02 bar: 3.1 K / 20 m/s and 1.6 K / 8.1 m/s.
-- So a 1 K seed near the top stays far under the snapy group's 2 K line at day 2: by their rule the day-2 lid and sponge gaps
-  (5.6 K / 34 m/s, 6.8 K / 45 m/s) come from the setup, which points to 160 layers with the weakest sponge. Their call is
-  pending. Inferred, not tested: the seed is set at rest and has fallen to 3e-4 K at 0.1-1 bar by day 1, then grows 170-700 times
-  in day 2; the lid and sponge gaps were already 0.5-1.0 K at day 1. A one-time seed is a weak stand-in for a lid or a sponge,
-  which act the whole time; a seed added at day 1 would be a closer test (not run).
+- The seed set at rest has fallen to 3e-4 K at 0.1-1 bar by day 1, before there is a flow to grow it, so the snapy group asked
+  for the seed on the day-1 flow. Day-1 seed twins (`seed_day1.sh`; `lid_run.py --perturb-day 1`): right after the day-1 dump
+  (86,450 s) the running flow's pressure times (1 + 7.6e-4 s) in the top 10 layers, at fixed density and velocity (the energy
+  plus cv/R times the pressure change); as applied 0.98 K rms there (largest cell 4.7 K noise, 1.26 K coherent). Both runs'
+  day-1 dumps equal eq140's bit for bit. Against eq140 at day 2, rms at 0.1-1 bar: 0.17 K and 1.45 m/s (noise; largest cell
+  9.2 K, 142 m/s), 0.22 K and 1.79 m/s (coherent; 11.7 K, 170 m/s); at 0.02-0.1 bar 1.06 K / 7.8 m/s and 1.28 K / 9.0 m/s;
+  above 0.02 bar 6.1 K / 28 m/s and 6.7 K / 31 m/s; deeper than 1 bar 0.012 K / 0.02 m/s.
+- So a 1 K seed near the top, at rest or on the day-1 flow, stays about ten times under the snapy group's 2 K line at day 2.
+  By their rule (under 2 K: the gaps come from the setup; 3 K or more: weather) the day-2 lid and sponge gaps (5.6 K / 34 m/s,
+  6.8 K / 45 m/s) come from the setup, which points to 160 layers with the weakest sponge (600 km, tau 1e4 s). Their call is
+  pending, and the deck's gas (below) changes what a layer count means. Not tested: a larger seed, or a run past day 2.
+- #334: CI ran at 6b2ee96 (run 42665017751, attempt 3: pre-commit, ubuntu 161 of 161, macOS 4 of 4), against main 3c891cb and
+  with CUDA off, so it does not compile the patch. Four reviews approve at 6b2ee96. The branch is one behind main (#340); the
+  snapy group's author asked for no push and keeps the update and the merge.
 - snapy main is bd40fd25 (#336, #337, #338, #340 merged since 21a3e8a). Built: main merged with #334 (local head 7c0f54f of
   isaac/recon-many-variables in snapy-pr48, not pushed; `git diff bd40fd25 7c0f54f` equals `git diff 3c891cb 6b2ee96` byte for
   byte). C++ ctests there: 110 pass, 1 skipped (two GPUs), test_straka fails (no `ncrcat` here); the multi-process tests pass
@@ -1444,16 +1453,26 @@ Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
 - The deck's gas is not the tracers' gas (found in review, measured in `mu_scan.py`, `mu_run.py`, `deck_mu_probe.py`). Every
   deck so far has one dry species H2 (2.016 g/mol, cv = 2.5 R); the tracers start as H2 0.84, He 0.16 plus metals,
   2.3625 g/mol. So the flow's R / mu and scale height are 17.2 % too large for the gas the chemistry carries, and its cp is
-  about 12 % too large (14.43 against 12.90 kJ/kg/K at 1500 K with the NASA-9 heat capacities; a reviewer's number, not
-  recomputed here). The coupling itself is consistent (mass fractions per dry density, mass kept through the chemistry, T and P
-  from the flow). A deck entry `composition: {H: 1.68, He: 0.16}` is accepted and gives 2.334 g/mol.
+  11.9 % too large (14,435 against 12,903 J/kg/K at 1500 K with the NASA-9 heat capacities, `hot_cells.py`). The coupling
+  itself is consistent (mass fractions per dry density, mass kept through the chemistry, T and P from the flow). A deck entry
+  `composition: {H: 1.68, He: 0.16}` is accepted and gives 2.334 g/mol.
+- What this does to the lid work (estimate, not run): with the mixture the same column holds 1.17 times more scale heights. At
+  the same T(p), the lids of 100, 120, 140 and 160 layers (12.7, 1.8, 0.24 and 0.03 mbar on the H2 deck) would sit near 2.7,
+  0.28, 0.026 and 0.0025 mbar. So layer counts do not carry over to a corrected deck (about 120 layers there reach the H2
+  deck's 140-layer lid); the lid and sponge results hold as top pressures, to be confirmed by a run. Not decided: when to
+  change the decks.
 - How far the chemistry moves the molar mass, which a passive tracer cannot feed back: in the saved 10-day run (A, day 10,
   old heating) the tracers' molar mass is 2.3572 to 2.3648 g/mol, no cell more than 1 % from the median. At chemical steady
   state (dark, 1e10 s) it stays within 0.3 % up to 1500 K at every pressure and up to 2000 K at 0.1 bar and above; it falls
-  by 7 % at 2000 K and 1e-4 bar, 12 % at 2300 K and 1e-3 bar, 28 % at 2300 K and 1e-4 bar (H2 dissociation). The energy matters
-  earlier than the molar mass: 0.9 % of H2 dissociated at 2000 K and 0.01 bar raises the equilibrium cp by about 70 %
-  (a reviewer's estimate from the NASA-9 data, not recomputed here; Bell & Cowan 2018, ApJL 857, L20; Tan & Komacek 2019,
-  arXiv:1910.01622). The lid runs reach 1,900-2,400 K at and above 1 mbar, where this starts.
+  by 7 % at 2000 K and 1e-4 bar, 12 % at 2300 K and 1e-3 bar, 28 % at 2300 K and 1e-4 bar (H2 dissociation).
+- The energy matters earlier than the molar mass (`hot_cells.py`, hot_cells.json: the equilibrium cp, where the composition
+  follows T, over the frozen cp, from the NASA-9 enthalpies at steady state): 1.01 at 1500 K and 0.01 bar, 1.20 at 1800 K and
+  0.01 bar, 1.73 at 2000 K and 0.01 bar, 1.23 at 2000 K and 0.1 bar, 1.07 at 2000 K and 1 bar, 3.3 at 2000 K and 1 mbar
+  (Bell & Cowan 2018, ApJL 857, L20; Tan & Komacek 2019, arXiv:1910.01622). Equilibrium is the upper bound; slow kinetics at
+  low pressure give less. In the lid runs' day-2 states (flow only, H2 deck): eq140's hottest cell is 1,913 K at 0.38 mbar
+  (eq160: 1,819 K at 0.33 mbar); the ratio is above 1.1 in 0.34 % of the cells above 1 mbar and 0.20 % at 1-20 mbar (largest
+  3.3 and 1.9), in none below 20 mbar (largest 1.14 at 0.02-0.1 bar, 1.04 at 0.1-1 bar). So in this deck a passive
+  treatment leaves out little below 20 mbar; a hotter planet, or the top millibar here, needs the heat of reaction in the flow.
 - Review points on the box driver, not acted on: a cell that comes back unfinished is still written to the tracers (none
   occurred; the counts are logged); the photolysis table is a fixed 1-D profile times cos z; the 70 s first-order splitting
   has no convergence run with the corrected heating.
