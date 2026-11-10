@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from maxichem import paths
-from maxichem._checks import H2S_PER_H2_SOLAR, floored_log10
+from maxichem._checks import H2S_PER_H2_SOLAR, MISS, floored_log10
 
 HOLD = 1500.0  # s: one row of a held path
 BOX_KEYS = ("box", "X", "T", "P", "J", "lit", "kind")
@@ -46,18 +46,49 @@ TRUTH = {
         (),
     ),
 }
-# Misses against VULCAN that are understood, by box set and box: the worst error (dex) and why it is kept. kintest fails
-# on any other miss, and on a pinned one that is gone or whose worst error moved by more than its PINNED_CHANGE.
+# Misses against VULCAN that are understood, by box set and box: the gas, its floored error (dex) at each missed stored
+# state (by call: the state after that call) and why it is kept. kintest fails on any other missed point, in any gas of
+# any box, on a pinned point that is gone, and on one that moved by more than its PINNED_CHANGE.
 KNOWN_MISSES = {
-    ("boxes_sncho25", 1939): (
-        4.341,
-        "S2; VULCAN's error: a Radau reference is within 0.084 dex of maxichem (notes.md, 2026-11-04 15:47)",
+    ("boxes_sncho25", 1939): (  # the states after the calls ending at 7.0e5 s to 1e8 s
+        "S2",
+        {41: 1.647, 42: 2.394, 43: 2.853, 44: 3.249, 45: 3.622, 46: 3.985, 47: 4.341},
+        "VULCAN's error: a Radau reference is within 0.084 dex of maxichem (notes.md, 2026-11-04 15:47)",
     ),
-    ("boxes_sncho25p", 96): (
-        0.155,
-        "S2 at 386 K, 9e-5 bar, lit; maxichem's error at atol 1e-25, the default the owner keeps (0.003 dex at 1e-28)",
+    ("boxes_sncho25p", 96): (  # the state after the call ending at 1.9e7 s
+        "S2",
+        {45: 0.155},
+        "386 K, 9e-5 bar, lit; maxichem's error at atol 1e-25, the default the owner keeps (0.003 dex at 1e-28)",
     ),
 }
+
+
+PINNED_CHANGE = 0.01  # dex: the most a pinned point's floored error may move
+
+
+def pinned_misses(box_results, gas_names):
+    """Print the pinned misses, and return the failures among the boxes of a kintest run.
+
+    A failure is a box with a miss that is not pinned, or a pinned box whose missed points (gas and stored state)
+    differ from the pinned ones, or whose pinned points moved by more than PINNED_CHANGE. Every other point of a
+    pinned box meets the miss rule as in any other box.
+    """
+    sets, worst = [str(q) for q in box_results["b_sets"]], box_results["b_worst"]
+    keys = [(sets[f], int(b)) for f, b in zip(box_results["b_from"], box_results["b_box"], strict=True)]
+    failures = sum(1 for key, w in zip(keys, worst, strict=True) if w > MISS and key not in KNOWN_MISSES)
+    pin_keys = [(sets[f], int(b)) for f, b in zip(box_results["b_pin_from"], box_results["b_pin_box"], strict=True)]
+    for key, (gas, pins, reason) in KNOWN_MISSES.items():
+        if key[0] not in sets:
+            continue
+        error = box_results["b_pin_err"][pin_keys.index(key)] if key in pin_keys else np.zeros((0, len(gas_names)))
+        rows, columns = np.nonzero(error > MISS)  # row k is the state after call k + 1
+        missed = {(int(k) + 1, gas_names[g]): float(error[k, g]) for k, g in zip(rows, columns, strict=True)}
+        pinned = {(k, gas): value for k, value in pins.items()}
+        held = missed.keys() == pinned.keys() and all(abs(missed[q] - v) <= PINNED_CHANGE for q, v in pinned.items())
+        failures += 0 if held else 1
+        found = ", ".join(f"{g} call {k} {v:.3f}" for (k, g), v in sorted(missed.items())) or "none"
+        print(f"pinned misses {key}: {'held' if held else 'DIFFER'}; missed {found}; pinned {gas} {pins}; {reason}")
+    return failures
 
 
 def _no_result(folder, manifest, declared):

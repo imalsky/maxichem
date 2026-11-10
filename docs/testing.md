@@ -74,9 +74,10 @@ The limits, and why each is what it is, are at the top of `test_ad.py`.
 The sulfur sets score 16 gases: the 12 and H2S, SO2, COS, S2 at 1e-10 (`maxichem/_checks.py`). Their truth holds two condensates the
 reader skips, which must be 0 in every state. A box set's manifest lists as errors the boxes whose VULCAN run ended before a stop, at the
 truth generator's step cap: `TRUTH` declares their count and a digest of their ids (117 and 54), kintest prints them and scores the rest,
-and it refuses a set with any other error or other such boxes. Misses that are understood are pinned in `KNOWN_MISSES` by set and box,
-with the worst error and the reason: box 1939 of boxes_sncho25 (VULCAN's error) and box 96 of boxes_sncho25p (maxichem's at atol 1e-25).
-The run fails on any other miss and on a pinned one that is gone or moved by more than 0.01 dex. On the sulfur network panel P's gas
+and it refuses a set with any other error or other such boxes. Misses that are understood are pinned in `KNOWN_MISSES` point by point:
+set, box, gas, each missed stored state with its floored error, and the reason. Pinned are S2 in box 1939 of boxes_sncho25 (VULCAN's
+error) and S2 in box 96 of boxes_sncho25p (maxichem's at atol 1e-25). The run fails on any missed point that is not pinned, in any gas
+of any box, the pinned boxes included, on a pinned point that is gone, and on one that moved by more than 0.01 dex. On the sulfur network panel P's gas
 gets H2S = 1.41e-5 H2. The day-night path sets (daynight_ncho, daynight_sncho25) are not run: their J changes every call, and the
 paths' calls here are dark.
 

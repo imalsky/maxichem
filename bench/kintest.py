@@ -1,8 +1,8 @@
 """Fast test runner for the GPU chemistry solver against VULCAN truth, on a default network; misses first.
 
-The tiers and what they score are in docs/testing.md. Exit status 1 when a path or box has a miss that is not pinned in
-KNOWN_MISSES, a pinned miss is gone or moved by more than PINNED_CHANGE, a call is unfinished or leaves a non-finite or
-negative state, or a cell still fails after the recovery.
+The tiers and what they score are in docs/testing.md. Exit status 1 when a path or box has a missed point (gas and
+stored state) that is not pinned in KNOWN_MISSES, a pinned point is gone or moved by more than PINNED_CHANGE, a call is
+unfinished or leaves a non-finite or negative state, or a cell still fails after the recovery.
 
     python bench/kintest.py quick|full [--network NCHO_photo_network.txt] [--save out.npz] [--ref ref.npz]
 
@@ -31,13 +31,13 @@ from kintest_truth import (
     load_boxes,
     load_p,
     load_paths,
+    pinned_misses,
 )
 from run_record import run_record
 
 from maxichem import kincuda, kinvulcan, paths
 from maxichem._checks import LARGE_MISS, MISS, floored_log10, scored_gases
 
-PINNED_CHANGE = 0.01  # dex: the most a pinned miss's worst error may move
 DAY = 86400.0
 READ = 1000  # ticks between read-backs of the counters
 CHUNK = 65536  # most boxes per chunk
@@ -199,6 +199,10 @@ def boxes(solver, net, species, gases, cap, folder, declared):
     }
     results |= {"b_kworst": np.full(n_boxes, -1), "b_gworst": np.full(n_boxes, -1)}
     results["b_lx"] = np.zeros((n_boxes, len(gases.names)), np.float32)
+    # the pinned boxes' floored error at every scored point [box, call, gas], so their pins are checked point by point
+    pinned = np.flatnonzero(np.isin(box_set["box"], [b for s, b in KNOWN_MISSES if s == folder.name]))
+    results["b_pin_box"] = box_set["box"][pinned]
+    results["b_pin_err"] = np.zeros((len(pinned), calls, len(gases.names)))
     start = solver.total.clone()
     started = time.time()
 
@@ -220,6 +224,11 @@ def boxes(solver, net, species, gases, cap, folder, declared):
             stored = tensor(box_set["X"][chunk, k][:, truth_gases])
             truth = torch.where(torch.isfinite(stored), gases.floored_log(stored), torch.nan)
             tally.add(x, cells, truth, k, gases)
+            for j, row in enumerate(pinned):
+                if chunk.start <= row < chunk.stop:
+                    c = row - chunk.start
+                    error = (gases.floored_log(x[c : c + 1][:, gases.index]) - truth[c : c + 1]).abs()
+                    results["b_pin_err"][j, k - 1] = error.nan_to_num(nan=np.inf).cpu().numpy()[0]
         results["b_worst"][chunk], results["b_kworst"][chunk], results["b_gworst"][chunk] = tally.numpy()
         results["b_saved"][chunk], results["b_nmiss"][chunk], results["b_nlarge"][chunk] = tally.counts.cpu().numpy().T
         results["b_unfinished"][chunk], results["b_nonfinite"][chunk], results["b_steps"][chunk] = (
@@ -294,22 +303,10 @@ def all_boxes(solver, net, species, gases, cap, truth):
     joined["fallback_boxes"] = sum(p["fallback_boxes"] for p in parts)
     joined["b_sets"] = np.array(truth.boxes)
     joined["b_from"] = np.concatenate([np.full(len(p["b_box"]), i) for i, p in enumerate(parts)])
+    for k in ("b_pin_box", "b_pin_err"):
+        joined[k] = np.concatenate([p[k] for p in parts])
+    joined["b_pin_from"] = np.concatenate([np.full(len(p["b_pin_box"]), i) for i, p in enumerate(parts)])
     return joined
-
-
-def pinned_misses(box_results):
-    """Print the pinned misses; return the boxes with a miss not pinned, plus the pinned ones gone or moved."""
-    sets, worst = [str(q) for q in box_results["b_sets"]], box_results["b_worst"]
-    keys = [(sets[f], int(b)) for f, b in zip(box_results["b_from"], box_results["b_box"], strict=True)]
-    failures = sum(1 for key, w in zip(keys, worst, strict=True) if w > MISS and key not in KNOWN_MISSES)
-    for key, (pinned, reason) in KNOWN_MISSES.items():
-        if key[0] not in sets:
-            continue
-        now = worst[keys.index(key)] if key in keys else np.nan
-        held = bool(now > MISS and abs(now - pinned) <= PINNED_CHANGE)
-        failures += 0 if held else 1
-        print(f"pinned miss {key}: {now:.3f} dex (pinned {pinned:.3f}, {'held' if held else 'MOVED'}); {reason}")
-    return failures
 
 
 def make_blocks(tier, truth, species, gas_columns, log_floors):
@@ -774,7 +771,7 @@ def main():
     has_truth = results["truth_block"][results["block_of"]]
     fail = int(
         (np.where(has_truth, results["worst"], 0.0) > MISS).sum()
-        + pinned_misses(box_results)
+        + pinned_misses(box_results, gases.names)
         + results["unfinished"].sum()
         + results["nonfinite"].sum()
         + results["negative"].sum()
