@@ -86,7 +86,9 @@ is the call kernel's. They take networks up to 96 species (64 leading rows and t
 Some facts must stay equal in Python, the kernels and the C++ caller. Each is held once, and reaches the kernels through `network.h`.
 `_tables.py` holds the call and recovery scratch (`scratch_strides`); `_ad_tables.py` the derivative kernels' scratch
 (`scratch_sizes`) and the fields of the adjoint's stream words (`GATHER_FIELDS`); and `_constants.py` the rest, in sections:
-the call settings, the physical constants (`KB`, `P0`, `NASA_SPLIT_T`, `K_COLL`) and the layout, among it:
+the call settings, the method settings (step control, the recovery's pivoting, the guard's correction), the physical
+constants (`KB`, `P0`, `NASA_SPLIT_T`, `K_COLL`) and the layout. The kernels keep a `constexpr` of each method setting's
+name, set from the header's `NAME_VALUE` macro. Among the layout:
 
 - `WARP_LANES`, `DOUBLE_BYTES`: the units of the launch sizes and the shared memory.
 - `KIND_*`: VULCAN's numbers for a reaction's law, which the reader's dicts hold.
