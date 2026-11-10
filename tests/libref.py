@@ -3,7 +3,7 @@
 The call computed by batched fp64 Rodas3 in torch (rate coefficients, exact Jacobian, LU without row exchanges, the call
 kernel's step control), written once on exactly the checks' inputs. Every entry carries the sha256 of the inputs it was
 computed from (the network's reaction list and NASA-9 files, the inputs, max_steps); a check computes the same digest
-and refuses a mismatch.
+and refuses a mismatch. A file made with another rate rule than RATE_RULE is refused when it is opened.
 """
 
 import hashlib
@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from maxichem import paths
+from maxichem._checks import RATE_RULE  # the input digests cannot see a change of the kernels' rates
 
 _D: dict[Path, Any] = {}  # the open reference files: a cache
 
@@ -42,7 +43,14 @@ def load(path=None):
     path = Path(path or paths.libref())
     if path not in _D:
         paths.need(path)
-        _D[path] = np.load(path)
+        stored = np.load(path)
+        rule = str(stored["rate_rule"]) if "rate_rule" in stored.files else "none recorded"
+        if rule != RATE_RULE:
+            raise ValueError(
+                f"{path} was made with the rate rule '{rule}', not '{RATE_RULE}': make a new reference with "
+                "the torch generator (reference/make_libref.py) and point maxichem/paths.py at it"
+            )
+        _D[path] = stored
     return _D[path]
 
 

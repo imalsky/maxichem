@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from maxichem import paths
-from maxichem._checks import H2S_PER_H2_SOLAR, MISS, floored_log10
+from maxichem._checks import H2S_PER_H2_SOLAR, MISS, RATE_RULE, floored_log10
 
 HOLD = 1500.0  # s: one row of a held path
 BOX_KEYS = ("box", "X", "T", "P", "J", "lit", "kind")
@@ -118,7 +118,7 @@ def complete_box_set(folder, species, declared):
 
     columns: the network's species in the shards' species; the shards' other species must be 0 in every state.
     """
-    manifest = json.loads((folder / "manifest.json").read_text())
+    manifest = rate_rule_manifest(folder)
     shards = [folder / f for f in manifest.get("shards", [])]
     no_result = _no_result(folder, manifest, declared)
     bad = {k: len(manifest.get(k, [])) for k in ("bad_states", "drift_over_1e-6")}
@@ -155,7 +155,7 @@ def complete_box_set(folder, species, declared):
 
 def load_boxes(shards, cap):
     """Return the first cap boxes (None: all) of the shards, by field."""
-    box_set = {k: [] for k in BOX_KEYS}
+    box_set: dict[str, list[np.ndarray]] = {k: [] for k in BOX_KEYS}
     loaded = 0
     for f in shards:
         if cap is not None and loaded >= cap:
@@ -179,8 +179,21 @@ def network_columns(truth_species, species, where, *states):
     return [truth_species.index(q) for q in species]
 
 
+def rate_rule_manifest(folder):
+    """Return a truth set's manifest; refuse a set made with another rate rule than RATE_RULE, or with none recorded."""
+    manifest = json.loads((folder / "manifest.json").read_text())
+    rule = manifest.get("rate_rule", "none recorded")
+    if rule != RATE_RULE:
+        raise SystemExit(
+            f"{folder}: truth made with the rate rule '{rule}', not '{RATE_RULE}' (the collision limit, "
+            "docs/method.md); use a truth set made with it (maxichem/paths.py names the truth root)"
+        )
+    return manifest
+
+
 def check_jobs(qual):
-    """Refuse a truth set whose paths differ from its job list."""
+    """Refuse a truth set made with another rate rule, or whose paths differ from its job list."""
+    rate_rule_manifest(qual)
     jobs = json.loads((qual / "jobs.json").read_text())
     rel = [j["out"].split(f"/{qual.name}/", 1)[-1] for j in jobs]
     want = set(rel)

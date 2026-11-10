@@ -71,6 +71,11 @@ $\bar k\, n_\mathrm{tot}^{\,m - 2}$: $\bar k / n_\mathrm{tot}$ for A + M, $\bar 
 for three. The tables hold one flag b per reaction, from its law, so the reader requires M on both sides of a three-body
 line and on neither side of a two-body one.
 
+The checks' VULCAN truth (`data/truth_v3/`, made by the truth generator with this rule) and the stored parity references
+record the rule as `RATE_RULE` (`maxichem/_checks.py`), and the checks refuse a set or a reference without it or with
+another. `data/truth_v2/` holds the truth of the rule before, in which no direction of one molecule counted; it is kept
+only as a record.
+
 ## Integrator
 
 Rodas3 (Sandu et al. 1997): four stages, order 3, L-stable, stiffly accurate, $\gamma = 1/2$. The form is

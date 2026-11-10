@@ -17,7 +17,7 @@ are compiled for the network and run over many cells at once.
   collision partner (a dissociation A + M counts with its rate coefficient k). When the faster direction of a reaction
   is above it, both directions are scaled down by the same factor, so the equilibrium is kept. It acts where a fit is
   used far outside its range, for example the reverse of CH + M -> C + H + M below about 600 K. VULCAN-JAX uses the
-  same rule; the truth data were made with its earlier form, which left out dissociations (notes.md).
+  same rule, and so does the truth data (truth_v3).
 - **Photolysis.** Each photolysis branch is a first-order reaction with a rate J (s^-1) given per cell by the caller,
   for example from the GCM's radiative transfer. maxichem does not compute actinic fluxes. At night, J = 0.
 - **Integrator.** Rodas3 (order 3, L-stable) with the exact Jacobian and a sparse LU factorization. Adaptive steps
@@ -247,19 +247,21 @@ GPU tests and prints each case's numbers.
 The checks and benches read stored references and truth data that are not part of this repository. They are found
 under `CHEM_DATA`:
 
-    benches/kincuda/libref8.npz        outputs of the torch reference solver on the check's inputs (NCHO_photo)
-    benches/kincuda/libref9_SNCHO25.npz  the same for the sulfur network SNCHO_photo_network_2025
+    benches/kincuda/libref10.npz       outputs of the torch reference solver on the check's inputs (NCHO_photo)
+    benches/kincuda/libref10_SNCHO25.npz  the same for the sulfur network SNCHO_photo_network_2025
     benches/kincuda/jref_SNCHO25.npz   J of a 1-D WASP-39b model on that network (the derivative check's sulfur J)
     benches/yardstick/design/          recorded starts used as check inputs
     benches/designs/decision/P/        test panel P (paths, starts, forcing)
-    truth_v2/boxes_ncho/               VULCAN-0D truth boxes (Sobol design, 131,072 boxes, 0 to 1e8 s)
-    truth_v2/qual_ncho/                VULCAN-0D truth paths (GCM-like forcing with mixing)
-    truth_v2/boxes_sncho25/, boxes_sncho25p/, qual_sncho25/   the same for SNCHO_photo_network_2025
+    truth_v3/boxes_ncho/               VULCAN-0D truth boxes (Sobol design, 131,072 boxes, 0 to 1e8 s)
+    truth_v3/qual_ncho/                VULCAN-0D truth paths (GCM-like forcing with mixing)
+    truth_v3/boxes_sncho25/, boxes_sncho25p/, qual_sncho25/   the same for SNCHO_photo_network_2025
     truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz   input states of the derivative check
     benches/kintest/                   saved quick runs of bench/kintest.py (quick_ref6.npz NCHO, quick_sncho25_ref1.npz sulfur)
 
 Each check stops with a message that names the missing files. Each stored reference of the parity tests
-carries a digest of its inputs, and the check refuses inputs that differ. `bench/kintest.py` refuses a truth set that
+carries a digest of its inputs, and the check refuses inputs that differ. The truth sets and the references record
+the collision rule they were made with (`RATE_RULE`, docs/method.md), and the checks refuse any other; truth_v2/ holds
+the truth of the earlier rule, kept only as a record. `bench/kintest.py` refuses a truth set that
 is not complete (boxes not run, failed runs, bad states, or truth paths missing from its job list), and a paired run
 refuses a saved run made on other truth data (a digest of the scored truth).
 

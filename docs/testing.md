@@ -97,7 +97,9 @@ The limits, and why each is what it is, are at the top of `test_ad.py`.
 | `NCHO_photo_network.txt` | boxes_ncho | qual_ncho: QC, QCs, QC twins, QH, QHs, QH twins, QL, QLc |
 | `SNCHO_photo_network_2025.txt` | boxes_sncho25, boxes_sncho25p | qual_sncho25: QC, QCs, QC twins, QL |
 
-The sulfur sets score 16 gases: the 12 and H2S, SO2, COS, S2 at 1e-10 (`maxichem/_checks.py`). Their truth holds two condensates the
+The truth sets are those under `truth_v3/` (`maxichem/paths.py`); kintest refuses a set whose manifest does not record
+the rate rule `RATE_RULE` (`maxichem/_checks.py`, the collision limit that counts M), as `tests/libref.py` refuses such a
+parity reference. The sulfur sets score 16 gases: the 12 and H2S, SO2, COS, S2 at 1e-10 (`maxichem/_checks.py`). Their truth holds two condensates the
 reader skips, which must be 0 in every state. A box set's manifest lists as errors the boxes whose VULCAN run ended before a stop, at the
 truth generator's step cap: `TRUTH` declares their count and a digest of their ids (117 and 54), kintest prints them and scores the rest,
 and it refuses a set with any other error or other such boxes. Misses that are understood are pinned in `KNOWN_MISSES` point by point:

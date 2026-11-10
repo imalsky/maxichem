@@ -29,18 +29,22 @@ def data() -> Path:
 
 
 def truth(name: str) -> Path:
-    """Return a VULCAN truth set by name: boxes (Sobol design, shards) or paths (QC, QCs, QL, ...)."""
-    return data() / "truth_v2" / name
+    """Return a VULCAN truth set by name: boxes (Sobol design, shards) or paths (QC, QCs, QL, ...).
+
+    truth_v3 holds the truth made with the collision limit that counts M (_checks.RATE_RULE); truth_v2 holds the
+    truth of the rule before, kept only as a record.
+    """
+    return data() / "truth_v3" / name
 
 
 def qual() -> Path:
     """Return the VULCAN truth paths on NCHO_photo (QC, QCs, QL, ...)."""
-    return data() / "truth_v2/qual_ncho"
+    return truth("qual_ncho")
 
 
 def boxes() -> Path:
     """Return the VULCAN truth boxes on NCHO_photo (Sobol design, shards)."""
-    return data() / "truth_v2/boxes_ncho"
+    return truth("boxes_ncho")
 
 
 def designs() -> Path:
@@ -55,12 +59,12 @@ def yard() -> Path:
 
 def libref() -> Path:
     """Return the torch reference call's outputs on the checks' inputs, NCHO_photo."""
-    return data() / "benches/kincuda/libref8.npz"
+    return data() / "benches/kincuda/libref10.npz"
 
 
 def libref_sulfur() -> Path:
     """Return the torch reference call's outputs on the checks' inputs, SNCHO_photo_network_2025."""
-    return data() / "benches/kincuda/libref9_SNCHO25.npz"
+    return data() / "benches/kincuda/libref10_SNCHO25.npz"
 
 
 def jref_sulfur() -> Path:
