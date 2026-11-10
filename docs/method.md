@@ -1,8 +1,9 @@
 # Method
 
 maxichem solves a VULCAN reaction network as a 0-D kinetics problem, one independent cell at a time, in CUDA kernels. This
-page gives the equations and the production settings. The named constants are in `maxichem/_constants.py` and at the top of
-`maxichem/kernels/common.cuh`. [glossary.md](glossary.md) lists the short names.
+page gives the equations and names the production settings. Their values, units and reasons are in `maxichem/_constants.py`,
+which the kernels read through their generated header; the coefficients of Rodas3 and of the Troe factor stay beside their
+formulas in `maxichem/kernels/common.cuh`. [glossary.md](glossary.md) lists the short names.
 
 ## Reactor
 
@@ -47,9 +48,9 @@ The low-temperature NASA-9 range applies below `NASA_SPLIT_T`.
 
 ## Temperature range
 
-The solver takes T from `T_MIN` = 300 K to `T_MAX` = 3000 K, both ends included. The NASA-9 fits themselves run to 6000 K
+The solver takes T from `T_MIN` to `T_MAX`, both ends included. The NASA-9 fits themselves run to 6000 K
 (McBride et al. 2002), and VULCAN's files carry no range of their own, only coefficients. The solver refuses cells above
-3000 K because nothing above it is checked: its accuracy against VULCAN is checked only up to 3000 K, the edge of the truth
+`T_MAX` because nothing above it is checked: its accuracy against VULCAN is checked only up to 3000 K, the edge of the truth
 sets, and every stored input of the checks lies within 300-3000 K.
 
 ### Collision limit
@@ -79,17 +80,18 @@ Sherman-Morrison formula adds the rank-one term.
 
 ### Step control
 
-- The first try is $\max(\min(h, dt), h_\mathrm{min})$, with h the step size the cell carried from its last call. A
-  non-finite h acts as dt, and is counted. Each try is $\min(h, dt - t)$.
+- The first try is $\max(\min(h, dt), h_\mathrm{min})$, with $h_\mathrm{min}$ = `H_MIN` and h the step size the cell carried
+  from its last call. A non-finite h acts as dt, and is counted. Each try is $\min(h, dt - t)$.
 - With $q_i = K_{4,i} / (\mathrm{atol} + \mathrm{rtol}\max(|N_i|, |N'_i|))$, err is the RMS of q. While the call has no
   accepted step, err is $\max(\mathrm{RMS}, \max_i |q_i|)$: the first try uses a step size from the last call, and the gas may
   have changed abruptly, so one fast species' error must not hide in the mean.
 - A step is accepted when err is at most 1 and finite, and no species is below -atol. Accepted states are clamped at 0.
-- The next step is the try's size times $f = 0.9\,\mathrm{err}^{-1/3}$, within `[FACACC, FACMAX]` after an accepted step and
-  `[FACREJ, FACMAX]` after a rejected one, and at most `FAC_AFTER_REJECT` after a rejection. A non-finite err gives
+- The next step is the try's size times $f = s\,\mathrm{err}^{-1/3}$, with s = `STEP_SAFETY` and err at least `ERR_FLOOR`,
+  within `[FACACC, FACMAX]` after an accepted step and `[FACREJ, FACMAX]` after a rejected one, and at most `FAC_AFTER_REJECT` after a rejection. A non-finite err gives
   `FAC_NONFINITE`.
 - A rejection that follows a rejection fits err ~ h^p to the two tries, $p = \ln(\mathrm{err}_1 / \mathrm{err}_2) / \ln(h_1 / h_2)$,
-  and aims at err 0.5: $f = \max((0.5 / \mathrm{err})^{1 / \min(p, 3)}, \mathrm{SECMIN})$, or SECMIN when p is below
+  and aims at err $e_t$ = `SECANT_TARGET`: $f = \max((e_t / \mathrm{err})^{1 / \min(p, p_\mathrm{max})}, \mathrm{SECMIN})$,
+  with $p_\mathrm{max}$ = `SECANT_MAX_ORDER`, Rodas3's order (the plain law's cube root), or `SECMIN` when p is below
   `SECANT_MIN_ORDER`. After an abrupt change of the gas, the error of a long try falls far more slowly than h^3, so the plain
   shrink would take many tries.
 - A try after a rejection starts from the same state, so it reuses that try's f(N), Jacobian and w.
@@ -123,10 +125,10 @@ as the cell's status: 0, or why it is refused. Refused are bad input (a negative
 from their status, without screening them again, and does not list them for recovery; the recovery steps only listed cells.
 So the sum, which depends on the order it is added in, is judged once, in the screening kernel's order. The kernels' state is N,
 molecules per starting molecule, so a sum of 0.9 would raise every density by 11 %: the call refuses it instead of
-renormalizing. `X_SUM_TOL` is 1e-10: every stored input the checks feed sums to 1 within 1.3e-15, and the solver's outputs
-within rounding too. After the kernels, the call reads the counts back, its one host sync, and raises if it refused a cell,
-naming the first refused cell of each kind from the status. A non-finite log multiplier of the derivative kernels is not a
-refusal: the cell is not stepped and fails (flag 2).
+renormalizing. `X_SUM_TOL` sits far above rounding: every stored input the checks feed sums to 1 within 1.3e-15, and the
+solver's outputs within rounding too. After the kernels, the call reads the counts back, its one host sync, and raises if it
+refused a cell, naming the first refused cell of each kind from the status. A non-finite log multiplier of the derivative
+kernels is not a refusal: the cell is not stepped and fails (flag 2).
 
 ### Why the element test works
 
