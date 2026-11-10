@@ -2,7 +2,10 @@
 
 The kernels get the call and method settings and the physical constants through their generated header
 (_kernel_header.py), so each value is written once, here. The method is in docs/method.md; a published formula's
-coefficients stay beside the formula in kernels/, and the checks' acceptance bars are in _checks.py.
+coefficients stay beside the formula in kernels/, and the checks' acceptance bars are in _checks.py. This file holds
+the solver's settings; the coupling's few constants are named in its own modules (coupling/). Hardware limits and file
+formats stay beside the code that meets them (kincuda.py, kinvulcan.py), and cpp/ keeps copies of a few values here,
+held equal by tests/test_constants_source.py.
 """
 
 # Call settings: what a call accepts, and its defaults.
@@ -24,6 +27,13 @@ ATOL = 1e-25  # default absolute tolerance, in mole fraction (docs/method.md)
 # (2 CAP)^2 / REC_STEPS, 0.4 CAP^2, so this CAP's limit is DEFAULT_MAX_STEPS
 CAP = 100
 DMAX = 16  # tangent directions per jvp call
+
+# Input data the reader accepts.
+# Largest |G/RT, low range - G/RT, high range| at NASA_SPLIT_T. Sound fits meet: over the 11 networks the largest jump
+# is 1.6e-6 (TiC). TiH, at 0.143, is refused on purpose, and TiSNCHO with it: below 1000 K its fit has Cp / R from -36
+# to 819 (notes.md). A file with a wrong coefficient set reaches 17.6 (HNO3 with its below-200 K set read as the low
+# range).
+MAX_GIBBS_JUMP = 1.0e-5
 
 # Method settings: the step control, the recovery's pivoting and the guard's correction (docs/method.md). Unitless
 # unless stated; the kernels' constexprs of the same names take them from the header.
@@ -47,6 +57,13 @@ SECANT_TARGET = 0.5  # the err a secant shrink aims at
 PIVTAU = 0.1
 ELEMENT_PIVOT_MIN = 1e-10  # the guard leaves out an element whose pivot falls below this share
 GMAX = 1e-3  # the element-share correction changes a species by at most this, relative
+NTAIL = 32  # rows of the trailing block factored densely in registers, one lane each, so at most WARP_LANES
+# Warps per cell: WARPS_PER_CELL, or WARPS_PER_CELL_LARGE for a network whose per-cell arrays fit at most
+# LARGE_NETWORK_CELLS times in a block's shared memory. At 4 warps x 32 lanes and 160-190 registers per thread the
+# register file already caps such a block at 2-3 cells, so the extra lanes cost no cells
+WARPS_PER_CELL = 2
+WARPS_PER_CELL_LARGE = 4
+LARGE_NETWORK_CELLS = 3
 
 # Physical constants.
 KB = 1.380649e-16  # erg K^-1: Boltzmann's constant (exact in the SI since 2019)

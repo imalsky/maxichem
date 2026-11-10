@@ -11,15 +11,19 @@ from typing import Any
 
 import numpy as np
 
-from ._constants import KB, KIND_FALLOFF, KIND_LOW_PRESSURE, KIND_SPECIAL, KIND_TWO_BODY, NASA_SPLIT_T, P0
+from ._constants import (
+    KB,
+    KIND_FALLOFF,
+    KIND_LOW_PRESSURE,
+    KIND_SPECIAL,
+    KIND_TWO_BODY,
+    MAX_GIBBS_JUMP,
+    NASA_SPLIT_T,
+    P0,
+)
 
 __all__ = ["KB", "MAX_GIBBS_JUMP", "P0", "SPECIAL", "VulcanNetwork", "formula"]
 
-# Largest |G/RT, low range - G/RT, high range| at NASA_SPLIT_T. Sound fits meet: over the 11 networks the largest jump
-# is 1.6e-6 (TiC). TiH, at 0.143, is refused on purpose, and TiSNCHO with it: below 1000 K its fit has Cp / R from -36
-# to 819 (notes.md). A file with a wrong coefficient set reaches 17.6 (HNO3 with its below-200 K set read as the low
-# range).
-MAX_GIBBS_JUMP = 1.0e-5
 TROE_FIELDS = 4  # the a, T3, T1, T2 of a "Troe [...]" line
 NASA_FILE_SIZES = (20, 30, 40)  # numbers in a NASA-9 file: two to four ranges of 10 (those past the second are unused)
 

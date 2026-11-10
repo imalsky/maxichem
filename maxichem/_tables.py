@@ -10,27 +10,26 @@ from ._constants import (
     DOUBLE_BYTES,
     FALLOFF_KINDS,
     KIND_TWO_BODY,
+    LARGE_NETWORK_CELLS,
     NO_SLOT,
+    NTAIL,
     RATE_LAW_FLAGS,
     RATE_LAW_SHIFTS,
     RATE_ROW_COLUMNS,
     THREE_BODY_KINDS,
     WARP_LANES,
+    WARPS_PER_CELL,
+    WARPS_PER_CELL_LARGE,
 )
 from .kinvulcan import VulcanNetwork
 
 MAX_SPECIES = 254  # species slots are uint8, with one value left for the padding
-NTAIL = 32  # rows of the trailing block factored in registers (at most 32)
 _UINT8_MAX = int(np.iinfo(np.uint8).max)  # the largest extra-piece offset (xp) and pivot batch (blen): both uint8
 
 
 def warps_per_cell(fit: int) -> int:
-    """Return the warps per cell for a network whose per-cell arrays fit fit times in shared memory.
-
-    4 when fit <= 3 (at 4 warps x 32 lanes and 160-190 registers per thread the register file already caps a block at
-    2-3 cells, so the extra lanes cost no cells), else 2.
-    """
-    return 4 if fit <= 3 else 2
+    """Return the warps per cell for a network whose per-cell arrays fit fit times in shared memory (_constants.py)."""
+    return WARPS_PER_CELL_LARGE if fit <= LARGE_NETWORK_CELLS else WARPS_PER_CELL
 
 
 def _order(pattern: Iterable[tuple[int, int]], n: int) -> list[int]:
@@ -444,9 +443,9 @@ def tables(net: VulcanNetwork, warps: int, photo: bool = False) -> dict[str, Any
 
 def tables_for_device(net: VulcanNetwork, photo: bool, shared_memory: int) -> dict[str, Any]:
     """Build the tables with the warps per cell that fit a device with this shared memory per block (bytes)."""
-    tab = tables(net, 2, photo)
+    tab = tables(net, WARPS_PER_CELL, photo)
     warps = warps_per_cell(cells_per_block(tab, shared_memory))
-    if warps != 2:
+    if warps != WARPS_PER_CELL:
         tab = tables(net, warps, photo)
     if cells_per_block(tab, shared_memory) < 1:
         blob = pack_small_tables(tab)[0]

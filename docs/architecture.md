@@ -83,11 +83,15 @@ is the call kernel's. They take networks up to 96 species (64 leading rows and t
 
 ## Tables shared by Python and the kernels
 
-Some facts must stay equal in Python, the kernels and the C++ caller. Each is held once, and reaches the kernels through `network.h`.
+Some facts must stay equal in Python, the kernels and the C++ caller. Each is defined once in Python and reaches the
+kernels through `network.h`; the C++ caller keeps copies of a few (`kExportFormat`, `kGuardBlockThreads`, `kWarpLanes`,
+`kPhotolysisArgument`, `kDefaultRtol`, `kDefaultMaxSteps`), held equal by `tests/test_constants_source.py`. `_constants.py`
+holds the solver's settings; the coupling's few constants are named in its own modules (`coupling/`), and hardware
+limits and file formats beside the code that meets them (`kincuda.py`, `kinvulcan.py`).
 `_tables.py` holds the call and recovery scratch (`scratch_strides`); `_ad_tables.py` the derivative kernels' scratch
 (`scratch_sizes`) and the fields of the adjoint's stream words (`GATHER_FIELDS`); and `_constants.py` the rest, in sections:
-the call settings, the method settings (step control, the recovery's pivoting, the guard's correction), the physical
-constants (`KB`, `P0`, `NASA_SPLIT_T`, `K_COLL`) and the layout. The kernels keep a `constexpr` of each method setting's
+the call settings, the data the reader accepts (`MAX_GIBBS_JUMP`), the method settings (step control, the recovery's
+pivoting, the guard's correction, the dense trailing block `NTAIL`, the warps per cell), the physical constants (`KB`, `P0`, `NASA_SPLIT_T`, `K_COLL`) and the layout. The kernels keep a `constexpr` of each method setting's
 name, set from the header's `NAME_VALUE` macro. Among the layout:
 
 - `WARP_LANES`, `DOUBLE_BYTES`: the units of the launch sizes and the shared memory.
