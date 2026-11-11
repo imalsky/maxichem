@@ -2247,6 +2247,45 @@ per-cell setup for the tangent and adjoint kernels would take about 18 arguments
   cases. Checks after: CPU 115 passed, tests/test_size_limits.py 4 passed, pre-commit on the changed files passes. No
   GPU check was rerun, since no machine code changed.
 
+### 2026-11-11 10:36 to 14:55: interface fixes from a review of main; coupling/ moved into the package
+On main, from 10a3b08, then merged with origin/main 980a189 (the collision limit's rule; one doc conflict, both sides
+kept). No number moves and no reference was regenerated; no kernel file changed in this work (`git diff origin/main --
+maxichem/kernels` is empty after the merge).
+- Package. `coupling/` is `maxichem/coupling/` (`maxichem.coupling`), shipped in the wheel (the built wheel holds its six
+  files); `import maxichem` imports none of it and no torch. The 11 experiment drivers that imported `coupling.*` import
+  `maxichem.coupling.*` (28 import lines; nothing else changed in them). Two error messages name the new module path.
+- J, one rule in Python and C++, with the same messages. Without photolysis a call takes no J or an empty [B, 0] one and
+  refuses a J with columns; with photolysis J [B, nj] is required. Python had refused [B, 0], which the C++ call took. An
+  empty J reaches the kernels as no J.
+- C++ (breaking). The call returns `maxichem::CallResult {x, h, done, steps}`, not `std::array<torch::Tensor, 4>`:
+  structured bindings compile as before, indexing does not (`r[0]` becomes `r.x`). The C++ box driver of
+  experiments/2026-11-05_e2e (`prefix_drivers/box.cpp`) indexes the result and will need the names.
+- Python (breaking). `VjpResult.cotangents` is `kincuda_ad.Cotangents` (x, T, P, dt, h, lm, rc, J; J None without
+  photolysis), not a dict: `cotangents["x"]` becomes `cotangents.x`.
+- Refusal message. The kernel refuses a cell whose P / (k_B T) is not finite: P = inf or NaN, or a finite P whose density
+  overflows (1e300 dyn cm^-2 at any T of the range). The message (Python and C++), the coupling stop and the docs named only
+  P not above 0; they name all three. Which cells are refused is unchanged. The C++ message keeps its "maxichem: " prefix,
+  as every C++ message has; the test strips it.
+- Coupling. The gas constant is k_B N_A, 8.31446261815324 J/mol/K (it was 8.314462618, 1.8e-11 relative lower; no test or
+  stored reference read the digits). `mass_to_mole` and `mole_to_mass` refuse mixed precisions, as `element_moles` did. A
+  start column whose grid holds a tuple loads (its JSON record read the tuple back as a list, so it was always refused),
+  and a malformed record raises FlowFileError, not KeyError or TypeError. The stop's docstring says the cold, hot and
+  bad-input causes serve only a solver whose raise is replaced (there is no public switch); the branches stay.
+- Tests. The kernel-copies case of rejected tries is shown to take that branch (72 accepted steps, still unfinished at 75
+  tries; a case starting with a short step fails the assertion). An assertion that could not fail was dropped from the
+  interface test, and comments that told history say what is checked.
+- Shown to fail without the change: the J rule (Python; and the C++ thermal export's refusal message, 2 of 2), the named
+  C++ result (the new test does not compile on the old header), the cotangents type (import), the P message (2 of 2
+  networks), the gas constant and the precision refusal, the flow-file tuple and records (4 of 4).
+- Checks on the merged head 8386d2d: CPU 134 passed; slow CPU 4 passed; parity and guard 50 passed in 254 s (worst
+  7.7e-8 dex); test_vulcan_truth 2 passed in 211 s (NCHO boxes 0 misses, worst 0.014 dex; paths 0 misses, worst 0.004
+  dex; sulfur: the two pinned misses held, paths worst 0.007 dex); test_export_cpp 19 passed in 552 s, bitwise on every
+  case; test_ad 81 passed in 1022 s, 0 FAIL. The known-answer tier (collision limit, known answers, rate laws, order,
+  kernel copies, dense LU) failed 1 of 26: `test_known_answers.py` still read the cotangents as a dict; fixed after, and
+  the tier rerun on the fixed head (below).
+- Not done: `signed_mole_fractions` still takes mixed precisions; `jvp`'s `dJ` refuses any tangent without photolysis,
+  also an empty one.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
