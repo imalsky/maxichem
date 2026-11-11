@@ -86,7 +86,7 @@ is the call kernel's. They take networks up to 96 species (64 leading rows and t
 Some facts must stay equal in Python, the kernels and the C++ caller. Each is defined once in Python and reaches the
 kernels through `network.h`; the C++ caller keeps copies of a few (`kExportFormat`, `kGuardBlockThreads`, `kWarpLanes`,
 `kPhotolysisArgument`, `kDefaultRtol`, `kDefaultMaxSteps`), held equal by `tests/test_constants_source.py`. `_constants.py`
-holds the solver's settings; the coupling's few constants are named in its own modules (`coupling/`), and hardware
+holds the solver's settings; the coupling's few constants are named in its own modules (`maxichem/coupling/`), and hardware
 limits and file formats beside the code that meets them (`kincuda.py`, `kinvulcan.py`).
 The kernels' memory has one owner: each region (the call's shared memory per cell and its rates region, the
 recovery's, the scratch slots and the copy kept for a retry, a cell's rates, the tangents' directions, the adjoint's
