@@ -46,12 +46,11 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
     CSYNC(grp);
     const double h0 = isfinite(hio[cell]) ? hio[cell] : dt;  // a non-finite h acts as dt, and is counted
     if (cl == 0 && !isfinite(hio[cell])) atomicAdd(count + COUNT_NONFINITE_H, 1);
-    double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
-    bool prej = false;                               // the last try was rejected (its err pen, its size pha)
+    StepState step = {fmax(fmin(h0, dt), H_MIN), 0.0, 0.0, 0.0, 0.0, false};
     int it = (dt > 0.0 && st == 0) ? 0 : max_steps;  // no step for a refused cell
-    while (it < max_steps && t < dt * CALL_END) {
-      const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
-      if (prej) {
+    while (it < max_steps && step.t < dt * CALL_END) {
+      const double ha = fmin(step.h, dt - step.t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
+      if (step.prej) {
         // the rejected try's state: its F, u and -Jn, all slots, since v and the S v pieces overwrote the trailing
         // block's
         for (int i = cl; i < NS; i += NL) {
@@ -159,26 +158,18 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
       }
       // step control (docs/method.md); every warp of the cell reaches the same decision
       bool ok = false;
-      const double en = try_error(N, K1, K3, K4, Y, w0, t == 0.0, rtol, atol, lane, ok);
+      const double en = try_error(N, K1, K3, K4, Y, w0, step.t == 0.0, rtol, atol, lane, ok);
       CSYNC(grp);
-      // accept_try and next_try written out: with them the call's compiled code changes in every variant
-      if (ok) {
-        for (int i = cl; i < NS; i += NL) N[i] = fmax(Y[i], 0.0);
-        t += ha;
-        nok += 1.0;
-      }
+      accept_try(step, N, Y, ok, ha, cl, NL);
       CSYNC(grp);
-      h = ha * step_factor(en, ok, prej, pen, pha, ha);
-      prej = !ok;
-      pen = en;
-      pha = ha;
+      next_try(step, step_factor(en, ok, step.prej, step.pen, step.pha, ha), ok, en, ha);
       it++;
     }
     write_state(N, xout + (size_t)cell * NS, perm, lane, cl, NL);
     if (cl == 0) {
-      hio[cell] = h;
-      doneo[cell] = (st == 0 && t >= dt * CALL_END) ? 1 : 0;  // a refused cell is not done, also at dt = 0
-      noko[cell] = nok;
+      hio[cell] = step.h;
+      doneo[cell] = (st == 0 && step.t >= dt * CALL_END) ? 1 : 0;  // a refused cell is not done, also at dt = 0
+      noko[cell] = step.nok;
     }
     if (cl == 0) *nextc = (int)(gridDim.x * CPB + atomicAdd(count + COUNT_QUEUE, 1));
     CSYNC(grp);
