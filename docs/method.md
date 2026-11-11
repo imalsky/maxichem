@@ -55,10 +55,27 @@ sets, and every stored input of the checks lies within 300-3000 K.
 
 ### Collision limit
 
-A direction of two or three molecules may not exceed `K_COLL` as a bimolecular-equivalent rate,
-$k\,n_\mathrm{tot}^{m - 2}$. Where one does, both directions of the reaction are scaled by `K_COLL / q`, with q the larger
-direction's rate. Their ratio, and so the equilibrium, is kept. The limit bounds rate fits used far from their range, such
-as the reverses of CH + M -> C + H + M and C2H + M -> C2 + H + M at low T.
+No thermal direction may exceed `K_COLL` as a bimolecular-equivalent rate, the rule of VULCAN-JAX
+(`rates_jax.apply_collision_limit`). For a direction with m molecules (M excluded) and three-body flag b (1 with M),
+with k its coefficient without the factor of M,
+
+$$q = k\, n_\mathrm{tot}^{\,b + m - 2}, \qquad m + b \ge 2.$$
+
+M counts as a collision partner: for a dissociation A + M, q = k, since in the low-pressure limit at most every collision
+with the bath gas activates. A direction of one molecule without M, and a photolysis branch, do not count. Where the
+larger q of a reaction exceeds `K_COLL`, both directions are scaled by `K_COLL / q`. Their ratio, and so the equilibrium,
+is kept. The limit bounds rate fits used far from their range, such as the reverses of CH + M -> C + H + M and
+C2H + M -> C2 + H + M at low T and the dissociations of C6H5, C6H6 and S4 near 3000 K at low pressure.
+
+The kernels store each coefficient with M folded in, $\bar k = k\, n_\mathrm{tot}^{\,b}$, so they compare
+$\bar k\, n_\mathrm{tot}^{\,m - 2}$: $\bar k / n_\mathrm{tot}$ for A + M, $\bar k$ for two molecules, $\bar k\, n_\mathrm{tot}$
+for three. The tables hold one flag b per reaction, from its law, so the reader requires M on both sides of a three-body
+line and on neither side of a two-body one.
+
+The checks' VULCAN truth (`data/truth_v3/`, made by the truth generator with this rule) and the stored parity references
+record the rule as `RATE_RULE` (`maxichem/_constants.py`), and the checks refuse a set or a reference without it or with
+another. `data/truth_v2/` holds the truth of the rule before, in which no direction of one molecule counted; it is kept
+only as a record.
 
 ## Integrator
 
@@ -166,7 +183,9 @@ itself, so they hold at J = 0. The Troe parameters and efficiencies are not diff
 The rate derivatives include the Troe factor and the collision limit. With A = ln of a pair's forward coefficient before the
 limit and G = ln k_r - A, the limit c adds $d \ln c = -(w_A dA + w_G dG + w_E d\ln n_\mathrm{tot})$ to both directions.
 $w_A$ is 1 above the limit and 1/2 at it; $w_G$ is $w_A$ times the reverse direction's share of the larger direction, 1/2 at a
-tie.
+tie. $w_E = (w_A - w_G)(m_f - 2) + w_G (m_r - 2)$, the power of $n_\mathrm{tot}$ in each side's $\bar k\, n_\mathrm{tot}^{\,m - 2}$:
+-1 for a dissociation A + M, whose capped coefficient $K_\mathrm{COLL}\, n_\mathrm{tot}$ then has $d \ln \bar k / d \ln P = 1$
+and $d \ln \bar k / dT = -1/T$ at fixed P.
 
 Two contracts, both on the branch the call takes (accept or reject, clamped species, step-control limits):
 

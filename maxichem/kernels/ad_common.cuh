@@ -114,21 +114,22 @@ __device__ __forceinline__ void stoichiometry_times_two(const double* w1, const 
 
 // The collision limit's derivative weights of a reaction from its pair before the limit (collision_limit's q): wA = 1
 // if q > K_COLL, 1/2 at q = K_COLL (the tie of the min), else 0; wG = wA v, v = the reverse direction's share of the
-// larger (1/2 at a tie; a direction of fewer than two molecules does not count).
+// larger (1/2 at a tie; a direction of one molecule without M does not count).
 __device__ __forceinline__ void collision_limit_weights(int fl, double kf, double kr, double nd, double& wA,
                                                         double& wG) {
   const int mf = (fl >> FL_FORWARD_SHIFT) & 3, mr = (fl >> FL_REVERSE_SHIFT) & 3;
-  const double qf = bimolecular_rate(mf, kf, nd), qr = bimolecular_rate(mr, kr, nd);
+  const bool three_body = (fl & FL_THREE_BODY) != 0;
+  const double qf = bimolecular_rate(mf, three_body, kf, nd), qr = bimolecular_rate(mr, three_body, kr, nd);
   const double q = fmax(qf, qr), weight = q > KCOLL ? 1.0 : (q == KCOLL ? 0.5 : 0.0);
   wA = weight;
   wG = weight * (qr > qf ? 1.0 : (qr < qf ? 0.0 : 0.5));
 }
 
-// The collision limit's weight on ln nd (rates_tan's wE): wA - wG for a forward side of 3 molecules, wG for a reverse
-// one.
+// The collision limit's weight on ln nd (rates_tan's wE): each side's power of nd in its bimolecular-equivalent rate,
+// molecules - 2 (-1 for a dissociation A + M), times wA - wG forward and wG reverse. A side that does not count has
+// q = 0, so its weight is 0 whenever the limit acts.
 __device__ __forceinline__ double collision_limit_nd_weight(int fl, double wA, double wG) {
-  return (wA - wG) * (((fl >> FL_FORWARD_SHIFT) & 3) == 3 ? 1.0 : 0.0) +
-         wG * (((fl >> FL_REVERSE_SHIFT) & 3) == 3 ? 1.0 : 0.0);
+  return (wA - wG) * (double)(((fl >> FL_FORWARD_SHIFT) & 3) - 2) + wG * (double)(((fl >> FL_REVERSE_SHIFT) & 3) - 2);
 }
 
 // Rate coefficients of the cell (the call kernel's code: the law, the reverse from Gibbs, the collision limit;
@@ -231,7 +232,7 @@ __device__ __forceinline__ void gibbs_dT(double* g, double Tc, const double* __r
 // tangents of T (dTc), ln nd (dlnd), the log multipliers (dlmc, may be null), J (dJc, may be null) and the Arrhenius
 // table (drc [R, 9], may be null); kf, kr, cw: the cell's rates and collision-limit weights (rates()). With A = ln of
 // the pair's forward coefficient before the limit, G = ln kr - A, L = ln nd, the limit adds
-// d ln c = -(wA dA + wG dG + wE dL) to both directions (wE = (wA - wG) [forward of 3 molecules] + wG [reverse of 3]).
+// d ln c = -(wA dA + wG dG + wE dL) to both directions (wE = (wA - wG)(mf - 2) + wG (mr - 2), m a side's molecules).
 // size-limit-ok: a tangent per rate-law input beside rates()'s; its one group, the rate tables, would save 2 of 18
 __device__ __forceinline__ void rates_tan(double* work, double* dk, double Tc, double nd, double dTc, double dlnd,
                                           const double* lmc, const double* dlmc, const double* dJc,

@@ -9,6 +9,7 @@ import numpy as np
 
 from maxichem import paths
 from maxichem._checks import H2S_PER_H2_SOLAR, MISS, floored_log10
+from maxichem._constants import RATE_RULE
 
 HOLD = 1500.0  # s: one row of a held path
 BOX_KEYS = ("box", "X", "T", "P", "J", "lit", "kind")
@@ -38,7 +39,7 @@ TRUTH = {
     ),
     "SNCHO_photo_network_2025.txt": TruthSets(
         ("boxes_sncho25", "boxes_sncho25p"),
-        {"boxes_sncho25": (117, "21b9ae4b86f02ac9"), "boxes_sncho25p": (54, "58d5356b1e18f59f")},
+        {"boxes_sncho25": (116, "8ac97421fdbca9be"), "boxes_sncho25p": (54, "58d5356b1e18f59f")},
         "qual_sncho25",
         ("QC", "QCs", "twins/QC"),
         (),
@@ -118,7 +119,7 @@ def complete_box_set(folder, species, declared):
 
     columns: the network's species in the shards' species; the shards' other species must be 0 in every state.
     """
-    manifest = json.loads((folder / "manifest.json").read_text())
+    manifest = rate_rule_manifest(folder)
     shards = [folder / f for f in manifest.get("shards", [])]
     no_result = _no_result(folder, manifest, declared)
     bad = {k: len(manifest.get(k, [])) for k in ("bad_states", "drift_over_1e-6")}
@@ -155,7 +156,7 @@ def complete_box_set(folder, species, declared):
 
 def load_boxes(shards, cap):
     """Return the first cap boxes (None: all) of the shards, by field."""
-    box_set = {k: [] for k in BOX_KEYS}
+    box_set: dict[str, list[np.ndarray]] = {k: [] for k in BOX_KEYS}
     loaded = 0
     for f in shards:
         if cap is not None and loaded >= cap:
@@ -179,8 +180,21 @@ def network_columns(truth_species, species, where, *states):
     return [truth_species.index(q) for q in species]
 
 
+def rate_rule_manifest(folder):
+    """Return a truth set's manifest; refuse a set made with another rate rule than RATE_RULE, or with none recorded."""
+    manifest = json.loads((folder / "manifest.json").read_text())
+    rule = manifest.get("rate_rule", "none recorded")
+    if rule != RATE_RULE:
+        raise SystemExit(
+            f"{folder}: truth made with the rate rule '{rule}', not '{RATE_RULE}' (the collision limit, "
+            "docs/method.md); use a truth set made with it (maxichem/paths.py names the truth root)"
+        )
+    return manifest
+
+
 def check_jobs(qual):
-    """Refuse a truth set whose paths differ from its job list."""
+    """Refuse a truth set of another rate rule, with a path whose spec records another rule or none, or off its jobs."""
+    rate_rule_manifest(qual)
     jobs = json.loads((qual / "jobs.json").read_text())
     rel = [j["out"].split(f"/{qual.name}/", 1)[-1] for j in jobs]
     want = set(rel)
@@ -191,14 +205,21 @@ def check_jobs(qual):
             f"truth paths missing {sorted(want - have)[:3]}, {len(have - want)} not listed "
             f"{sorted(have - want)[:3]}"
         )
-    short = []
+    short, other_rule = [], []
     for j, r in zip(jobs, rel, strict=True):
         z = np.load(qual / r)
+        if "spec" not in z.files or json.loads(str(z["spec"])).get("rate_rule") != RATE_RULE:
+            other_rule.append(r)
         hold = "saved_h" in z.files
         s0 = int(z["h0"] if hold else z["k0"]) if str(z["kind"]) == "twin" else 0
         rows = len(z["saved_h"]) if hold else len(z["x_call"])
         if rows != min(int(j["n"]), len(np.load(j["src"])["T"]) - s0):
             short.append(r)
+    if other_rule:
+        raise SystemExit(
+            f"{qual}: {len(other_rule)} truth paths made with another rate rule than '{RATE_RULE}' or with none "
+            f"recorded, e.g. {other_rule[:3]}; the set's manifest records the rule, its paths must too"
+        )
     if short:
         raise SystemExit(f"{qual}: {len(short)} truth paths shorter than their jobs, e.g. {short[:3]}")
 

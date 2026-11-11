@@ -160,6 +160,9 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   the same check on SNCHO_photo_network_2025 (--network; 27 of 28, see the 2026-11-04 log); kincuda/jref_SNCHO25.npz:
   its J table. kincuda/libref7_SNCHO.npz: the old sulfur network's parity (15 of 15), superseded. kintest/quick_ref6.npz: the kintest quick reference. Earlier references belong to superseded
   numerics.
+- Superseded 2026-11-10: the references of the collision rule that counts M are kincuda/libref10.npz and
+  libref10_SNCHO25.npz (they record RATE_RULE) and kintest/quick_ncho_v3_ref1.npz and quick_sncho25_v3_ref1.npz (runs on
+  truth_v3). The ones above, libref8 and libref9_SNCHO25 among them, belong to the old rule.
 
 ### The 53-species truth sets
 - qual (2026-10-31_data; 2,466 files, 65.3 CPU-h): QC 512 per-call GCM paths x 10,000 calls (128 near-solar) + 128 kick
@@ -306,6 +309,10 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   regularization ceiling, not a measured rate. In NCHO_photo over 300-3000 K, 1e-5-100 bar it acts on CH + M, C2H + M,
   NH + M, NCO + NH2 and CN + C2H6. The CH + M reverse is capped below 563 K at 1 bar (655 K at 100 bar), the C2H + M
   reverse below 895 K (1828 K) (experiments/2026-11-03_overnight).
+- Superseded 2026-11-10 (log entries of that date): all four codes now count M as a collision partner, so a dissociation
+  A + M is capped: VULCAN-JAX since 1c6afe1, maxichem, the truth generator (vulcan-truth 0ea6d9c) and the torch reference
+  (libref10, libref10_SNCHO25). The truth under data/truth_v3 is made with it; data/truth_v2 is the old-rule record, in
+  which a one-molecule side never counted.
 - The CH3OH falloff uses the broadening of Visscher & Moses 2011 (the "vm11" width), as VULCAN-JAX and the generator do.
 - Networks disagree by more than 0.1 dex (HCN up to 4 dex between two networks; 1.5-3x in HCN / NH3 inside one GCM), so
   broadened models need more than one network's truth (2026-10-31 survey, 2026-10-31_broaden).
@@ -1723,6 +1730,64 @@ Branch sweep-fixes (one commit per fix). Scratch data of the measurements are no
   files passes, clang-tidy included; CPU 66 passed; parity and guard 43 passed; test_export_cpp 14 passed; valid outputs
   bitwise the base's (12,264,022 numbers, 0 differ).
 
+### 2026-11-10 00:22 to 02:41: the collision limit counts M as a collision partner; the old-rule truth gate fails (experiments/2026-11-10_collision_limit)
+Branch collision-limit from main 0c7f7df. Pins: NCHO_photo 74d4f5c0, SNCHO_photo_network_2025 4e8d537a, the NASA9 folder's
+sorted-file digest 13162af0 (120 files), libref8 9b27b5fd, libref9_SNCHO25 1dc74011, VULCAN-JAX 36419e5 (clean).
+- The rule (VULCAN-JAX 1c6afe1). A direction counts when its molecules m plus M (b = 1) make two collision partners,
+  q = k n_tot^(b + m - 2) with k without M; for a dissociation A + M, q = k. The kernels fold M into the stored
+  coefficient, so such a side compares k_stored / n_tot; the derivative layer's density weight is
+  wE = (wA - wG)(mf - 2) + wG (mr - 2), -1 for A + M. The reader now refuses a line whose M is not on both sides of a
+  three-body law or on neither side of a two-body one (also a reaction changed by hand); every VULCAN-JAX network file and
+  every invented one still loads (TiSNCHO is refused for TiH, as before).
+- RED scan: the kernels' own final rates (a probe kernel around rate_pair and collision_limit), 901 T (300-3000 K, 3 K
+  steps) x 65 log P (1e-5-100 bar), judged by the new eligibility. Old rule: NCHO_photo C6H5 (20,738.6x the ceiling at
+  3000 K, 1e-5 bar), C6H6 576.1, C3H4 280.1, C4H5 47.3, C2H5 9.9; the 2025 sulfur network adds S4 (S2 + S2 + M, 1,441.0x),
+  CH3CCH 131.6, CH3SH 19.6, S8 1.99. New rule: largest final q 1.0000000000000002 times the ceiling, no pair above. The
+  numpy port of the same arithmetic agrees with the kernel to 2.3e-13.
+- Against VULCAN-JAX's own rates (its environment, float64, CPU; remove_list empty, low-T caps off; 109 T x 29 P, 390 and
+  532 pairs, M divided out of maxichem's coefficients): old kernel, the differences are exactly the 5 and 8 dissociation
+  pairs above (up to 2.07e4 relative); every other pair within 3.48e-7. New kernel: every pair within 3.48e-7. The 3.48e-7
+  is k_B: VULCAN-JAX's phy_const uses 1.38064852e-16, maxichem 1.380649e-16 (ratio - 1 = 3.4766e-7); pairs with no change
+  of moles agree to 1.2e-13.
+- Tests (each shown to fail): tests/test_collision_limit.py runs the derivative kernels' rate arithmetic through
+  tests/rate_probe.cu on tests/data/synthetic_collision_network.txt at 3000 K: capped dissociations forward (H2 + M) and
+  reverse (O2 + M) at K_COLL n_tot, the capped associations at 10 bar, a tie, the pair ratio, a first-order line and a
+  photolysis branch at 1e9 s^-1 left alone, and the tangent and adjoint of every coefficient along T at fixed P (-1/T for a
+  capped A + M) and along ln P (1). Largest errors 7e-16 (rates), 2.6e-15 (derivatives). It fails on the old code
+  (H2 + M 7.5e7 against 2.4e6), with the old density weight (tangent 0 against -1/T; adjoint alone too) and with every
+  one-molecule side counted (the first-order line capped). The associations at 10 bar and the photolysis branch pass on the
+  old code; the tie checks the capped value, not the 1/2 split of the weights. The reader's 4 refusals and the hand-built
+  refusal fail on the old code. CPU 92 passed; slow CPU 4 passed.
+- Where the new cap binds in the truth sets (CPU port at each box's T, P): boxes_ncho 18,295 of 131,072 boxes (14.0 %),
+  1879-3000 K; boxes_sncho25 912 of 1,930 (47.3 %), 1022-2999 K; boxes_sncho25p 103 of 350. Not in the pinned boxes 1939
+  and 96. test_ad's random cases hold 128-139 such cells per case on NCHO_photo and CHO_photo, 482-483 on the 2025 network.
+- Direct comparison at constant T and P, 47 checkpoints from 1e-6 to 1e8 s, every species above 1e-12: VULCAN-JAX's
+  network-built chemistry right-hand side with its rates and imposed J, Radau at rtol 1e-10 (1e-8 agrees within 5e-5 dex)
+  and the exact JAX Jacobian. Six hot C-rich NCHO cells (2582-2989 K, 1e-5 bar, dark and lit, the boxes' stored starts and
+  two 1-s states with C6H5, C6H6, C4H5, C3H4, C2H5 raised 1000x): new maxichem at rtol 1e-7 agrees within 5e-6 dex, at the defaults within
+  0.024 dex (C3H2 at 1e-6 s; scored gases 0.0036); old maxichem is off by 0.98-4.53 dex in transients (C3H4, C6H5, C2H5),
+  scored gases 0.0048 dex at most, 0 at 1e8 s. Sulfur cells (1298-2981 K, 3e-5-5.2 bar; in two, S4, S8, CH3SH, C6H5, C6H6 raised 1000x): new
+  maxichem at rtol 1e-7 within 5e-6 dex, at the defaults within 0.015 dex (S8 at 1e-6 s); old maxichem within 5e-5 dex of
+  VULCAN-JAX except the hot dense cell (box 1130, 2981 K, 5.2 bar), 0.097 dex in C2H5. The lit 1299 K, 0.003 bar sulfur
+  cell did not finish in VULCAN-JAX's Radau within 83 min and is not compared.
+- Gate against the existing truth (old rule; kintest quick, saved runs of the old code compared): NCHO_photo 0 misses
+  (worst box error 0.049 dex, was 0.014), paths unchanged (largest change 5e-5 dex), but 13 of 32,768 boxes' worst errors
+  rose by more than 0.01 dex (2 by more than 0.03; largest +0.048, box 20725). The 2025 sulfur network: misses and pins
+  unchanged, paths within 1e-4 dex, 2 boxes rose by more than 0.01 (box 117 of boxes_sncho25p +0.0169, box 1493 +0.0145).
+  The gate fails.
+- Diagnosis: the intended chemistry, not an implementation error. All 15 moved boxes are at 2772-2987 K and 2e-5-0.017
+  bar, mostly C/O >= 1, the error in C2H2 (one in HCN) at stops of 1e-6 to 7e-4 s, where the new cap lowers a pair by
+  97-14,100x (C2H2 + C4H3 + M -> C6H5 + M, S2 + S2 + M -> S4 + M). VULCAN-JAX integrated on their starts with the old rule
+  agrees with the stored truth within 0.0004 dex in every box; with its current rule it differs from that truth by
+  0.0105-0.0487 dex, box by box what new maxichem shows. New maxichem against VULCAN-JAX's current rule on these boxes:
+  0.0008 dex at most; old maxichem against the truth: 0.001 dex.
+- Not done, since the gate stopped the plan: new parity references (the torch generator's change of its eligibility masks,
+  mf + tb >= 2, agrees with VULCAN-JAX within 3.48e-7 and is kept as a patch in the experiment folder, the generator left
+  as it was), the loaders' rate-rule check (patch kept there), test_ad, the export test, speed, the final tiers. Parity and
+  test_vulcan_truth would fail on this branch (inferred, not run): the stored references and truth carry the old rule.
+- The truth sets, the truth generator (vulcan-truth/science.py) and the parity references libref8 and libref9_SNCHO25
+  still carry the old rule. The new rule cannot be validated against them; it needs truth made with it.
+
 ### 2026-11-10 00:28 to 06:10: independent known-answer tests, two kernel hazards, the coupling stop's causes
 Branch known-answers, from 0c7f7df. A review found that the tests catch regressions but prove little on their own: parity
 compares with an earlier copy of the same formulas, CI runs no GPU test, and of eight deliberate breaks of the physics two
@@ -1975,6 +2040,95 @@ repository.
   - The constants test now checks that the kernels' constexpr names equal a classified list (header settings, formula
     coefficients, kernel codes), over declarations wrapped onto several lines; shown on a new kernel-local
     NEW_SETTING = 0.37 (fails), a 1e-3 in the guard (fails), RODAS_C43 wrapped over two lines (passes).
+
+### 2026-11-10 12:22 to 18:00: truth remade with the collision rule that counts M (experiments/2026-11-10_truth_v3)
+data/truth_v2 is old-rule truth, kept only as a record: the generator then left out every direction of one molecule. The
+checks now read data/truth_v3, and refuse a set or a parity reference that does not record RATE_RULE.
+- Truth generator: vulcan-truth 0ea6d9c ("fix(science): count M as a collision partner"). VULCAN-0D's coefficients have
+  M not folded in, so a direction counts when molecules + [M on that side] >= 2, at k M^(M + molecules - 2). RATE_RULE goes
+  into every box set's manifest and part (merge refuses a part or set of another rule) and every path's spec and path
+  set's manifest (history.py manifest). sobol.py adopt starts a set on a design copied byte for byte.
+- Validation before generation. The generator's capped coefficients against VULCAN-JAX's on 109 T x 29 P: within 3.48e-7
+  on all 390 NCHO and 532 sulfur pairs, the dissociations included (the k_B difference). check.py bitwise (fast against
+  stock, 40 boxes): IDENTICAL on NCHO and on the sulfur network; the sulfur one finished at 14:29, 18 min after its sets
+  had started. The settings were recovered by rerunning stored truth with the old rule, bit for bit: 26 sample boxes (10
+  boxes_ncho, one of its step-cap reruns at 2e6, 10 boxes_sncho25, 5 boxes_sncho25p) and 6 paths (QC and QD of both
+  networks, a twin QC and a QL of NCHO; no QH path). The NCHO sets
+  were made with an earlier box.py (VULCAN's default atol, count_max 2e5; experiments/2026-11-03_atol/box_before_xatol.py),
+  so NCHO ran a copy of the generator with that box.py (experiments/2026-11-10_truth_v3/gen_ncho); its build differs from
+  the old stamp only in build.py's sulfur-network entry and in the staged NASA9 folder (VULCAN-JAX's HNO3 file, in neither
+  network).
+- Sets (new against truth_v2). boxes_ncho: 131,072 of 131,072 accepted, worst drift 9.87e-8 (the same), 97,500 CPU s
+  (94,041), design 58ecd80d (the same rows); 6 boxes stopped at the cap 2e5, 4 finished at 2e6 and 2 at 2e7 (before: 3 at
+  2e6, 3 at 2e7). qual_ncho 904 paths, 39,678 CPU s (39,471); daynight_ncho 64, 2,148 s (2,094); qual_sncho25 208, 42,202 s
+  (42,677); daynight_sncho25 64, 12,941 s (8,745; its summed VULCAN steps are the same, 23,332,211 against 23,336,117, so
+  the time is the machine's load); each with 0 missing, errors and forced steps. boxes_sncho25p: 350 of 404 accepted, the
+  same 54 boxes without a result (step cap 2e6), 0 quarantined, worst drift 2.4e-8 (5.5e-10; now box 45, 2434 K, 97 bar,
+  where the cap lowers S2 + S2 + M by 427x), 14,155 CPU s (14,695). boxes_sncho25: 1,931 of 2,048 accepted (1,930), 116
+  without a result at the cap 2e6 (117: box 892, 425 K, lit, a reheat start whose donor the cap touches, now ends), the
+  same quarantined box 810, worst drift 3.7e-8 (3.5e-8), 54,276 CPU s (56,189); its 8 workers ran 14:11-23:42, the
+  slowest held 23 boxes that end at the cap (sobol.py records no seconds for those). The pinned boxes 1939 and 96 have
+  bitwise the same truth in both versions (the cap touches neither nor their donors). A box set's CPU seconds count the boxes' own runs,
+  not their donors' nor runs that ended at the step cap.
+- Old against new truth on the scored gases at their floors. boxes_ncho: 57 boxes moved by more than 0.01 dex, none by
+  more than 0.1; largest 0.067 dex (box 95573, C2H2, 2870 K, 5e-4 bar); all 57 at 2477-3000 K where the new cap binds
+  (C2H2 54, HCN 3). boxes_sncho25p: 1 (box 117, 0.017 dex, C2H2, 2987 K). boxes_sncho25: 1 (box 1493, 0.015 dex, C2H2,
+  2828 K), the next 0.0044 dex. Paths: qual_ncho 1e-4 dex at most, daynight_ncho
+  0, qual_sncho25 4e-4, daynight_sncho25 1e-4. Boxes whose own T, P the cap does not touch still change by rounding when
+  their start comes from a donor box at a T, P where it binds (boxes_ncho: 18,295 boxes where the cap binds, 6,281 through
+  their donor, 106,496 bitwise equal, 0 unexplained; boxes_sncho25: 912, 178, 840, 0; boxes_sncho25p: 103, 43, 204, 0).
+- Gate, kintest quick on NCHO against truth_v3 (db83a04): 0 misses; worst box 0.014 dex, paths 0.004. The 13 NCHO boxes
+  that moved against the old truth are at 0.0003-0.0010 dex again (they were 0.0105-0.0487). New stored reference
+  data/benches/kintest/quick_ncho_v3_ref1.npz.
+- kintest full on NCHO against truth_v3 (db83a04): 3,483 s wall (boxes 10 s, loop 3,441 s, 4.98 ms per tick). All
+  131,072 boxes, 6,160,384 states: 0 misses, worst 0.066 dex (box 87219, 487 K, CH4; the same as on the old truth). 1,096
+  truth paths, 1,326,198 states: 0 misses, worst 0.004 dex; panel P: unfinished, non-finite and negative 0. Exit 1 for one
+  box: 98666 (2973 K, 43 bar, lit, hot-H start), whose last call (4.4e7 to 1e8 s, one step) moves the element shares by
+  5.5e-6, above the allowance 1e-6; the guard recomputes it and the recovery's step fails too (still failed, done 0). Its
+  scored error is still 0.0003 dex. On main (the old rule) the same call is flagged and recovered; at rtol 1e-4 the old
+  rule takes two steps, the new rule still one; at rtol 1e-5 both pass (share change 1.8e-16). A one-step call of 5.6e7 s
+  at 2973 K and 43 bar is not a GCM call; left as it is, for the owner (experiments/2026-11-10_truth_v3/box_drift.log).
+- Is it the rule or the lottery? Paired test (lottery.py, lottery2_98666.jsonl, lottery2_33162.jsonl, the per-cell flags
+  in lottery2_<box>_<kernel>.npz, counts in lottery_paired.log). The state before that call was saved as reached under
+  each rule (main cecbf8e and f2ab956), and each state was run on three kernels: old (cecbf8e), new (61fa409, its kernels
+  f2ab956's) and pair-only (61fa409 with only H + C2H4 + M -> C2H5 + M under the new rule, lottery2_pair.diff). 2,048
+  matched cells each: cell 0 as saved, the others x times 1 + s 10^U(-15, -12) per species and dt times
+  1 + U(-1e-3, 1e-3), one seed for all. Box 98666, still failed after the recovery at the production drift allowance,
+  old kernel to new: 0 to 4 of 2,048 on the old-rule state, 2 to 5 on the new-rule state. The excess points the same way
+  on both states. Paired (failed on the new kernel only / old only / both): 4 / 0 / 0 (exact McNemar p 0.125) and
+  5 / 2 / 0 (p 0.45); pooled 9 / 2 / 0, p 0.065. At 2, 5 and 10 times the allowance, pooled 7 / 1 (p 0.070), 4 / 0
+  (p 0.125), 1 / 0. The pair-only kernel's flags equal the new kernel's, cell for cell. That is expected, not more
+  evidence: at this T, P only that pair's capped rate changes (1.0987 times more). Control box 33162 (2740 K, 86 bar,
+  where the cap does not bind): 7 still failed (180 flagged) on every kernel and state, the same cells. These are one
+  sample of 2,048 a state; the 2026-11-06 17:22 entry's 29 of 6,144 (box 33162) and 0 of 6,144 (box 98666) used another
+  setup and are not pooled with them. No new kind of failure: the control box fails 7 of 2,048 under the old rule on
+  main, at 10 times the allowance at most 1 cell fails anywhere, and box 98666's scored error is 0.0003 dex. But the
+  unperturbed call of box 98666 (cell 0) fails its recovery on every run under the new rule from the new state (flag 2 at
+  1 and 2 times the allowance, passes at 5), so at this head kintest full on NCHO exits 1 on every run, not on about 2 %
+  of runs. Verdict: inconclusive whether the rule raises the failure rate (pooled p 0.065); the failure of box 98666 is
+  deterministic. No change made here.
+- Gate on the sulfur network against truth_v3 (kintest quick, cce9052): boxes_sncho25 1,931 boxes, 7 missed states, all
+  pinned (box 1939, S2, 1.647-4.341 dex, held); boxes_sncho25p 1 missed state, pinned (box 96, S2 0.155 dex, held); next
+  worst boxes 0.030 and 0.021 dex; 208 paths, 0 misses, worst 0.007 dex. The pins keep their reasons: both boxes' truth is
+  bitwise that of truth_v2. Boxes 117 and 1493, which moved against the old truth, are at 0.0003 and 0.0004 dex. TRUTH
+  declares 116 sulfur boxes without a result (box 892 now ends). New stored reference
+  data/benches/kintest/quick_sncho25_v3_ref1.npz.
+- Parity against libref10 and libref10_SNCHO25 (made by the torch generator with its masks mf + M >= 2; its coefficients
+  match VULCAN-JAX's capped ones within 3.48e-7): 48 passed; panel-P chains 1.3e-9 and 7.2e-9 dex, 0 and 2 step-count
+  mismatches in 2,048,000 cell-calls. Checks on cce9052 (the merged settings file): CPU 122 passed; slow CPU 4 passed;
+  parity and guard 48 passed; known answers, order, rate laws, kernel copies, dense LU, collision limit 26 passed;
+  test_ad 81 passed in 1,040 s; test_export_cpp 19 passed.
+- tests/test_rate_laws.py now caps a one-molecule-and-M row (fails on the old rule: the call does not finish its dt) and
+  leaves a first-order row of 1e10 s^-1 alone (fails when every one-molecule side counts). tests/rate_probe.cu is kept: it
+  checks what a call cannot show, each direction's coefficient apart and the derivative kernels' cap weights.
+- test_vulcan_truth on both networks against the new quick references: 2 passed in 204 s.
+- Speed, the old rule (main cecbf8e) against the new (cce9052), GPU 1 with nothing else on it, 4 paired rounds in separate
+  processes, 262,144 cells over 800-3000 K and 1e-4-10 bar, 70-s calls, 10 timed calls a kind (the kernel-debt agent's
+  CPU jobs ran on CPUs 8-23 meanwhile). Medians, old / new us per cell-call and the paired ratio's range: NCHO settled
+  0.3631 / 0.3656 (+0.40 to +0.73 %), disturbed 16.487 / 16.440 (-0.18 to -0.32 %; steps 59.80 / 59.61); sulfur settled
+  0.6730 / 0.6751 (+0.27 to +0.38 %), disturbed 37.18 / 36.62 (-1.1 to -1.8 %; steps 64.48 / 63.55). Settled gas takes
+  one step a call both ways, so its +0.3-0.7 % is the k / n_tot of the new branch; disturbed gas takes fewer steps with
+  the new cap. No cell recomputed, recovered or unfinished in any round. Below the 1 % rule for settled gas.
 
 ### 2026-11-10 14:25 to 2026-11-11 00:05: the kernels' design debt: argument structs, one owner of the layout, one step-control tail
 Branch kernel-debt, from cecbf8e. A cleanup: no valid-input result moves. Scratch data of the proofs are not kept in the

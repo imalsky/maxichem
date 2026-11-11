@@ -13,9 +13,9 @@ from maxichem import paths
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
 WORST_ERROR_CHANGE = 0.01  # dex: against the saved run, per path and per box
-REFERENCES = {  # bench/kintest.py quick, saved
-    "NCHO_photo_network.txt": "benches/kintest/quick_ref6.npz",
-    "SNCHO_photo_network_2025.txt": "benches/kintest/quick_sncho25_ref1.npz",
+REFERENCES = {  # bench/kintest.py quick, saved, on truth_v3
+    "NCHO_photo_network.txt": "benches/kintest/quick_ncho_v3_ref1.npz",
+    "SNCHO_photo_network_2025.txt": "benches/kintest/quick_sncho25_v3_ref1.npz",
 }
 
 

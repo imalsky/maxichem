@@ -1,0 +1,17 @@
+# Invented test network for the collision limit: low-pressure laws of 1e-3 cm^3 s^-1, far above the limit, whose
+# capped coefficients have closed forms. H2 + M dissociates forward, O2 + M in the reverse; N_1 + M -> N_2 + M has
+# the same coefficient both ways (a tie); N_3 -> N_4 is first order, with no M; H2O photolysis has no collision.
+# id  [ reaction ]  A_0  B_0  C_0  A_inf  B_inf  C_inf
+
+# Two-body Reactions
+1  [ N_3 -> N_4                      ]  1.00E+09   0.000       0.0
+3  [ H + H2O -> OH + H2              ]  0.00E+00   0.000       0.0
+
+# 3-body reactions without high-pressure rates
+5  [ H2 + M -> H + H + M             ]  1.00E-03   0.000       0.0
+7  [ O + O + M -> O2 + M             ]  1.00E-03   0.000       0.0
+9  [ N_1 + M -> N_2 + M              ]  1.00E-03   0.000       0.0
+
+# reverse stops
+# photo dissociation (no reversals)
+11 [ H2O -> H + OH                   ]  H2O  1

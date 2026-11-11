@@ -70,6 +70,9 @@ KB = 1.380649e-16  # erg K^-1: Boltzmann's constant (exact in the SI since 2019)
 P0 = 1.0e6  # dyn cm^-2 (1 bar): the standard pressure of the NASA-9 Gibbs energies (McBride et al. 2002)
 NASA_SPLIT_T = 1000.0  # K: where the NASA-9 fits change range (McBride et al. 2002)
 K_COLL = 1e-9  # cm3 s^-1: no thermal rate may exceed this as a bimolecular-equivalent rate (docs/method.md)
+# The rate rule the checks' truth sets and stored references must be made with (the collision limit counts M as a
+# collision partner, docs/method.md); the truth generator and the torch reference generator write the same string
+RATE_RULE = "collision-limit-2026-11-10: M counts as a collision partner"
 
 # Layout: sizes and codes shared by the host code, the kernels, the export and cpp/.
 WARP_LANES = 32  # threads per warp on every CUDA GPU; the kernels write it as 32 (lane = threadIdx.x & 31)

@@ -13,10 +13,11 @@ are compiled for the network and run over many cells at once.
 - **Physics.** Mass-action kinetics at constant T and P within a call: dx/dt = (S v - x sum(S v)) / n_tot, with
   n_tot = P / kT. Forward rates come from the network file. Reverse rates come from NASA-9 thermodynamics. Elements are
   conserved.
-- **Collision limit.** No thermal rate may exceed 1e-9 cm^3 s^-1 as a two-body rate (three-body rates times n_tot).
-  When the faster direction of a reaction is above it, both directions are scaled down by the same factor, so the
-  equilibrium is kept. It acts where a fit is used far outside its range, for example the reverse of CH + M -> C + H + M
-  below about 600 K. VULCAN-JAX and the truth data use the same limit.
+- **Collision limit.** No thermal rate may exceed 1e-9 cm^3 s^-1 as a bimolecular-equivalent rate, with M counted as a
+  collision partner (a dissociation A + M counts with its rate coefficient k). When the faster direction of a reaction
+  is above it, both directions are scaled down by the same factor, so the equilibrium is kept. It acts where a fit is
+  used far outside its range, for example the reverse of CH + M -> C + H + M below about 600 K. VULCAN-JAX uses the
+  same rule, and so does the truth data (truth_v3).
 - **Photolysis.** Each photolysis branch is a first-order reaction with a rate J (s^-1) given per cell by the caller,
   for example from the GCM's radiative transfer. maxichem does not compute actinic fluxes. At night, J = 0.
 - **Integrator.** Rodas3 (order 3, L-stable) with the exact Jacobian and a sparse LU factorization. Adaptive steps
@@ -139,17 +140,23 @@ truth data come from VULCAN-0D with corrections to its step
 control and the network data (see notes.md), run at rtol 5e-4. The domain is 300 to 3000 K, 1e-5 to 100 bar,
 metallicity 0.1 to 300 times solar, C/O 0.1 to 2, with and without photolysis.
 
-Results at the default tolerances (rtol 1e-3, atol 1e-25):
+Results at the default tolerances (rtol 1e-3, atol 1e-25), against the truth made with the current collision limit
+(truth_v3); the day-night rows (marked *) were measured against the earlier truth, which differs from it by at most
+4e-4 dex on those paths:
 
 | Test | States scored | Misses | Worst error |
 | --- | --- | --- | --- |
 | NCHO_photo: 131,072 boxes, 0 to 1e8 s, half lit | 6,160,384 | 0 | 0.066 dex |
-| NCHO_photo: 904 GCM-like paths (recorded forcing and mixing) | 1,016,411 | 0 | 0.004 dex |
-| NCHO_photo: 64 paths with photolysis on a one-day cycle, 1,000 calls each | 64,000 | 0 | 0.002 dex |
+| NCHO_photo: 1,096 GCM-like paths (recorded forcing and mixing) | 1,326,198 | 0 | 0.004 dex |
+| NCHO_photo: 64 paths with photolysis on a one-day cycle, 1,000 calls each (*) | 64,000 | 0 | 0.002 dex |
 | SNCHO_photo_2025 (91 species): 986 dark boxes | 46,342 | 0 | 0.030 dex |
-| SNCHO_photo_2025: 944 lit boxes | 44,368 | 7, in 1 box | 4.34 dex |
+| SNCHO_photo_2025: 945 lit boxes | 44,415 | 7, in 1 box | 4.34 dex |
 | SNCHO_photo_2025: 350 targeted lit boxes (C/O >= 0.8 at 500-1500 K, below 800 K, metallicity >= 100) | 16,450 | 1 | 0.155 dex |
-| SNCHO_photo_2025: 272 GCM-like paths (recorded forcing and mixing, 64 with a one-day light cycle) | 312,000 | 0 | 0.007 dex |
+| SNCHO_photo_2025: 208 GCM-like paths (recorded forcing and mixing) | 245,328 | 0 | 0.007 dex |
+| SNCHO_photo_2025: 272 GCM-like paths, 64 of them with a one-day light cycle (*) | 312,000 | 0 | 0.007 dex |
+
+One NCHO box (2973 K, 43 bar) has a call that the guard recomputes and the recovery does not save: its last step of
+5.6e7 s moves the element shares by 5.5e-6, above the allowance; its error is 0.0003 dex (notes.md).
 
 The sulfur boxes use the photolysis rates of a 1-D WASP-39b model on the same network; the paths replay the NCHO paths'
 forcing with sulfur added as H2S (S/H 1.41e-5 times the metallicity). Besides the 16 scored gases, C3H5, allene,
@@ -246,19 +253,21 @@ GPU tests and prints each case's numbers.
 The checks and benches read stored references and truth data that are not part of this repository. They are found
 under `CHEM_DATA`:
 
-    benches/kincuda/libref8.npz        outputs of the torch reference solver on the check's inputs (NCHO_photo)
-    benches/kincuda/libref9_SNCHO25.npz  the same for the sulfur network SNCHO_photo_network_2025
+    benches/kincuda/libref10.npz       outputs of the torch reference solver on the check's inputs (NCHO_photo)
+    benches/kincuda/libref10_SNCHO25.npz  the same for the sulfur network SNCHO_photo_network_2025
     benches/kincuda/jref_SNCHO25.npz   J of a 1-D WASP-39b model on that network (the derivative check's sulfur J)
     benches/yardstick/design/          recorded starts used as check inputs
     benches/designs/decision/P/        test panel P (paths, starts, forcing)
-    truth_v2/boxes_ncho/               VULCAN-0D truth boxes (Sobol design, 131,072 boxes, 0 to 1e8 s)
-    truth_v2/qual_ncho/                VULCAN-0D truth paths (GCM-like forcing with mixing)
-    truth_v2/boxes_sncho25/, boxes_sncho25p/, qual_sncho25/   the same for SNCHO_photo_network_2025
+    truth_v3/boxes_ncho/               VULCAN-0D truth boxes (Sobol design, 131,072 boxes, 0 to 1e8 s)
+    truth_v3/qual_ncho/                VULCAN-0D truth paths (GCM-like forcing with mixing)
+    truth_v3/boxes_sncho25/, boxes_sncho25p/, qual_sncho25/   the same for SNCHO_photo_network_2025
     truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz   input states of the derivative check
-    benches/kintest/                   saved quick runs of bench/kintest.py (quick_ref6.npz NCHO, quick_sncho25_ref1.npz sulfur)
+    benches/kintest/                   saved quick runs of bench/kintest.py (quick_ncho_v3_ref1.npz NCHO, quick_sncho25_v3_ref1.npz sulfur)
 
 Each check stops with a message that names the missing files. Each stored reference of the parity tests
-carries a digest of its inputs, and the check refuses inputs that differ. `bench/kintest.py` refuses a truth set that
+carries a digest of its inputs, and the check refuses inputs that differ. The truth sets and the references record
+the collision rule they were made with (`RATE_RULE`, docs/method.md), and the checks refuse any other; truth_v2/ holds
+the truth of the earlier rule, kept only as a record. `bench/kintest.py` refuses a truth set that
 is not complete (boxes not run, failed runs, bad states, or truth paths missing from its job list), and a paired run
 refuses a saved run made on other truth data (a digest of the scored truth).
 

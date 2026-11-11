@@ -27,7 +27,6 @@ CONDITIONS = [(600.0, 1e4), (1500.0, 1e6), (2600.0, 1e8)]  # (K, dyn cm^-2): the
 RTOL = 1e-9
 RATE_TOLERANCE = 1e-6  # relative, on lambda: the integrator's error at RTOL; measured worst 1.0e-9
 TRACE = 1e-9  # mole fraction of a reactant traced in a bath, whose own change is then negligible
-UNCAPPED_SHARE = 0.1  # a direction of one molecule and M stays below this share of K_COLL: no rule caps it
 REVERSE_NEGLIGIBLE = 1e-12  # the reverse of the traced association against its forward, at the end of the call
 BOUND = -2.0e5  # K: H / R of CH3OH below that of OH + CH3, so that its dissociation is negligible
 
@@ -119,6 +118,12 @@ ROWS = {
         ("He", "H2"),
         capped=True,
     ),
+    # a dissociation's shape, one molecule and M: q = k itself, here with the reverse the larger direction
+    "capped, one molecule and M": Row(
+        "low", "[ CO_15 + M -> CO_16 + M ] 5.0E-09 0.0 0.0", "CO_15", "CO_16", lambda *_: 5e-9, (), 1000.0, True
+    ),
+    # first order without M: no collision partner, so not limited however fast (k / n_tot is 36 K_COLL or more)
+    "first order, no M": Row("two", "[ CO_17 -> CO_18 ] 1.0E+10 0.0 0.0", "CO_17", "CO_18", lambda *_: 1e10),
     "Lindemann falloff": Row(
         "three",
         "[ CO_7 + M -> CO_8 + M ] 3.0E-14 -1.0 0.0 3.16 0.5 0.0",
@@ -202,12 +207,10 @@ def expected(row: Row, T: float, P: float, thermo) -> tuple[float, float]:
     else:
         K = float(np.exp(g[row.reactant] - g[row.product]))
         kr = kf / K
-    molecules = 1 + len(row.partners)
-    if molecules >= 2:  # docs/method.md: a direction of m molecules counts at k n_tot^(m - 2)
-        c = min(1.0, K_COLL / (max(kf, kr) * nd ** (molecules - 2)))
-    else:  # one molecule and M: not limited today; left for the coming change of that rule, so kept far below it
-        assert max(k, k / K) < UNCAPPED_SHARE * K_COLL
-        c = 1.0
+    molecules, m = 1 + len(row.partners), int(row.section != "two")
+    # docs/method.md: a direction counts when its molecules and M make two collision partners, at k n_tot^(m + M - 2)
+    # with k not folded with M; a first-order direction without M does not count
+    c = min(1.0, K_COLL / (max(k, k / K) * nd ** (molecules + m - 2))) if molecules + m >= 2 else 1.0
     assert (c < 1.0) == row.capped
     density = float(np.prod([nd * row.bath[q] for q in row.partners]))
     return c * (kf + kr) * density, row.start / (1.0 + K)

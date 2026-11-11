@@ -21,7 +21,7 @@ from ._constants import (
     WARPS_PER_CELL,
     WARPS_PER_CELL_LARGE,
 )
-from .kinvulcan import VulcanNetwork
+from .kinvulcan import VulcanNetwork, _check_third_body
 
 MAX_SPECIES = 254  # species slots are uint8, with one value left for the padding
 _UINT8_MAX = int(np.iinfo(np.uint8).max)  # the largest extra-piece offset (xp) and pivot batch (blen): both uint8
@@ -188,6 +188,7 @@ def _reaction_tables(
         rx[j, : len(reactants[j])] = [pos[q] for q in reactants[j]]
         if j >= n_thermal:  # photolysis: no reverse side, no law (kf = J, kr = 0 in the kernel)
             continue
+        _check_third_body(r["eq"], r["kind"], f"reaction {j}")  # also a reaction built or changed by hand
         rx[j, 3 : 3 + len(products[j])] = [pos[q] for q in products[j]]
         rc[j], rf[j] = _law(r)
         rf[j] |= (
