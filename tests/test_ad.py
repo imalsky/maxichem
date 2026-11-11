@@ -383,10 +383,10 @@ def test_primal_is_the_call(checks, verdict):
 def test_scaling_x_has_no_frozen_tangent(checks, verdict):
     # The state is N, molecules per starting molecule, and the right-hand side is homogeneous of degree 1 in N. With the
     # step sizes held (adapt=False), N -> c N scales every stage, so the tangent of x along dx = x is 0 but for
-    # rounding. No longer checked: the adaptive tangent along dx = x itself (the step control's response to scaling x,
-    # through atol, which does not scale), which the central differences of test_tangents_against_differences judged
-    # before. A difference along x moves x off sum(x) = 1, which the call refuses, so nothing can judge it; and it has
-    # no meaning for valid input, since an input must sum to 1 and so cannot move along x.
+    # rounding. Not checked: the adaptive tangent along dx = x itself (the step control's response to scaling x,
+    # through atol, which does not scale). A difference along x moves x off sum(x) = 1, which the call refuses, so
+    # nothing can judge it; and it has no meaning for valid input, since an input must sum to 1 and so cannot move
+    # along x.
     for name, (x, T, P, J, dt) in checks.cases.items():
         h, d = torch.full_like(T, 1e-10), torch.full_like(T, dt)
         _, *others = checks.zt(x)

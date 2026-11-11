@@ -218,8 +218,9 @@ def test_just_outside_the_range_is_refused_and_named(parity, verdict, monkeypatc
 
 
 def test_sum_on_the_tolerance_is_judged_once(parity, verdict):
-    # The call's warp and the guard add x in different orders. A sum just above X_SUM_TOL in the warp's order and just
-    # below it in the network's order is refused; the opposite cell is accepted and stepped. Each is judged once.
+    # The call kernel's warp adds x in its own order, not the network's, and only that sum is judged. A sum just above
+    # X_SUM_TOL in the warp's order and just below it in the network's order is refused; the opposite cell is accepted
+    # and stepped.
     cells = 16
     x0, T, P = parity.starts(cells, 3, 0.0)
     perm = [int(q) for q in parity.solver._tables["perm"].tolist()]

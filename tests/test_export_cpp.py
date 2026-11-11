@@ -114,8 +114,7 @@ CONTRACT_EDITS = {
 
 @pytest.mark.parametrize("edit", CONTRACT_EDITS)
 def test_cpp_refuses_another_kernel_contract_at_construction(export_program, tmp_path, edit):
-    # before, a name only the recovery takes was found missing after the call kernel had run, and a repeated, missing
-    # or misplaced known name, or J on the guard, was not found at all
+    # the constructor refuses each edit before any kernel runs, also one in the list of the recovery, which runs last
     paths.need(paths.vulcan_thermo())
     kernel, old, new, message = CONTRACT_EDITS[edit]
     case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, 64, 1, FORCED_TRIES]

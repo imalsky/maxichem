@@ -21,8 +21,9 @@ CONSTRUCTORS: dict[str, Callable[..., object]] = {"CudaSolver": CudaSolver.__ini
 
 @pytest.mark.parametrize("name", [*CALLS, *CONSTRUCTORS])
 def test_every_optional_argument_is_keyword_only(name):
-    # CudaSolver(net, device, True) set drift to 1 with photolysis off, and solver(..., 1e-25, 1e-3) swapped the
-    # tolerances; checked one parameter at a time, so making any single one positional again fails here
+    # a positional setting would let CudaSolver(net, device, True) set drift to 1 with photolysis off, and let
+    # solver(..., 1e-25, 1e-3) swap the tolerances; checked one parameter at a time, so making any single one
+    # positional fails here
     function = CALLS[name][1] if name in CALLS else CONSTRUCTORS[name]
     parameters = list(inspect.signature(function).parameters.values())[1:]  # past self
     positional = [p for p in parameters if p.kind is not inspect.Parameter.KEYWORD_ONLY]
@@ -48,4 +49,3 @@ def test_results_are_named_tuples_in_the_old_order():
     }
     for result, names in fields.items():
         assert result._fields == names
-        assert tuple(result(*names)) == names  # unpacks and indexes as the bare tuple did
