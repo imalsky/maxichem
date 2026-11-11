@@ -323,9 +323,13 @@ class ADSolver(Solver):
         directions = 1 if one else dx.shape[0]
         if not 1 <= directions <= DMAX:
             raise ValueError(f"dx: from 1 to {DMAX} directions on the leading axis expected, got {list(dx.shape)}")
-        if tangents["dJ"] is not None and not self.nj:
-            raise ValueError("dJ given, but this solver has no photolysis (built with photo=False)")
         lead = () if one else (directions,)
+        dJ = tangents["dJ"]
+        if dJ is not None and not self.nj and (dJ.dim() != len(lead) + 2 or dJ.shape[-1] != 0):
+            raise ValueError(
+                f"dJ: none or an empty {[*lead, cells, 0]} one expected, since this solver has no photolysis; "
+                f"got {list(dJ.shape)}"
+            )
         shapes = {
             "dx": (*lead, cells, self.ns),
             "dT": (*lead, cells),
@@ -391,7 +395,8 @@ class ADSolver(Solver):
         J : torch.Tensor, optional
             Photolysis rates [B, branches], s^-1, as ``CudaSolver.launch``.
         dJ : torch.Tensor, optional
-            Their tangent [B, branches] (or [D, B, branches]), s^-1.
+            Their tangent [B, branches] (or [D, B, branches]), s^-1; without photolysis None or an empty one, which
+            counts as None, as J does.
 
         Returns
         -------
@@ -411,6 +416,7 @@ class ADSolver(Solver):
         D = self._check_tangents(tangents, B)
         one = dx.dim() == 2
         tan = [a.contiguous() for a in (dx, dT, dP, ddt, dh)]
+        dJ = dJ if self.nj else None  # an empty dJ without photolysis is none, as an empty J
         dlm, drc, dJ = (None if a is None else a.contiguous() for a in (dlm, drc, dJ))
         xo, dxo = torch.empty_like(x), torch.empty((D, B, self.ns), dtype=torch.float64, device=self.dev)
         ho, nok = (torch.empty(B, dtype=torch.float64, device=self.dev) for _ in range(2))

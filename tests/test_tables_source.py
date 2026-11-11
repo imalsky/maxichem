@@ -139,6 +139,24 @@ def test_photolysis_check_refuses_each_wrong_j():
         _solver.check_photolysis(good[:-1], 4, 2, device)
 
 
+def test_tangent_of_j_follows_the_rule_for_j():
+    ad = object.__new__(kincuda_ad.ADSolver)  # the check reads only the sizes and the device
+    ad.ns, ad.nr, ad.nj, ad.dev = 3, 5, 0, torch.device("cpu")
+    for lead in ((), (2,)):
+        tangents = {
+            "dx": torch.zeros(*lead, 4, 3, dtype=torch.float64),
+            **{name: torch.zeros(*lead, 4, dtype=torch.float64) for name in ("dT", "dP", "ddt", "dh")},
+            "dlm": None,
+            "drc": None,
+        }
+        directions = lead[0] if lead else 1
+        assert ad._check_tangents(tangents | {"dJ": None}, 4) == directions
+        assert ad._check_tangents(tangents | {"dJ": torch.zeros(*lead, 4, 0, dtype=torch.float64)}, 4) == directions
+        empty = re.escape(str([*lead, 4, 0]))
+        with pytest.raises(ValueError, match=rf"^dJ: none or an empty {empty} one expected, .*no photolysis; got"):
+            ad._check_tangents(tangents | {"dJ": torch.zeros(*lead, 4, 2, dtype=torch.float64)}, 4)
+
+
 @pytest.mark.parametrize("drift", [float("nan"), float("inf"), -1e-6])
 def test_bad_drift_is_refused_before_any_device_use(read_network, drift):
     net = read_network()

@@ -319,6 +319,22 @@ def test_closed_solver_refuses_a_call(parity, tmp_path):
         solver.export(tmp_path)
 
 
+def test_empty_j_and_dj_are_none_without_photolysis(read_network, gpu):
+    net = read_network("synthetic_small")
+    cells = 4
+    x = helpers.state(net, cells, gpu, H=0.1, H2=0.6, OH=0.05, H2O=0.1, O=0.05, He=0.1)
+    T, P, dt, h = (helpers.full(cells, q, gpu) for q in (1500.0, 1e6, 1e-3, 1e-3))
+    tangents = (torch.ones_like(x), torch.ones_like(T), *(torch.zeros_like(T) for _ in range(3)))
+    empty = torch.zeros(cells, 0, dtype=torch.float64, device=gpu)
+    with kincuda.CudaSolver(net, gpu) as solver:
+        assert all(map(torch.equal, solver(x, T, P, dt, h), solver(x, T, P, dt, h, J=empty)))
+    with kincuda_ad.ADSolver(net, gpu) as ad:
+        none = ad.jvp(x, T, P, dt, h, *tangents)
+        assert all(map(torch.equal, none, ad.jvp(x, T, P, dt, h, *tangents, J=empty, dJ=empty)))
+        with pytest.raises(ValueError, match=r"^dJ: none or an empty \[4, 0\] one expected"):
+            ad.jvp(x, T, P, dt, h, *tangents, J=empty, dJ=torch.zeros(cells, 1, dtype=torch.float64, device=gpu))
+
+
 def test_closed_solver_refuses_its_rate_table(read_network, gpu):
     with kincuda_ad.ADSolver(read_network("synthetic_small"), gpu) as ad:
         assert ad.rc0.shape[0] == ad.nr
