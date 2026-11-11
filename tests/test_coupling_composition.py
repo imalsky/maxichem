@@ -152,6 +152,8 @@ def test_conversions_refuse_unusable_input():
         element_moles(torch.ones((1, 2), dtype=torch.float64), mw, torch.ones((2, 1)))
     with pytest.raises(ValueError, match="q and mw must share one precision"):
         mass_to_mole(torch.ones((1, 2), dtype=torch.float32), mw)
+    with pytest.raises(ValueError, match="q and mw must share one precision"):
+        signed_mole_fractions(torch.ones((1, 2), dtype=torch.float32), mw)
     with pytest.raises(ValueError, match="x, mw and mass must share one precision"):
         mole_to_mass(torch.ones((1, 2), dtype=torch.float32), mw, one)
     with pytest.raises(ValueError, match="x, mw and mass must share one precision"):

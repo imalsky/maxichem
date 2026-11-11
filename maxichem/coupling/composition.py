@@ -145,6 +145,8 @@ def signed_mole_fractions(q: torch.Tensor, mw: torch.Tensor) -> torch.Tensor:
         n / sum(n) with n = q / mw, summing to 1 in each cell.
     """
     _check_cells("q", q, mw)
+    if q.dtype != mw.dtype:
+        raise ValueError(f"q and mw must share one precision, got {q.dtype}, {mw.dtype}")
     n = q / mw
     return n / n.sum(1, keepdim=True)
 
