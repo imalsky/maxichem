@@ -115,6 +115,8 @@ def mass_to_mole(q: torch.Tensor, mw: torch.Tensor) -> torch.Tensor:
         Mole fractions, summing to 1 in each cell.
     """
     _check_cells("q", q, mw)
+    if q.dtype != mw.dtype:
+        raise ValueError(f"q and mw must share one precision, got {q.dtype}, {mw.dtype}")
     if bool((q < 0).any()):
         raise ValueError(f"q holds negatives, the least {float(q.min()):.3g}: clamp them before the conversion")
     n = q / mw
@@ -166,6 +168,8 @@ def mole_to_mass(x: torch.Tensor, mw: torch.Tensor, mass: torch.Tensor) -> torch
     """
     _check_cells("x", x, mw)
     _check_per_cell("mass", mass, x.shape[0])
+    if not (x.dtype == mw.dtype == mass.dtype):
+        raise ValueError(f"x, mw and mass must share one precision, got {x.dtype}, {mw.dtype}, {mass.dtype}")
     if bool((x < 0).any()):
         raise ValueError(f"x holds negatives, the least {float(x.min()):.3g}: the call's result is not usable")
     xm = x * mw

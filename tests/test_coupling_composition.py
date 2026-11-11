@@ -150,6 +150,12 @@ def test_conversions_refuse_unusable_input():
         tracer_totals(torch.ones((1, 2), dtype=torch.float64), -one, mw, one.repeat(2)[:, None])
     with pytest.raises(ValueError, match="share one precision"):
         element_moles(torch.ones((1, 2), dtype=torch.float64), mw, torch.ones((2, 1)))
+    with pytest.raises(ValueError, match="q and mw must share one precision"):
+        mass_to_mole(torch.ones((1, 2), dtype=torch.float32), mw)
+    with pytest.raises(ValueError, match="x, mw and mass must share one precision"):
+        mole_to_mass(torch.ones((1, 2), dtype=torch.float32), mw, one)
+    with pytest.raises(ValueError, match="x, mw and mass must share one precision"):
+        mole_to_mass(torch.ones((1, 2), dtype=torch.float64), mw, one.float())
     x = torch.tensor([[0.5, 0.5], [0.9, 0.1]], dtype=torch.float64)
     with pytest.raises(ValueError, match=r"mw must be \[S\], got shape \(2, 1\)"):  # would broadcast over the cells
         mole_to_mass(x, mw[:, None], one.repeat(2))
