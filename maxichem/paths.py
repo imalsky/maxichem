@@ -32,7 +32,8 @@ def truth(name: str) -> Path:
     """Return a VULCAN truth set by name: boxes (Sobol design, shards) or paths (QC, QCs, QL, ...).
 
     truth_v3 holds the truth made with the collision limit that counts M (_constants.RATE_RULE); truth_v2 holds truth
-    whose limit leaves out every direction of one molecule, a record the checks do not read.
+    whose limit leaves out every direction of one molecule, which the checks do not score against (ad_boxes reads
+    start states from it).
     """
     return data() / "truth_v3" / name
 
