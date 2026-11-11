@@ -494,20 +494,30 @@ __device__ __forceinline__ double step_factor_partials(double en, bool ok, bool 
   return fac;
 }
 
-// The recover kernel's test of a recomputed cell's result: its flag (redo), count and done; returns on every lane
-// whether it still fails.
-__device__ __forceinline__ bool recovery_fails(const double* __restrict__ x0, double* xout, int* doneo, int* redo,
-                                               int* count, int dn, double nok, const double* __restrict__ atoms,
-                                               double atol, int cell, int lane) {
+// The recover kernel's test of a recomputed cell's result after recovery pass k: its flag (redo), count and done;
+// returns on every lane RECOVERY_PASSED, RECOVERY_FAILED, or RECOVERY_RETRY (computed again, nothing written:
+// should_retry).
+constexpr int RECOVERY_PASSED = 0;
+constexpr int RECOVERY_FAILED = 1;
+constexpr int RECOVERY_RETRY = 2;
+// size-limit-ok: 12, the guard's test (check_cell's 7) and what it writes; a struct would be built for one call
+__device__ __forceinline__ int recovery_outcome(const double* __restrict__ x0, double* xout, int* doneo, int* redo,
+                                                int* count, int dn, double nok, const double* __restrict__ atoms,
+                                                double atol, int cell, int k, int lane) {
   __syncwarp();
-  int bad = 0;
+  int r = RECOVERY_PASSED;
   if (lane == 0) {
-    bad = check_cell(x0, xout, dn, nok, atoms, atol, cell);
-    if (bad) doneo[cell] = 0;  // done: finished and passing the guard
-    redo[cell] = bad ? 2 : 1;
-    atomicAdd(count + (bad ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
+    const int bad = check_cell(x0, xout, dn, nok, atoms, atol, cell);
+    if (should_retry(bad, k)) {
+      r = RECOVERY_RETRY;
+    } else {
+      if (bad) doneo[cell] = 0;  // done: finished and passing the guard
+      redo[cell] = bad ? 2 : 1;
+      atomicAdd(count + (bad ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
+      r = bad ? RECOVERY_FAILED : RECOVERY_PASSED;
+    }
   }
-  return __shfl_sync(FULL, bad, 0) != 0;
+  return __shfl_sync(FULL, r, 0);
 }
 
 // The warp's next cell from the queue.

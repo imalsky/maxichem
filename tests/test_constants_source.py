@@ -34,6 +34,7 @@ FORMULA_COEFFICIENTS = {"GAMMA", "RODAS_C21", "RODAS_C43", "TROE_C0", "TROE_C1",
 KERNEL_CODES = {
     "REFUSED_COLD", "REFUSED_BAD_INPUT", "REFUSED_HOT",  # a cell's screening status
     "GUARD_NONFINITE", "GUARD_UNFINISHED", "GUARD_DRIFT",  # the guard's failure bits
+    "RECOVERY_PASSED", "RECOVERY_FAILED", "RECOVERY_RETRY",  # a recovery pass's outcome in the derivative kernels
     "OZ", "ON1", "KS", "CP",  # the adjoint's work-array offsets, its stages' spacing and its checkpoint count
 }  # fmt: skip
 COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)

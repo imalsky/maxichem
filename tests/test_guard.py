@@ -1,6 +1,8 @@
 """The guard and the recovery, input checks, and the independence of results from the batch."""
 
 import ctypes
+import json
+from pathlib import Path
 
 import helpers
 import libref
@@ -8,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from maxichem import _cuda, kincuda, kincuda_ad
+from maxichem import _cuda, kincuda, kincuda_ad, kinvulcan, paths
 
 pytestmark = pytest.mark.gpu
 CLOSED_SOLVER_BYTES = 4096  # the counts stay readable after close: two small tensors, in allocator blocks
@@ -385,3 +387,28 @@ def test_drift_beyond_the_allowance_is_flagged(read_network, gpu):
     print(f"drift {DRIFTS} allowances: flagged {values['redo'].tolist()}; counts {counts}")
     assert values["redo"].tolist() == [int(r > 1.0) for r in DRIFTS]
     assert counts["drift"] == counts["recomputed"] == sum(r > 1.0 for r in DRIFTS)
+
+
+def test_one_step_call_whose_recovery_drifts_is_retried(gpu):
+    # Box 98666's last call (tests/data/recovery_box98666.json): one step of 5.6e7 s from its first try, the guard
+    # flags the element drift, and the recovery's own one step drifts again. Its retry from the inputs with a smaller
+    # first try passes.
+    case = json.loads((Path(__file__).parent / "data" / "recovery_box98666.json").read_text())
+    thermo = paths.vulcan_thermo()
+    net = kinvulcan.VulcanNetwork(thermo / case["network"], thermo / "NASA9", species=case["species"])
+    J = [case["J"][f"{r['absorber']},{r['branch']}"] for r in net.photo]
+    with kincuda.CudaSolver(net, gpu, photo=True) as solver:
+        y, _, done, _, flag = solver.launch(
+            helpers.tensor([case["x"]], gpu),
+            helpers.full(1, case["T"], gpu),
+            helpers.full(1, case["P"], gpu),
+            helpers.full(1, case["dt"], gpu),
+            helpers.full(1, case["h"], gpu),
+            J=helpers.tensor([J], gpu),
+        )
+        counts, allowance = dict(solver.fallback), solver.drift
+    shares = [(np.asarray(v) @ net.atoms) / (np.asarray(v) @ net.atoms).sum() for v in (case["x"], y[0].cpu().numpy())]
+    moved = float(np.abs(shares[1] / shares[0] - 1.0).max())
+    print(f"flag {int(flag[0])}, done {bool(done[0])}, shares moved {moved:.2e} of {allowance:.0e}; {counts}")
+    assert (int(flag[0]), bool(done[0]), counts["recovered"], counts["still_failed"]) == (1, True, 1, 0)
+    assert moved <= allowance

@@ -594,33 +594,41 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
     __syncwarp();
     const bool hfin = isfinite(hin[cell]);  // a non-finite h acts as dt (no sensitivity to it), and is counted
     if (!DN && !hfin && lane == 0) atomicAdd(count + COUNT_NONFINITE_H, 1);
-    const double hi = hfin ? hin[cell] : dt, m0 = fmin(hi, dt), h0 = fmax(m0, H_MIN);
+    const double hi = hfin ? hin[cell] : dt, m0 = fmin(hi, dt);
     const Rates coef = {kf, kr, nd};
-    StepState step = {h0, 0.0, 0.0, 0.0, 0.0, false};
-    int na = 0;
     const bool run = dt > 0.0 && stepped;
+    int k = 0, na = 0;  // k: the recovery pass whose result is the cell's, its first try at most dt REC_RETRY_SPLIT^k
+    double h0 = 0.0, s = 0.0, gs = 0.0;
+    StepState step = {0.0, 0.0, 0.0, 0.0, 0.0, false};
     Attempt last = {0.0, 0.0, false};  // the last attempt run (its stages are in place)
-    // forward: the state before each of the first CP attempts (and whether it was accepted)
-    while (run && na < max_steps && step.t < dt * CALL_END) {
-      if (na < CP) save_attempt(recA + na * REC, N, step, lane);
-      last = forward_step<DN>(work, c, Wd, step, dt, coef, tol, tab, streams, lane, myt);
-      if (na < CP && lane == 0) recA[na * REC + REC_OK] = last.ok ? 1.0 : 0.0;
-      na++;
-    }
-    const double s = write_state(N, xout + (size_t)cell * NS, perm, lane, lane, 32);
-    double gs = 0.0;
-    for (int i = lane; i < NS; i += 32) gs += gx[(size_t)cell * NS + perm[i]] * N[i];
-    gs = wsum(gs);
-    const int dn = (stepped && step.t >= dt * CALL_END) ? 1 : 0;
-    if (lane == 0) {
-      hout[cell] = step.h;
-      doneo[cell] = dn;
-      noko[cell] = step.nok;
-    }
-    bool bad = false;
-    if (DN) {
-      bad = recovery_fails(x0, xout, doneo, redo, count, dn, step.nok, atoms, atol, cell, lane);
-      if (bad) na = 0;  // no reverse: NaN cotangents below
+    int outcome = RECOVERY_PASSED;
+    for (;; k++) {
+      for (int i = lane; k > 0 && i < NS; i += 32) N[i] = x0[(size_t)cell * NS + perm[i]];  // a retry from the inputs
+      __syncwarp();
+      h0 = fmax(recovery_start(m0, dt, k), H_MIN);
+      step = {h0, 0.0, 0.0, 0.0, 0.0, false};
+      na = 0;
+      // forward: the state before each of the first CP attempts (and whether it was accepted)
+      while (run && na < max_steps && step.t < dt * CALL_END) {
+        if (na < CP) save_attempt(recA + na * REC, N, step, lane);
+        last = forward_step<DN>(work, c, Wd, step, dt, coef, tol, tab, streams, lane, myt);
+        if (na < CP && lane == 0) recA[na * REC + REC_OK] = last.ok ? 1.0 : 0.0;
+        na++;
+      }
+      s = write_state(N, xout + (size_t)cell * NS, perm, lane, lane, 32);
+      gs = 0.0;
+      for (int i = lane; i < NS; i += 32) gs += gx[(size_t)cell * NS + perm[i]] * N[i];
+      gs = wsum(gs);
+      const int dn = (stepped && step.t >= dt * CALL_END) ? 1 : 0;
+      if (lane == 0) {
+        hout[cell] = step.h;
+        doneo[cell] = dn;
+        noko[cell] = step.nok;
+      }
+      outcome = DN ? recovery_outcome(x0, xout, doneo, redo, count, dn, step.nok, atoms, atol, cell, k, lane)
+                   : RECOVERY_PASSED;
+      if (outcome == RECOVERY_FAILED) na = 0;  // no reverse: NaN cotangents below
+      if (outcome != RECOVERY_RETRY) break;
     }
     // reverse: x = N / sum N
     for (int i = lane; i < NS; i += 32) Nb[i] = gx[(size_t)cell * NS + perm[i]] / s - gs / (s * s);
@@ -709,14 +717,17 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       }
     }
     __syncwarp();
-    // h0 = max(min(hin, dt), H_MIN)
+    // h0 = max(mk, H_MIN), mk = m0 = min(hin, dt) on the first pass, min(m0, dt split^k) on pass k > 0
     {
-      const double wm = m0 > H_MIN ? 1.0 : (m0 < H_MIN ? 0.0 : 0.5);
+      const double split = pow(REC_RETRY_SPLIT, (double)k), cap = dt * split, mk = recovery_start(m0, dt, k);
+      const double wm = mk > H_MIN ? 1.0 : (mk < H_MIN ? 0.0 : 0.5);
       const double wh = !hfin ? 0.0 : (hi < dt ? 1.0 : (hi > dt ? 0.0 : 0.5));
-      const double mb = run ? wm * hb : 0.0;
+      const double wc = k == 0 ? 0.0 : (cap < m0 ? 1.0 : (cap > m0 ? 0.0 : 0.5));  // mk's share from the cap
+      const double mkb = run ? wm * hb : 0.0, mb = k == 0 ? mkb : (1.0 - wc) * mkb;
       if (lane == 0) {
         ghin[cell] = wh * mb;
         gdt[cell] = dtb + (1.0 - wh) * mb;
+        if (k > 0) gdt[cell] += wc * mkb * split;
       }
     }
     for (int i = lane; i < NS; i += 32) gx0[(size_t)cell * NS + perm[i]] = Nb[i];
@@ -735,7 +746,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
       gT[cell] = run ? gTt - lnd / Tc : 0.0;
       gP[cell] = run ? lnd / Pc : 0.0;
     }
-    if (DN && bad) nan_cotangents(gx0, gT, gP, gdt, ghin, glm, gJ, gA, cell, lane);  // still failed after the recovery
+    if (DN && outcome == RECOVERY_FAILED) nan_cotangents(gx0, gT, gP, gdt, ghin, glm, gJ, gA, cell, lane);
     q = next_queued<DN>(count, lane);
   }
 }

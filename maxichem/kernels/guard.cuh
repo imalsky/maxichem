@@ -5,6 +5,10 @@ constexpr int GUARD_NONFINITE = 4;
 constexpr int GUARD_UNFINISHED = 8;
 constexpr int GUARD_DRIFT = 16;
 
+// Whether a recomputed cell's result c (check_cell's bits) after recovery pass k is computed once more
+// (recovery_start): it finished and is finite, only its element shares drifted, and retries are left.
+__device__ __forceinline__ bool should_retry(int c, int k) { return c == GUARD_DRIFT && k < REC_RETRIES; }
+
 // Whether an element's share moved beyond rounding (DRIFT) and what clamping accepted negatives can add.
 __device__ __forceinline__ bool shares_drifted(const double (&e0)[NEL], const double (&e1)[NEL], double s0, double s1,
                                                double nok, double atol) {

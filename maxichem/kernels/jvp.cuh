@@ -239,6 +239,7 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
   const Tolerance tol = {rtol, atol};
   if (lane == 0) kf[RATE_ZERO] = 0.0;       // the zero rate of the Jacobian's padding words
   double hd[DMAX], tdot[DMAX], dlnd[DMAX];  // per direction: h, t, ln nd tangents (warp-uniform)
+  double md[DMAX];                          // the tangent of m = min(h, dt), the call's starting step
   double pend[DMAX], phad[DMAX];            // the previous attempt's error and size tangents
   const int nc = DN ? count[COUNT_RECOMPUTED] : B;
   int q = (int)(blockIdx.x * WPB + wib);
@@ -273,70 +274,88 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
         rates_tan(work, dk + 2 * NR * d, Tc, nd, dTc, dlnd[d], lmc, dlm ? dlm + qd * NR : nullptr,
                   dJin ? dJin + qd * NJ : nullptr, rc, drc ? drc + (size_t)d * NR * 9 : nullptr, rf, nasa, kf, kr, cw,
                   tab, lane);
-      const double md = !hfin ? ddt : (hi < dt ? dhi : (hi > dt ? ddt : 0.5 * (dhi + ddt)));
-      hd[d] = m > H_MIN ? md : (m < H_MIN ? 0.0 : 0.5 * md);
-      tdot[d] = 0.0;
-      pend[d] = 0.0;
-      phad[d] = 0.0;
+      md[d] = !hfin ? ddt : (hi < dt ? dhi : (hi > dt ? ddt : 0.5 * (dhi + ddt)));
     }
     __syncwarp();
     const Rates coef = {kf, kr, nd};
-    StepState step = {fmax(m, H_MIN), 0.0, 0.0, 0.0, 0.0, false};
-    int it = (dt > 0.0 && run) ? 0 : max_steps;
-    while (it < max_steps && step.t < dt * CALL_END) {
-      const double rem = dt - step.t, ha = fmin(step.h, rem), h = step.h;
-      const bool first = step.t == 0.0;
-      double dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
-      const Attempt a = run_attempt<DN>(work, c, Wd, ha, first, coef, tol, tab, streams, lane, myt);
-      const bool ok = a.ok;
-      const double en = a.en;
-      const double fac = step_factor_partials(en, ok, step.prej, step.pen, step.pha, ha, dfe, dfh, dfp, dfq);
-      // the error's tangent where this factor depends on it, or the next attempt's secant may (a rejection, err > 1)
-      const bool wte = ok || (adapt && (dfe != 0.0 || (!ok && isfinite(en) && en > 1.0)));
-      for (int d = 0; d < D; d++) {  // each direction's tangent on the attempt in place
-        const double ddt = adapt ? ddta[(size_t)d * B + cell] : 0.0;
-        const double had = !adapt ? 0.0 : (h < rem ? hd[d] : (h > rem ? ddt - tdot[d] : 0.5 * (hd[d] + ddt - tdot[d])));
-        double end = 0.0;
-        if (wte) {
-          double* ng = Ng + d * NS;
-          for (int i = lane; i < NS; i += 32) Nd[i] = ng[i];
-          __syncwarp();
-          end = tangent_step<DN>(work, c, Wd, a, ha, first, had, adapt, coef, dk + 2 * NR * d, dlnd[d], va, tol, tab,
-                                 streams, lane, myt);
-          if (ok)
-            for (int i = lane; i < NS; i += 32) ng[i] = Y[i] >= 0.0 ? Yd[i] : 0.0;
-          __syncwarp();
+    for (int k = 0;; k++) {  // recovery pass k > 0: the cell again from its inputs, its first try at most dt split^k
+      const double split = pow(REC_RETRY_SPLIT, (double)k), mk = recovery_start(m, dt, k), cap = dt * split;
+      if (k > 0) {
+        for (int i = lane; i < NS; i += 32) N[i] = x0[(size_t)cell * NS + perm[i]];
+        for (int d = 0; d < D; d++)
+          for (int i = lane; i < NS; i += 32) Ng[d * NS + i] = dx0[((size_t)d * B + cell) * NS + perm[i]];
+        __syncwarp();
+      }
+      for (int d = 0; d < D; d++) {  // mk = min(m, dt split^k) after the first pass
+        const double dcap = (adapt ? ddta[(size_t)d * B + cell] : 0.0) * split;
+        const double mdk = k == 0 || cap > m ? md[d] : (cap < m ? dcap : 0.5 * (md[d] + dcap));
+        hd[d] = mk > H_MIN ? mdk : (mk < H_MIN ? 0.0 : 0.5 * mdk);
+        tdot[d] = 0.0;
+        pend[d] = 0.0;
+        phad[d] = 0.0;
+      }
+      StepState step = {fmax(mk, H_MIN), 0.0, 0.0, 0.0, 0.0, false};
+      int it = (dt > 0.0 && run) ? 0 : max_steps;
+      while (it < max_steps && step.t < dt * CALL_END) {
+        const double rem = dt - step.t, ha = fmin(step.h, rem), h = step.h;
+        const bool first = step.t == 0.0;
+        double dfe = 0.0, dfh = 0.0, dfp = 0.0, dfq = 0.0;
+        const Attempt a = run_attempt<DN>(work, c, Wd, ha, first, coef, tol, tab, streams, lane, myt);
+        const bool ok = a.ok;
+        const double en = a.en;
+        const double fac = step_factor_partials(en, ok, step.prej, step.pen, step.pha, ha, dfe, dfh, dfp, dfq);
+        // the error's tangent where this factor depends on it, or the next attempt's secant may (a rejection, err > 1)
+        const bool wte = ok || (adapt && (dfe != 0.0 || (!ok && isfinite(en) && en > 1.0)));
+        for (int d = 0; d < D; d++) {  // each direction's tangent on the attempt in place
+          const double ddt = adapt ? ddta[(size_t)d * B + cell] : 0.0;
+          const double had =
+              !adapt ? 0.0 : (h < rem ? hd[d] : (h > rem ? ddt - tdot[d] : 0.5 * (hd[d] + ddt - tdot[d])));
+          double end = 0.0;
+          if (wte) {
+            double* ng = Ng + d * NS;
+            for (int i = lane; i < NS; i += 32) Nd[i] = ng[i];
+            __syncwarp();
+            end = tangent_step<DN>(work, c, Wd, a, ha, first, had, adapt, coef, dk + 2 * NR * d, dlnd[d], va, tol, tab,
+                                   streams, lane, myt);
+            if (ok)
+              for (int i = lane; i < NS; i += 32) ng[i] = Y[i] >= 0.0 ? Yd[i] : 0.0;
+            __syncwarp();
+          }
+          if (ok) tdot[d] += had;
+          hd[d] = adapt ? had * fac + ha * (dfe * end + dfh * had + dfp * pend[d] + dfq * phad[d]) : 0.0;
+          pend[d] = end;
+          phad[d] = had;
         }
-        if (ok) tdot[d] += had;
-        hd[d] = adapt ? had * fac + ha * (dfe * end + dfh * had + dfp * pend[d] + dfq * phad[d]) : 0.0;
-        pend[d] = end;
-        phad[d] = had;
+        accept_try(step, N, Y, ok, ha, lane, 32);
+        __syncwarp();
+        next_try(step, fac, ok, en, ha);
+        it++;
       }
-      accept_try(step, N, Y, ok, ha, lane, 32);
-      __syncwarp();
-      next_try(step, fac, ok, en, ha);
-      it++;
-    }
-    const double s = write_state(N, xout + (size_t)cell * NS, perm, lane, lane, 32);
-    for (int d = 0; d < D; d++) {
-      const double* ng = Ng + d * NS;
-      double pd = 0.0;
-      for (int i = lane; i < NS; i += 32) pd += ng[i];
-      const double sd = wsum(pd);
-      for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + perm[i]] = (ng[i] - N[i] / s * sd) / s;
-      if (lane == 0) dhout[(size_t)d * B + cell] = hd[d];
-    }
-    const int dn = (run && step.t >= dt * CALL_END) ? 1 : 0;
-    if (lane == 0) {
-      hout[cell] = step.h;
-      doneo[cell] = dn;
-      noko[cell] = step.nok;
-    }
-    if (DN && recovery_fails(x0, xout, doneo, redo, count, dn, step.nok, atoms, atol, cell, lane))
+      const double s = write_state(N, xout + (size_t)cell * NS, perm, lane, lane, 32);
       for (int d = 0; d < D; d++) {
-        for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + i] = DNAN;
-        if (lane == 0) dhout[(size_t)d * B + cell] = DNAN;
+        const double* ng = Ng + d * NS;
+        double pd = 0.0;
+        for (int i = lane; i < NS; i += 32) pd += ng[i];
+        const double sd = wsum(pd);
+        for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + perm[i]] = (ng[i] - N[i] / s * sd) / s;
+        if (lane == 0) dhout[(size_t)d * B + cell] = hd[d];
       }
+      const int dn = (run && step.t >= dt * CALL_END) ? 1 : 0;
+      if (lane == 0) {
+        hout[cell] = step.h;
+        doneo[cell] = dn;
+        noko[cell] = step.nok;
+      }
+      if (!DN) break;
+      const int outcome = recovery_outcome(x0, xout, doneo, redo, count, dn, step.nok, atoms, atol, cell, k, lane);
+      if (outcome == RECOVERY_RETRY) continue;
+      if (outcome == RECOVERY_FAILED)
+        for (int d = 0; d < D; d++) {
+          for (int i = lane; i < NS; i += 32) dxout[((size_t)d * B + cell) * NS + i] = DNAN;
+          if (lane == 0) dhout[(size_t)d * B + cell] = DNAN;
+        }
+      break;
+    }
     q = next_queued<DN>(count, lane);
   }
 }

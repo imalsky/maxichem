@@ -131,6 +131,13 @@ with W formed densely and factored by LU with threshold partial pivoting. Rows e
 `REC_STEPS` times the tries, applies the guard's test to its result, and counts the cell as recovered or still failed. A
 still-failed cell returns done = 0.
 
+A recomputed result that is finite and finished but fails the element test again is computed once more from the inputs, up to
+`REC_RETRIES` times, with the first try of retry k at most dt `REC_RETRY_SPLIT`^k. In the cases seen (notes.md), such a
+failure comes from a call of one or a few long steps, whose rounding drift is a single draw; a smaller first try changes the steps, and with them the draw. A
+non-finite or unfinished result is not retried, since a smaller first try does not cure it. A cell saved by a retry counts as
+recovered; one that fails every retry as still failed. A cell that passes the guard or the first recovery pass is computed as
+before, bit for bit.
+
 Each cell's arithmetic depends only on its inputs, so results are bitwise reproducible on one GPU whatever the batch order.
 
 ### Refused cells
@@ -212,7 +219,9 @@ The rate cotangents reduce to T, P and the per-cell log multipliers in the kerne
 in a fixed order. No atomics enter the arithmetic, only the cell queue, so the same inputs give the same bits on one GPU.
 
 **Recovered cells.** After each kernel, the call's guard lists the cells `CudaSolver` would recompute. A second kernel redoes
-each on the recovery's path and differentiates that path, with the dense pivoted factors and up to `2 CAP` stored attempts. A
+each on the recovery's path, retries included, and differentiates the pass whose result is the cell's, with the dense pivoted
+factors and up to `2 CAP` stored attempts. A retry's first try min(h, dt `REC_RETRY_SPLIT`^k) passes its cotangent to h or
+dt, whichever is smaller (half to each at a tie). A
 result that passes the guard's test has flag 1. One that does not has flag 2, and its tangents and per-cell cotangents are NaN. The rate-table cotangent, a sum over the batch, leaves
 such a cell out, and the `still_failed` count says how many were left out: it is then the rate table's cotangent of the other cells alone.
 

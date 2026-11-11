@@ -21,6 +21,8 @@ constexpr double SECANT_MAX_ORDER = SECANT_MAX_ORDER_VALUE;
 constexpr double SECANT_TARGET = SECANT_TARGET_VALUE;
 constexpr double PIVTAU = PIVTAU_VALUE;
 constexpr double ELEMENT_PIVOT_MIN = ELEMENT_PIVOT_MIN_VALUE;
+constexpr double REC_RETRIES = REC_RETRIES_VALUE;
+constexpr double REC_RETRY_SPLIT = REC_RETRY_SPLIT_VALUE;
 constexpr double NASA_SPLIT_T = NASA_SPLIT_T_K;  // K, from maxichem/_constants.py
 // The Troe factor's published coefficients (Venot et al. 2012, eq. C.2-C.5).
 constexpr double TROE_C0 = 0.4;
@@ -113,6 +115,12 @@ __device__ __forceinline__ void accept_try(StepState& s, double* N, const double
     s.t += ha;
     s.nok += 1.0;
   }
+}
+
+// The recovery's starting step on pass k (0: the call's, m = min(h, dt)): from pass 1 on at most dt REC_RETRY_SPLIT^k,
+// s. A pass k > 0 runs only when the pass before it finished and failed the guard's element test (should_retry).
+__device__ __forceinline__ double recovery_start(double m, double dt, int k) {
+  return k == 0 ? m : fmin(m, dt * pow(REC_RETRY_SPLIT, (double)k));
 }
 
 // The next try's size from the step factor fac after a try of size ha with error en, and what the next factor reads

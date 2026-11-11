@@ -39,7 +39,7 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 | Member | Meaning |
 | --- | --- |
 | `solver(x, T, P, dt, h, *, rtol, atol, max_steps, J)` | Returns a `CallResult` (x, h, done, steps); raises if it refused a cell |
-| `launch(...)` | The same, as a `LaunchResult` with the per-cell flag added: 0 passed the guard, 1 recomputed and passes, 2 recomputed and still fails |
+| `launch(...)` | The same, as a `LaunchResult` with the per-cell flag added: 0 passed the guard, 1 recomputed and passes (a recomputation that drifts is retried with a smaller first try, [method.md](method.md#guard-and-recovery)), 2 recomputed and still fails |
 | `flag` | The last call's per-cell flag (int32 [B]), set when `launch` or a call returns; None before the first call and after any call that raised (a refused cell has flag 0, so a flag of a refused call would read as passed) |
 | `fallback` | The last call's counts, as a dict |
 | `check()` | The counts since construction; raises if any cell was below `T_MIN` or above `T_MAX` |
