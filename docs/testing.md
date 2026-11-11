@@ -29,7 +29,7 @@ A check whose `VULCAN_THERMO`, reference data (README.md lists them) or CUDA too
 | `test_kernel_copies.py` | The call, recovery, tangent and adjoint kernels return the same x, h, done, steps, status and flag on edge inputs: a non-finite or too long starting step, dt = 0, refused cells beside good ones, a first try rejected twice running | GPU |
 | `test_parity.py` | The call against a stored reference of an independent torch solver | GPU, data |
 | `test_guard.py` | The guard and recovery; the guard alone on hand-made results whose element share moved by 0.5 to 2 times the drift allowance (flagged only above it); refused cells (the call raises, and the kernels' counts and the other cells' results, read with the raise switched off); independence from the batch; what a closed solver refuses and releases; the call's and `launch`'s named results and the flag they set, which is None after a call that raised | GPU, data |
-| `test_dense_lu.py` | The recovery's dense LU and solve, run by a harness kernel (`tests/dense_lu_check.cu`), against threshold partial pivoting written out in numpy: the row order, L U = P A and the solve, on matrices that exchange rows at a third of the pivots or more and keep rows where plain partial pivoting would not, and a tie in the pivot search | GPU |
+| `test_dense_lu.py` | The recovery's dense LU and solve, run by a harness kernel (`tests/dense_lu_check.cu`), against threshold partial pivoting written out in numpy: the row order, L U = P A and the solve, on row-shuffled dominant matrices that exchange rows at half the pivots or more, random matrices where the threshold keeps at least one row that plain partial pivoting would exchange, and a tie in the pivot search | GPU |
 | `test_call_interface.py` | Every optional argument of the call, `launch`, `jvp`, `vjp` and both constructors is keyword only, checked one parameter at a time, and a setting passed by position raises TypeError; their results, and the vjp's cotangents with one field per input, are named tuples whose fields keep the old order | CPU |
 | `test_ad.py` | Derivatives against finite differences and against each other | GPU, data, slow |
 | `test_export_cpp.py` | The C++ caller, bit for bit, through its default arguments too; it refuses the inputs the Python call refuses, with the same message and counts; it refuses another export format, and at construction an export whose kernel argument lists differ from its own (unknown, missing, repeated or misplaced name, J on the guard); a thermal export takes an empty [B, 0] J with the same bits and refuses a [B, 1] one with the Python call's message; changing what the accessors return leaves the solver as it was | GPU, CUDA toolkit, slow |
@@ -58,7 +58,9 @@ largest error above 1.
 Not covered by an independent test: efficiencies in a mixed gas (only the bulk gas's is used) and inside a falloff's Pr;
 the collision limit on a pair of unequal molecularity; the special law's limits of Pr and its pressure tangent; a NASA-9
 split moved by only 50 K (the tests' points are 100 K from it); a photolysis branch whose first product repeats; ties
-in the dense LU beyond column 0; element drift in an element other than He (the guard's test moves only He's share).
+in the dense LU beyond column 0; element drift in an element other than He (the guard's test moves only He's share); the
+warp race in the dense LU's row exchange that the `__syncwarp` after the exchange test in `maxichem/kernels/recover.cuh` closes
+(`test_dense_lu.py` passes on the code without it, and no test can force the race).
 
 ## The derivative cases
 

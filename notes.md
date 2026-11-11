@@ -20,12 +20,13 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
 ### Code
 - maxichem solves a VULCAN-format network as a batched 0-D solver: one call per cell per GCM step. The whole call
   (rates, every step, the step control) runs in one CUDA kernel, generated from the network and compiled at run time
-  (NVRTC). Persistent warps take cells from a queue; no host loop and no host sync.
+  (NVRTC). Persistent warps take cells from a queue; no host loop. Each call reads its counts back once (its one
+  host sync), so it can raise on refused cells.
 - Default network: VULCAN-JAX's NCHO_photo (69 species, 390 thermal reactions, 48 photolysis branches). All 11
   VULCAN-JAX networks load and run (4,096 cells, 21 calls: 0 unfinished, 0 failed, element shares within 3.8e-11). The
   generator caps a network at 254 species. The sulfur network is SNCHO_photo_network_2025 (91 species, 4 warps per
   cell; since 2026-11-04, replacing SNCHO_photo, 88 species).
-- Production numerics: the module docstring of maxichem/kincuda.py holds every setting. In short: Rodas3; a sparse LU
+- Production numerics: maxichem/_constants.py holds every setting. In short: Rodas3; a sparse LU
   without pivoting in a minimum-degree order; rtol 1e-3; atol 1e-25 (kincuda.ATOL); the step size carried between calls;
   the first try judged by its worst species; the V3F step rule; the collision limit on rates; a guard and a device-side
   recovery (40,000 tries). Why each: the topics below.
@@ -409,8 +410,8 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   contract (A0c: the entering step size held) was tested in the torch reference only; its dt derivative tracks A's
   within p90 2.1e-4; not in the kernels.
 - Recovered cells: the derivative kernels redo the cells the guard flags as the recover kernel does and differentiate
-  that path. A cell that still fails gets NaN derivatives and is counted. The derivative calls have no host sync (guard
-  counts stay on the device).
+  that path. A cell that still fails gets NaN derivatives and is counted. As the call, each derivative call reads its counts
+  back once (one host sync), to raise on refused cells.
 - Cost (53-species network, idle GPU, state advanced every call): JVP / VJP 2.3-3.5x the forward call; ~0.80 / 0.78 us
   per cell-call at 1 M cells. Not remeasured on the current networks.
 - The starting-step derivative of ill-conditioned 300 K cold cells is not computable in fp64: an independent torch
