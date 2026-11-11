@@ -2042,11 +2042,42 @@ per-cell setup for the tangent and adjoint kernels would take about 18 arguments
   in (c) and (c) + the call's tail, yet those pairs differ by 0.67 and 0.58 % on the sulfur network: a paired standard
   error of 0.05 % understates the run's floor, which is near 0.7 %. Nothing reaches 1 %, so every step stays. The call
   with the shared tail against the call written out: +0.02, +0.11, +0.23 and +0.20 % (NCHO dark, lit, S25 dark, lit).
-- Checks on the final tree (6204fa6; local main had not moved): CPU 113 passed in 30 s; slow CPU 4 passed in 118 s;
-  parity and guard 48 passed in 259 s; known answers, order, rate laws, kernel copies and dense LU 25 passed in 365 s;
-  test_vulcan_truth 2 passed in 215 s (NCHO 0 misses, worst 0.014 dex on boxes, 0.004 on paths; sulfur pins held);
-  test_export_cpp 19 passed in 590 s; test_ad 81 passed in 1053 s (0 FAIL lines); pre-commit on all files passes with
-  the header written.
+- Speed, second measurement (supersedes the jvp column above; asked for by an independent review of the branch, since
+  +0.71 % with a 0.06 % standard error is near 1 % and unclear). 8 fresh processes, each building cecbf8e, a second
+  copy of cecbf8e (`base2`) and the final kernels in a random order, then 6 rounds timing every version's jvp and vjp
+  in a random order (4,096 unreacted cells over 500 s, the same inputs for every version); GPU 1 had no other process
+  at any of the 9 checks between processes. Mean over runs of each run's relative difference against cecbf8e, its
+  standard error and the range over runs:
+  | | NCHO jvp | NCHO vjp | S25 jvp | S25 vjp |
+  | --- | --- | --- | --- | --- |
+  | cecbf8e | 460.96 ms | 940.03 ms | 1457.72 ms | 3067.53 ms |
+  | base2 (the same code) | +0.24 +- 0.09 % (-0.12 to +0.68) | +0.02 +- 0.08 (-0.33 to +0.22) | +0.09 +- 0.09 (-0.32 to +0.53) | +0.07 +- 0.04 (-0.13 to +0.26) |
+  | final | +0.10 +- 0.09 % (-0.24 to +0.40) | +0.11 +- 0.07 (-0.15 to +0.32) | -0.06 +- 0.07 (-0.31 to +0.32) | -0.01 +- 0.04 (-0.13 to +0.19) |
+  The final kernels sit inside the copy-to-copy floor (up to 0.24 % in the mean, 0.68 % in one run), so the sulfur
+  jvp's +0.71 % was the label artefact the first run's identical pairs showed. No cost; every step stays.
+- After the review, three more commits. (1) The checker reads explicit specialisations (`f<int>`), operators
+  (`S::operator()`, which it skipped before: 9 arguments) and commas inside `<...>`, and reports an unsupported
+  declaration (a function returning a function pointer, a parameter list using a function-like macro) instead of
+  passing it; each of the five forms is a test that the previous checker passes. (2) The last hand carvings went into
+  the tables: the call's rates region (CR_*: v, the S v pieces at v + NR and the room G / RT may take beyond v), the
+  retry copy (RSC_*: F, u, -Jn), the tangents' per-direction scratch (JD_*), and the recovery's dense W (W_DOUBLES,
+  which the host's derivative scratch also takes). Generated values equal the old expressions in 376 of 376 cases;
+  compiled kernels equal in 77 of 77 variants at the card's size and in the test forms (at 49152 B only
+  `.nv.info.recover`, NVRTC's own spread). (3) Each remaining size exception says why its list stays flat; the
+  derivative entries are bound by ADSolver, not by the C++ caller (which loads only call, guard and recover).
+- Proofs added after the review, bitwise against cecbf8e: 2,261,235 numbers, 0 differ. The tangents' recovery with 3
+  directions carrying lm, rate-table and J tangents at max_steps 20 (512 of 512 cells recomputed; recovered 511 on
+  NCHO_photo and 327 on SNCHO 2025, the rest NaN as failed cells), the adjoint's recovery with lm, rc and gh, a vjp with
+  adapt off over 1e8 s (234 and 286 accepted steps against CAP 100: the frozen checkpoint replay); NCHO_photo with the
+  trailing block cut to 8 rows, so the call's rates sit after its arrays (rates_fit_in_block false), calls with h = dt
+  = 1e3 s and of 1e6 s (many steps, the last cut to dt), and a recovery; the recovery with W in shared memory
+  (NCHO_photo) and in global memory (SNCHO 2025). The recoveries at max_steps 2 all ended still failed, so their
+  successful path in the solver is proved only by the earlier dumps' recovery cases.
+- Checks on the final tree (4ac62a7; local main had not moved): CPU 115 passed in 26 s; slow CPU 4 passed in 100 s;
+  parity and guard 48 passed in 226 s; known answers, order, rate laws, kernel copies and dense LU 25 passed in 333 s;
+  test_vulcan_truth 2 passed in 208 s (NCHO 0 misses, worst 0.014 dex on boxes; sulfur pins held); test_export_cpp
+  19 passed in 542 s; test_ad 81 passed in 1036 s (0 FAIL lines). The same tiers passed on 6204fa6 before the
+  review's commits.
 
 ## References (by topic)
 
