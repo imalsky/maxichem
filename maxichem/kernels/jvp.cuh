@@ -135,7 +135,7 @@ __device__ __forceinline__ double error_tangent(const double* N, const double* N
 // Tangent of the attempt a just taken (K1..K4, Y, the factors, u, a.c0 in place; size ha, first while no step of the
 // call is accepted; DN: the recovery's dense factors) for the state tangent Nd, the step-size tangent had and the rate
 // tangents: Yd = the new state's tangent; returns the error's tangent (adapt) or 0.
-// size-limit-ok: 17 arguments: the attempt's factors and outcome, one direction's three tangents, the work arrays
+// size-limit-ok: one attempt with one direction's h, rate and ln nd tangents; a struct of those would serve only here
 template <bool DN>
 __device__ __forceinline__ double tangent_step(double* work, const double (&c)[NT], const double* Wd, const Attempt& a,
                                                double ha, bool first, double had, int adapt, const Rates& k,
@@ -337,14 +337,14 @@ __device__ __forceinline__ void jvp_cells(JVP_ARGS, int* redo, const int* list, 
   }
 }
 
-// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
+// size-limit-ok: a kernel entry: ADSolver binds each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(32 * WPB) jvp(JVP_ARGS) {
   jvp_cells<false>(JVP_PASS, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // After jvp and the guard: the listed cells redone on the recovery's path with their tangents (redo, list: the
 // guard's).
-// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
+// size-limit-ok: a kernel entry: ADSolver binds each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(32 * WPB)
     jvp_rec(JVP_ARGS, int* __restrict__ redo, const int* __restrict__ list, double* __restrict__ wscr,
             const u16* __restrict__ didx, const double* __restrict__ atoms) {

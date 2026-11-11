@@ -506,7 +506,7 @@ __device__ __forceinline__ void error_cotangent(const double* N, const double* Y
 
 // The rate cotangents lbk -> the log multipliers glm, J, gA (the forward coefficients before the limit, for arrh), and
 // this lane's parts of the cotangents of T (gTl) and ln nd (gnl).
-// size-limit-ok: 18: rates()'s inputs, the cotangents in, and an output for each input the rates depend on
+// size-limit-ok: rates()'s inputs and a cotangent output for each, so it shrinks only with rates()
 __device__ __forceinline__ void rate_cotangents(double* work, const double* lbk, const double* kf, const double* cw,
                                                 const double* lmc, const double* __restrict__ rc,
                                                 const int* __restrict__ rf, const double* __restrict__ nasa,
@@ -738,14 +738,14 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
   }
 }
 
-// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
+// size-limit-ok: a kernel entry: ADSolver binds each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(32 * WPB) vjp(VJP_ARGS) {
   vjp_cells<false>(VJP_PASS, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // After vjp and the guard: the listed cells redone on the recovery's path with their cotangents (redo, list: the
 // guard's; rec holds CAPR attempts per warp).
-// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
+// size-limit-ok: a kernel entry: ADSolver binds each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(32 * WPB)
     vjp_rec(VJP_ARGS, int* __restrict__ redo, const int* __restrict__ list, double* __restrict__ wscr,
             const u16* __restrict__ didx, const double* __restrict__ atoms) {

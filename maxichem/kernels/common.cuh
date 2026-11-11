@@ -208,7 +208,7 @@ __device__ __forceinline__ void rate_pair(int r, int fl, const double* __restric
 }
 
 // Rate coefficients of a cell across the cell's lanes (grp: its named barrier); photolysis rows kf = J, kr = 0.
-// size-limit-ok: 13: three outputs, T and nd, the rate tables and J, the cell and its lanes
+// size-limit-ok: in the call kernel; a struct of its one group, rc, rf and nasa, saves 2 for an untimed call change
 __device__ __forceinline__ void cell_rates(double* g, double* kf, double* kr, double Tc, double nd,
                                            const double* __restrict__ rc, const int* __restrict__ rf,
                                            const double* __restrict__ nasa, const Tab& tab,

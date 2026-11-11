@@ -134,7 +134,7 @@ __device__ __forceinline__ double collision_limit_nd_weight(int fl, double wA, d
 // Rate coefficients of the cell (the call kernel's code: the law, the reverse from Gibbs, the collision limit;
 // photolysis rows kf = J, kr = 0), times exp(lm) when per-cell log multipliers are given; cw[r], cw[NR + r] = the
 // collision limit's weights (collision_limit_weights).
-// size-limit-ok: 13: cell_rates' list on one warp, with the log multipliers and the limit weights
+// size-limit-ok: cell_rates on one warp, with the same arguments, so the two read alike for test_ad's bitwise tie
 __device__ __forceinline__ void rates(double* work, double* kf, double* kr, double* cw, double Tc, double nd,
                                       const double* lmc, const double* Jc, const double* __restrict__ rc,
                                       const int* __restrict__ rf, const double* __restrict__ nasa, const Tab& tab,
@@ -232,7 +232,7 @@ __device__ __forceinline__ void gibbs_dT(double* g, double Tc, const double* __r
 // table (drc [R, 9], may be null); kf, kr, cw: the cell's rates and collision-limit weights (rates()). With A = ln of
 // the pair's forward coefficient before the limit, G = ln kr - A, L = ln nd, the limit adds
 // d ln c = -(wA dA + wG dG + wE dL) to both directions (wE = (wA - wG) [forward of 3 molecules] + wG [reverse of 3]).
-// size-limit-ok: 18: rates()'s inputs, the cell's rates and weights, and five input tangents, each optional
+// size-limit-ok: rates()'s inputs and outputs and a tangent of each input, so it shrinks only with rates()
 __device__ __forceinline__ void rates_tan(double* work, double* dk, double Tc, double nd, double dTc, double dlnd,
                                           const double* lmc, const double* dlmc, const double* dJc,
                                           const double* __restrict__ rc, const double* drc, const int* __restrict__ rf,
