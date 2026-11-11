@@ -107,3 +107,32 @@ def test_malformed_record_is_refused(tmp_path, record):
     np.savez(column, L=np.linspace(1800.0, 900.0, 5), record=np.array(json.dumps(record)))
     with pytest.raises(FlowFileError, match="malformed record"):
         load_start_column(column, DECK_GAS, {"nz": 4})
+
+
+def test_record_with_a_bad_molar_mass_or_not_json_is_refused(tmp_path):
+    record = {"gas": {**asdict(DECK_GAS), "molar_mass": "x"}, "grid": GRID}
+    flow = tmp_path / "flow.pt"
+    torch.save({"hydro_w": [torch.zeros(2, 3, dtype=torch.float64)], "tsim": 700.0, "record": record}, flow)
+    with pytest.raises(FlowFileError, match="record's molar_mass is 'x', not a number"):
+        load_flow(flow, DECK_GAS, GRID, [(2, 3)], CPU)
+    column = tmp_path / "column.npz"
+    np.savez(column, L=np.linspace(1800.0, 900.0, 5), record=np.array("{not json"))
+    with pytest.raises(FlowFileError, match="record is not JSON"):
+        load_start_column(column, DECK_GAS, {"nz": 4})
+
+
+def test_grid_with_numpy_numbers_saves_and_loads(tmp_path):
+    # a deck read with numpy may hold numpy scalars; they record and compare as the numbers they are
+    grid = {"nz": np.int64(4), "depth_m": np.float64(6.0e6), "faces": (np.int64(0), 4)}
+    levels = np.linspace(1800.0, 900.0, 5)
+    column = tmp_path / "column.npz"
+    save_start_column(column, levels, DECK_GAS, grid)
+    assert np.array_equal(load_start_column(column, DECK_GAS, grid), levels)
+    assert np.array_equal(load_start_column(column, DECK_GAS, {"nz": 4, "depth_m": 6.0e6, "faces": [0, 4]}), levels)
+    flow_grid = {**GRID, "cells": {"nx1": np.int64(4), "nx2": 2, "nx3": 2}}
+    w = [torch.zeros(2, 3, dtype=torch.float64)]
+    flow = tmp_path / "flow.pt"
+    save_flow(flow, w, 700.0, DECK_GAS, flow_grid)
+    assert torch.equal(load_flow(flow, DECK_GAS, flow_grid, [(2, 3)], CPU).hydro_w[0], w[0])
+    with pytest.raises(FlowFileError, match="grid: file"):
+        load_flow(flow, DECK_GAS, {**GRID, "cells": {"nx1": np.int64(8), "nx2": 2, "nx3": 2}}, [(2, 3)], CPU)

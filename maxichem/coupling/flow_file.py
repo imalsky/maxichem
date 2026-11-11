@@ -68,8 +68,20 @@ class Flow:
     tsim_s: float
 
 
+def _number(value: Any) -> Any:
+    """Return a numpy scalar as the Python number it holds, for JSON; refuse anything else JSON cannot write."""
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"the grid holds {value!r} ({type(value).__name__}): give it numbers, strings, lists and dicts")
+
+
+def _plain(grid: Any) -> Any:
+    """Return a grid as JSON reads it back (tuples as lists, numpy scalars as numbers), so records compare alike."""
+    return json.loads(json.dumps(grid, default=_number))
+
+
 def _record(gas: DryGas, grid: dict[str, Any]) -> dict[str, Any]:
-    return {"gas": asdict(gas), "grid": grid}
+    return {"gas": asdict(gas), "grid": _plain(grid)}
 
 
 def _require_same(path: Path, saved: dict[str, Any] | None, gas: DryGas, grid: dict[str, Any], remake: str) -> None:
@@ -87,13 +99,17 @@ def _require_same(path: Path, saved: dict[str, Any] | None, gas: DryGas, grid: d
             f"{path} holds a malformed record (it needs gas, with composition, cv_R and molar_mass, and grid), got "
             f"{saved!r}. {remake}"
         ) from None
+    molar_mass = s_gas["molar_mass"]
+    if isinstance(molar_mass, bool) or not isinstance(molar_mass, (int, float)):
+        raise FlowFileError(f"{path}: its record's molar_mass is {molar_mass!r}, not a number in kg/mol. {remake}")
+    s_grid, grid = _plain(s_grid), _plain(grid)
     differ = [
         f"{name}: file {s_gas[name]!r}, deck {getattr(gas, name)!r}"
         for name in ("composition", "cv_R")
         if s_gas[name] != getattr(gas, name)
     ]
-    if not math.isclose(s_gas["molar_mass"], gas.molar_mass, rel_tol=_MOLAR_MASS_RTOL):
-        differ.append(f"molar_mass: file {s_gas['molar_mass']!r}, deck {gas.molar_mass!r} kg/mol")
+    if not math.isclose(molar_mass, gas.molar_mass, rel_tol=_MOLAR_MASS_RTOL):
+        differ.append(f"molar_mass: file {molar_mass!r}, deck {gas.molar_mass!r} kg/mol")
     if s_grid != grid:
         differ.append(f"grid: file {s_grid!r}, deck {grid!r}")
     if differ:
@@ -173,7 +189,7 @@ def save_start_column(path: str | Path, levels: np.ndarray, gas: DryGas, grid: d
 def _check_levels(path: Path, levels: np.ndarray, grid: dict[str, Any]) -> None:
     """Refuse level temperatures that are not [nz + 1], finite and positive, or a grid without its layer count."""
     nz = grid.get("nz")
-    if not isinstance(nz, int) or nz < 1:
+    if isinstance(nz, bool) or not isinstance(nz, (int, np.integer)) or nz < 1:
         raise FlowFileError(f"{path}: the column's grid must give its layer count as an integer nz >= 1, got {grid!r}")
     if levels.shape != (nz + 1,):
         raise FlowFileError(f"{path}: {nz} layers need {nz + 1} level temperatures, got shape {levels.shape}")
@@ -200,10 +216,12 @@ def load_start_column(path: str | Path, gas: DryGas, grid: dict[str, Any]) -> np
     """
     path = Path(path)
     with np.load(path, allow_pickle=False) as f:
-        saved = json.loads(str(f["record"])) if "record" in f.files else None
         remake = "Make the column again with re_start.py under this deck's gas and grid, and start from that."
-        # the record went through JSON, which reads a tuple back as a list: compare with the deck's grid read alike
-        _require_same(path, saved, gas, json.loads(json.dumps(grid)), remake)
+        try:
+            saved = json.loads(str(f["record"])) if "record" in f.files else None
+        except json.JSONDecodeError as error:
+            raise FlowFileError(f"{path}: its record is not JSON ({error}). {remake}") from None
+        _require_same(path, saved, gas, grid, remake)
         levels = np.asarray(f["L"])
     _check_levels(path, levels, grid)
     return levels
