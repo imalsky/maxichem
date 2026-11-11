@@ -1975,6 +1975,79 @@ repository.
     coefficients, kernel codes), over declarations wrapped onto several lines; shown on a new kernel-local
     NEW_SETTING = 0.37 (fails), a 1e-3 in the guard (fails), RODAS_C43 wrapped over two lines (passes).
 
+### 2026-11-10 14:25 to 2026-11-11 00:05: the kernels' design debt: argument structs, one owner of the layout, one step-control tail
+Branch kernel-debt, from cecbf8e. A cleanup: no valid-input result moves. Scratch data of the proofs are not kept in the
+repository. An independent review of the plan (go with changes on all three parts) added the derivative cases, the
+checks of the old offsets and the 48 KiB compile-to-compile check below, and corrected two points of the plan: the
+adjoint's stored attempt holds acceptance, not the step count, so its replays keep their partial restore; a shared
+per-cell setup for the tangent and adjoint kernels would take about 18 arguments.
+- (b) Arguments. The derivative kernels' helpers take five structs: `Streams` (the term streams and their rounds, the
+  adjoint's gather), `Rates` (kf, kr, nd), `Tolerance`, `Attempt` (an attempt's error, Sherman-Morrison factor and
+  acceptance, which `attempt`, `recovery_attempt`, `run_attempt` and `forward_step` return) and `StepState` (h, t, nok and
+  the previous try's error, size and rejection; `forward_step` changes it through a reference). Counts with the macro
+  lists expanded, before and after: forward_step 27 to 11, run_attempt 22 to 11, attempt 20 to 10, recovery_attempt 17 to
+  9, jacobian_dot 21 to 12, rhs_dual 17 to 12, reverse_stages 16 to 12, rhs_vjp 15 to 11, rhs_vjp_n 12 to 8,
+  save_attempt 8 to 4, tangent_step 22 to 17. Over 12: 24 functions before, 16 after, each with a written
+  `size-limit-ok` reason: the six kernel entries (bound by name from KERNEL_ARGUMENTS; vjp_rec 49, jvp_rec 46, vjp 44,
+  jvp 41, recover 28, call 27), jvp_cells and vjp_cells (the entries' lists), rhs 15 and rhs1 13 (`__noinline__`: a
+  struct by reference would sit in local memory), cell_rates 13, rates 13, rates_tan 18, rate_cotangents 18,
+  tangent_step 17, reverse_reaction 16 (six per-lane sums by reference). `tools/check_size_limits.py` now counts C and
+  CUDA parameters (limit 12) with the folder's object-like macros expanded, the wider of two definitions (J_PARAM), and
+  takes a reason from the line above a declaration's first line, so the three reasons wedged inside declarations moved
+  above them; tests/test_size_limits.py fails on the old checker and on three mutants of the new one (no macro
+  expansion, the old window, the narrower definition).
+- (a) Layout. Each region is one ordered list of (array, doubles) in Python: `_tables.call_layout` (C_*, PERC),
+  `recovery_layout` (R_*, PERWR), `scratch_layout` (S_*, SR_*, the strides), `rate_slots` (RATE_KR, RATE_ZERO, which the
+  Jacobian stream's padding word also takes), `_ad_tables.scratch_layouts` (JS_*, VS_* and the stored attempt REC_*).
+  The kernels carve with the names; VOFF, VR, `2 * NR + 2`, the vjp's `rho + 8 * NR` chain and `rp[NS + k]` are gone.
+  Offsets only, no array moved.
+- (c) One tail. `accept_try` and `next_try` (common.cuh, with StepState) end every try in call, recover, forward_step
+  (adjoint) and jvp_cells. jvp_cells and vjp_cells keep their own per-cell setup (a shared helper would take 19
+  arguments, counted with the checker on its signature); recover's differs (no screening, the block's barriers).
+  tests/test_kernel_copies.py ties the copies on the edge inputs and needed no new case.
+- Not done: one convention for the optional photolysis input (review finding 7). A nullable Jin on call and recover
+  changes their parameter lists, KERNEL_ARGUMENTS, both launchers and the call kernel, so it is not a cleanup of this
+  size.
+- Proofs, compiled kernels (117 variants, sections compared one by one). (b): call, guard and recover equal in every
+  variant; vjp and vjp_rec differ in 9 of the card's variants, jvp_rec in 4, jvp in none. (a): every section equal to
+  (b)'s at 101376 B and in the test forms; at 49152 B only `.nv.info.recover`, which differs between two compiles of
+  cecbf8e itself (12 of 40 variants), so NVRTC's spread, not the change. Every generated header equals cecbf8e's but
+  for the 51 added offset macros and the dropped VOFF and VR (117 variants); every offset and size equals the old
+  carving on 376 cases (14 networks, 2 and 4 warps, the cards' sizes, W in and out of shared memory, rates in and
+  after the trailing block, odd and even species counts). (c) and the call's tail: recover in every variant, jvp and
+  jvp_rec in 9, call in every variant; vjp equal.
+- Proofs, host side. Reader, table, derivative-table, launch and scratch records and the exports of both default
+  networks, dark and lit, equal at (a) (162 records; the 96 export files equal but for the 28 kernel sources).
+  Registers, local memory, cells per block and warps per block of every kernel equal at (b), (a) and the final tree (44 records: both default networks, dark and lit).
+- Proofs, outputs, bitwise against cecbf8e dumped today, 0 numbers differ in each: the final tree on the full set of
+  the earlier entries (26,401,783 numbers: ten networks, call, recovery, jvp, vjp); the derivative half of it at (b)
+  (3,065,911); the derivative cases the full set lacks (3,898,760 at (b) and at the final tree: photolysis on, 3
+  directions with lm, rc and J tangents, adapt off, a vjp of up to 286 accepted steps against CAP 100, so the
+  checkpoint replays run); the recovery's derivative path where it succeeds (1,867,982 at (b) and at the final tree:
+  max_steps 20 and 40, 512 of 512 cells recomputed and recovered); the solvers built for a 48 KiB device (3,152,051,
+  NCHO_photo and CHO_photo; cecbf8e compiled twice gave the same bits, and so did the final tree). The (a) step was
+  not dumped apart: its compiled kernels are (b)'s at the card's size. Nor was (c) before the call's tail: its
+  compiled kernels are the final tree's but for the call, whose code (c) left as cecbf8e's.
+- Speed (12 paired rounds after 2 warm-ups, versions alternating, one process, GPU 1 with no other process for the
+  139 samples taken over the run; 1,382,400 cells, 70 s calls continuing their chains; jvp and vjp on 4,096 unreacted
+  cells over 500 s; the recovery on 16,384 cells with max_steps 1), each against cecbf8e, mean paired difference and
+  its standard error:
+  | | NCHO dark | NCHO lit | NCHO jvp | NCHO vjp | NCHO recovery | S25 dark | S25 lit | S25 jvp | S25 vjp | S25 recovery |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | cecbf8e | 0.3656 us | 0.6536 us | 464.8 ms | 946.0 ms | 335.0 ms | 0.6970 us | 1.0336 us | 1460 ms | 3084 ms | 2088 ms |
+  | (b) | -0.06 +- 0.02 % | -0.04 +- 0.03 | +0.00 +- 0.11 | +0.05 +- 0.05 | +0.01 +- 0.02 | -0.08 +- 0.03 | -0.13 +- 0.04 | +0.67 +- 0.05 | -0.03 +- 0.05 | -0.01 +- 0.02 |
+  | (c) | -0.24 +- 0.02 | -0.19 +- 0.03 | -0.07 +- 0.07 | +0.06 +- 0.07 | +0.03 +- 0.02 | -0.19 +- 0.04 | -0.22 +- 0.03 | +0.12 +- 0.05 | -0.18 +- 0.05 | +0.05 +- 0.04 |
+  | (c) + call's tail | -0.22 +- 0.03 | -0.08 +- 0.03 | -0.17 +- 0.05 | -0.04 +- 0.05 | +0.07 +- 0.03 | +0.04 +- 0.03 | -0.01 +- 0.03 | +0.71 +- 0.06 | -0.02 +- 0.06 | +0.09 +- 0.03 |
+  (a)'s kernels equal (b)'s, so it was not timed apart. The jvp kernel itself is the same code in cecbf8e and (b), and
+  in (c) and (c) + the call's tail, yet those pairs differ by 0.67 and 0.58 % on the sulfur network: a paired standard
+  error of 0.05 % understates the run's floor, which is near 0.7 %. Nothing reaches 1 %, so every step stays. The call
+  with the shared tail against the call written out: +0.02, +0.11, +0.23 and +0.20 % (NCHO dark, lit, S25 dark, lit).
+- Checks on the final tree (6204fa6; local main had not moved): CPU 113 passed in 30 s; slow CPU 4 passed in 118 s;
+  parity and guard 48 passed in 259 s; known answers, order, rate laws, kernel copies and dense LU 25 passed in 365 s;
+  test_vulcan_truth 2 passed in 215 s (NCHO 0 misses, worst 0.014 dex on boxes, 0.004 on paths; sulfur pins held);
+  test_export_cpp 19 passed in 590 s; test_ad 81 passed in 1053 s (0 FAIL lines); pre-commit on all files passes with
+  the header written.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
