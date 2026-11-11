@@ -40,6 +40,23 @@ def test_reference_of_another_rate_rule_is_refused(tmp_path, rule):
 
 
 @pytest.mark.parametrize("rule", [None, "another rule", _constants.RATE_RULE])
+def test_truth_path_of_another_rate_rule_is_refused(tmp_path, rule):
+    qual = tmp_path / "qual"
+    (qual / "QC").mkdir(parents=True)
+    (qual / "manifest.json").write_text(json.dumps({"rate_rule": _constants.RATE_RULE}))
+    spec = json.dumps({"job": {}} | ({"rate_rule": rule} if rule else {}))
+    np.savez(tmp_path / "src.npz", T=np.ones(3))
+    np.savez(qual / "QC" / "p.npz", kind="main", x_call=np.ones((3, 2)), spec=spec)
+    jobs = [{"src": str(tmp_path / "src.npz"), "out": str(qual / "QC" / "p.npz"), "n": 3}]
+    (qual / "jobs.json").write_text(json.dumps(jobs))
+    if rule == _constants.RATE_RULE:
+        kintest_truth.check_jobs(qual)
+        return
+    with pytest.raises(SystemExit, match="1 truth paths made with another rate rule"):
+        kintest_truth.check_jobs(qual)
+
+
+@pytest.mark.parametrize("rule", [None, "another rule", _constants.RATE_RULE])
 def test_truth_of_another_rate_rule_is_refused(tmp_path, rule):
     (tmp_path / "manifest.json").write_text(json.dumps({"boxes": 1} | ({"rate_rule": rule} if rule else {})))
     if rule == _constants.RATE_RULE:

@@ -39,7 +39,6 @@ TRUTH = {
     ),
     "SNCHO_photo_network_2025.txt": TruthSets(
         ("boxes_sncho25", "boxes_sncho25p"),
-        # truth_v3: box 892, at the cap in truth_v2, now ends; the same 54 in boxes_sncho25p
         {"boxes_sncho25": (116, "8ac97421fdbca9be"), "boxes_sncho25p": (54, "58d5356b1e18f59f")},
         "qual_sncho25",
         ("QC", "QCs", "twins/QC"),
@@ -194,7 +193,7 @@ def rate_rule_manifest(folder):
 
 
 def check_jobs(qual):
-    """Refuse a truth set made with another rate rule, or whose paths differ from its job list."""
+    """Refuse a truth set of another rate rule, with a path whose spec records another rule or none, or off its jobs."""
     rate_rule_manifest(qual)
     jobs = json.loads((qual / "jobs.json").read_text())
     rel = [j["out"].split(f"/{qual.name}/", 1)[-1] for j in jobs]
@@ -206,14 +205,21 @@ def check_jobs(qual):
             f"truth paths missing {sorted(want - have)[:3]}, {len(have - want)} not listed "
             f"{sorted(have - want)[:3]}"
         )
-    short = []
+    short, other_rule = [], []
     for j, r in zip(jobs, rel, strict=True):
         z = np.load(qual / r)
+        if "spec" not in z.files or json.loads(str(z["spec"])).get("rate_rule") != RATE_RULE:
+            other_rule.append(r)
         hold = "saved_h" in z.files
         s0 = int(z["h0"] if hold else z["k0"]) if str(z["kind"]) == "twin" else 0
         rows = len(z["saved_h"]) if hold else len(z["x_call"])
         if rows != min(int(j["n"]), len(np.load(j["src"])["T"]) - s0):
             short.append(r)
+    if other_rule:
+        raise SystemExit(
+            f"{qual}: {len(other_rule)} truth paths made with another rate rule than '{RATE_RULE}' or with none "
+            f"recorded, e.g. {other_rule[:3]}; the set's manifest records the rule, its paths must too"
+        )
     if short:
         raise SystemExit(f"{qual}: {len(short)} truth paths shorter than their jobs, e.g. {short[:3]}")
 
