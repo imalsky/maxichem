@@ -2269,10 +2269,10 @@ maxichem/kernels` is empty after the merge).
 - Coupling. The gas constant is k_B N_A, 8.31446261815324 J/mol/K (it was 8.314462618, 1.8e-11 relative lower; no test or
   stored reference read the digits). `mass_to_mole` and `mole_to_mass` refuse mixed precisions, as `element_moles` did. A
   start column whose grid holds a tuple loads (its JSON record read the tuple back as a list, so it was always refused),
-  and a malformed record raises FlowFileError, not KeyError or TypeError. The stop's docstring says the cold, hot and
+  and a malformed record raises FlowFileError (see the review round below for the cases this first form missed). The stop's docstring says the cold, hot and
   bad-input causes serve only a solver whose raise is replaced (there is no public switch); the branches stay.
-- Tests. The kernel-copies case of rejected tries is shown to take that branch (72 accepted steps, still unfinished at 75
-  tries; a case starting with a short step fails the assertion). An assertion that could not fail was dropped from the
+- Tests. The kernel-copies case of rejected tries is shown to take that branch: 72 accepted steps, and the test asserts
+  the cell is still unfinished at 73 tries (steps + 1); a case starting with a short step fails the assertion. An assertion that could not fail was dropped from the
   interface test, and comments that told history say what is checked.
 - Shown to fail without the change: the J rule (Python; and the C++ thermal export's refusal message, 2 of 2), the named
   C++ result (the new test does not compile on the old header), the cotangents type (import), the P message (2 of 2
@@ -2283,8 +2283,15 @@ maxichem/kernels` is empty after the merge).
   case; test_ad 81 passed in 1022 s, 0 FAIL. The known-answer tier (collision limit, known answers, rate laws, order,
   kernel copies, dense LU) failed 1 of 26: `test_known_answers.py` still read the cotangents as a dict; fixed after, and
   the tier rerun on the fixed head fbf7cd6: 26 passed in 379 s; CPU 134 passed there.
-- Not done: `signed_mole_fractions` still takes mixed precisions; `jvp`'s `dJ` refuses any tangent without photolysis,
-  also an empty one.
+- Review round (an independent review of 7ca5b7e; nothing blocked on behaviour). (1) Only the two J rule messages are the
+  same in Python and C++; the form message names the dtype in each language's words (`torch.float32`, `Float`): docs and
+  comments say so. (2) `jvp`'s dJ follows J's rule: without photolysis none or an empty [B, 0] / [D, B, 0] one, which
+  counts as none; one with columns is refused in the J rule's words (it refused every dJ before). (3) Flow files: a molar
+  mass that is not a number (TypeError from math.isclose) and a column record that is not JSON (JSONDecodeError) raise
+  FlowFileError; a grid holding numpy scalars saves and loads (a column raised TypeError from json.dumps, and a flow saved
+  with one failed torch's weights_only load); both record and compare the grid as JSON reads it back, and a numpy integer
+  nz is a layer count. (4) `signed_mole_fractions` refuses mixed precisions. (5) README names the two breaking changes.
+  (6) test_ad's loops over the cotangents skip a None field (J without photolysis; latent, every fixture is lit).
 
 ## References (by topic)
 
