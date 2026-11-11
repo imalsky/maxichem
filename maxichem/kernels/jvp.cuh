@@ -132,6 +132,10 @@ __device__ __forceinline__ double error_tangent(const double* N, const double* N
   return wr * (wsum(e) / (NS * er)) + (1.0 - wr) * dm;
 }
 
+// The stage loop below steps through K1..K4 and Kd1..Kd4 by their spacing in the work layout (_ad_tables._LAYOUT).
+static_assert(A_K3 - A_K2 == A_K2 - A_K1 && A_K4 - A_K3 == A_K2 - A_K1, "K1..K4 evenly spaced");
+static_assert(A_KD3 - A_KD2 == A_KD2 - A_KD1 && A_KD4 - A_KD3 == A_KD2 - A_KD1, "Kd1..Kd4 evenly spaced");
+
 // Tangent of the attempt a just taken (K1..K4, Y, the factors, u, a.c0 in place; size ha, first while no step of the
 // call is accepted; DN: the recovery's dense factors) for the state tangent Nd, the step-size tangent had and the rate
 // tangents: Yd = the new state's tangent; returns the error's tangent (adapt) or 0.
@@ -142,16 +146,16 @@ __device__ __forceinline__ double tangent_step(double* work, const double (&c)[N
                                                const double* dk, double dlnd, double* va, const Tolerance& tol,
                                                const Tab& tab, const Streams& st, int lane, int myt) {
   double *N = work + A_NN, *Nd = work + A_ND, *Y = work + A_Y, *Yd = work + A_YD, *Fd = work + A_FD,
-         *svN = work + A_SVN, *sv1N = work + A_SV1N, *Ys = work + A_YS, *Yds = work + A_YDS, *K = work + A_K1,
-         *Kd = work + A_KD1;
-  double *K1 = K, *K2 = K + NS, *K3 = K + 2 * NS, *K4 = K + 3 * NS;
-  double *Kd1 = Kd, *Kd2 = Kd + NS, *Kd3 = Kd + 2 * NS, *Kd4 = Kd + 3 * NS;
+         *svN = work + A_SVN, *sv1N = work + A_SV1N, *Ys = work + A_YS, *Yds = work + A_YDS;
+  double *K1 = work + A_K1, *K2 = work + A_K2, *K3 = work + A_K3, *K4 = work + A_K4;
+  double *Kd1 = work + A_KD1, *Kd2 = work + A_KD2, *Kd3 = work + A_KD3, *Kd4 = work + A_KD4;
   const double ih = 1.0 / ha, hh = had * ih * ih, c0 = a.c0;
   double td = 0.0, tdx = 0.0;
   const double ntot = rhs_dual(work, N, Nd, nullptr, va, k, dk, dlnd, td, tab, st, lane);
   for (int s = 0; s < 4; s++) {
-    jacobian_dot(work, K + s * NS, Kd + s * NS, ntot, td, k, dk, dlnd, va, tab, st, lane);
-    for (int i = lane; i < NS; i += 32) Kd[s * NS + i] += 2.0 * hh * K[s * NS + i];
+    // the stages evenly spaced, as asserted above
+    jacobian_dot(work, K1 + s * (A_K2 - A_K1), Kd1 + s * (A_KD2 - A_KD1), ntot, td, k, dk, dlnd, va, tab, st, lane);
+    for (int i = lane; i < NS; i += 32) Kd1[s * (A_KD2 - A_KD1) + i] += 2.0 * hh * K1[s * (A_K2 - A_K1) + i];
   }
   {  // F's tangent at N (its space held n12 so far)
     const double g = ntot / k.nd, gd = g * (td / ntot - dlnd);

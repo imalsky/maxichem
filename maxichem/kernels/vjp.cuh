@@ -292,11 +292,13 @@ __device__ __forceinline__ void rhs_vjp_n(double* work, double* lbk, double* rho
   const double *kf = k.kf, *kr = k.kr, nd = k.nd;
   double *N = work + A_NN, *Nb = work + A_NB, *n = work + A_N0, *part = work + A_PART;
   const double* K = work + A_K1;
+  constexpr int KS = A_K2 - A_K1;  // the stages' spacing in the work layout
+  static_assert(A_K3 - A_K2 == KS && A_K4 - A_K3 == KS, "K1..K4 evenly spaced");
   double p = 0.0, pd[4] = {0.0, 0.0, 0.0, 0.0};
   for (int i = lane; i < NS; i += 32) {
     p += N[i];
 #pragma unroll
-    for (int s = 0; s < 4; s++) pd[s] += K[s * NS + i];
+    for (int s = 0; s < 4; s++) pd[s] += K[s * KS + i];
   }
   const double ntot = wsum(p), xf = nd / ntot, g = ntot / nd;
   double rt[4];
@@ -305,7 +307,7 @@ __device__ __forceinline__ void rhs_vjp_n(double* work, double* lbk, double* rho
   for (int i = lane; i < NS; i += 32) {
     n[i] = N[i] * xf;
 #pragma unroll
-    for (int s = 0; s < 4; s++) work[ON1[s] + i] = xf * (K[s * NS + i] - N[i] * rt[s]);
+    for (int s = 0; s < 4; s++) work[ON1[s] + i] = xf * (K[s * KS + i] - N[i] * rt[s]);
   }
   if (lane == 0) {
     n[NS] = 1.0;

@@ -539,14 +539,20 @@ def recovery_layout(tab: dict[str, Any], wsh: bool) -> tuple[dict[str, int], int
     """Return the recover kernel's shared memory (R_*, PERWR).
 
     W when wsh (else in global memory), dinv, n, v (or the G / RT of the species), N, Y, F, u, K1-K4, the S v pieces,
-    the row order of the pivoting and the next list entry (ns + 1 ints).
+    and the ints of recovery_int_layout, two to a double.
     """
     ns = tab["ns"]
     states = [(name, ns) for name in ("NN", "Y", "F", "U", "K1", "K2", "K3", "K4")]
+    ints = -(-recovery_int_layout(tab)[1] // 2)
     return regions([
         ("W", dense_w_doubles(tab) if wsh else 0), ("DINV", ns), ("N0", ns + 1), ("V", max(tab["nr"], ns + 1)), *states,
-        ("PART", tab["npart"]), ("PR", (ns + 2) // 2),
+        ("PART", tab["npart"]), ("INTS", ints),
     ])  # fmt: skip
+
+
+def recovery_int_layout(tab: dict[str, Any]) -> tuple[dict[str, int], int]:
+    """Return the recover kernel's ints at R_INTS (RI_*, in ints): the pivoting's row order, the next list entry."""
+    return regions([("PR", tab["ns"]), ("NEXT", 1)])
 
 
 def scratch_layout(tab: dict[str, Any], holds_w: bool) -> tuple[dict[str, int], int]:

@@ -244,8 +244,8 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
   const int cl = (int)threadIdx.x, lane = cl & 31;
   const CellArrays a = recover_arrays(smem, scratch, (size_t)blockIdx.x);
   double* N = a.N;
-  int* pr = (int*)(smem + R_PR);
-  int* nextq = pr + NS;
+  int* ints = (int*)(smem + R_INTS);
+  int *pr = ints + RI_PR, *nextq = ints + RI_NEXT;
   if (cl == 0) a.kf[RATE_ZERO] = 0.0;  // the zero rate of the Jacobian's padding words
   int q = (int)blockIdx.x;
   while (q < nfl) {
