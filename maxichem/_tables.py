@@ -475,7 +475,7 @@ def pack_small_tables(tab: dict[str, Any]) -> tuple[bytes, dict[str, int]]:
 def rates_fit_in_block(tab: dict[str, Any]) -> bool:
     """Say whether the rates (or G / RT) and the S v pieces fit in the trailing block's slots."""
     nt = tab["ns"] - tab["k0"]
-    return bool(max(tab["nr"], tab["ns"] + 1) + tab["npart"] <= nt * nt)
+    return bool(call_rates_layout(tab)[1] <= nt * nt)
 
 
 # The kernels' memory regions. Each is an ordered list of (array, doubles); an array's offset is the sum of the sizes
@@ -497,17 +497,38 @@ def rate_slots(nr: int) -> list[tuple[str, int]]:
     return [("KF", nr), ("KR", nr), ("ZERO", 2)]
 
 
+def dense_w_doubles(tab: dict[str, Any]) -> int:
+    """Return the doubles of the recovery's dense W (NS x NS; W_DOUBLES)."""
+    return int(tab["ns"]) ** 2
+
+
+def call_rates_layout(tab: dict[str, Any]) -> tuple[dict[str, int], int]:
+    """Return the call kernel's rates region (CR_*).
+
+    v, the S v pieces after it, and the rest of the species' G / RT, which take v's place during the rates and run
+    into the pieces' place when NS + 1 > NR.
+    """
+    ns, nr = tab["ns"], tab["nr"]
+    return regions([("V", nr), ("PART", tab["npart"]), ("G_REST", max(0, ns + 1 - nr))])
+
+
+def retry_layout(tab: dict[str, Any]) -> tuple[dict[str, int], int]:
+    """Return the copy kept for the try after a rejection (RSC_*): F, u and -Jn's slots of the last fresh evaluation."""
+    ns = tab["ns"]
+    return regions([("F", ns), ("U", ns), ("JN", tab["nnz"])])
+
+
 def call_layout(tab: dict[str, Any]) -> tuple[dict[str, int], int]:
     """Return the call kernel's shared memory per cell (C_*, PERC).
 
     M (leading slots and the trailing block), dinv (and c0), n, N, Y, F, u, K1-K4, one for the queue's next cell; then
-    v (or the G / RT of the species) with the S v pieces at v + NR, unless they fit in the trailing block's slots,
-    free while the block is in registers: V is then TB0.
+    the rates region (call_rates_layout), unless it fits in the trailing block's slots, free while the block is in
+    registers: V is then TB0.
     """
-    ns, nr = tab["ns"], tab["nr"]
+    ns = tab["ns"]
     fit = rates_fit_in_block(tab)
     states = [(name, ns) for name in ("NN", "Y", "F", "U", "K1", "K2", "K3", "K4")]
-    rates = 0 if fit else max(nr, ns + 1) + tab["npart"]
+    rates = 0 if fit else call_rates_layout(tab)[1]
     offsets, total = regions([("M", tab["nnz"]), ("DINV", ns + 1), ("N0", ns + 1), *states, ("NEXT", 1), ("V", rates)])
     if fit:
         offsets["V"] = tab["tb0"]
@@ -523,16 +544,16 @@ def recovery_layout(tab: dict[str, Any], wsh: bool) -> tuple[dict[str, int], int
     ns = tab["ns"]
     states = [(name, ns) for name in ("NN", "Y", "F", "U", "K1", "K2", "K3", "K4")]
     return regions([
-        ("W", ns * ns if wsh else 0), ("DINV", ns), ("N0", ns + 1), ("V", max(tab["nr"], ns + 1)), *states,
+        ("W", dense_w_doubles(tab) if wsh else 0), ("DINV", ns), ("N0", ns + 1), ("V", max(tab["nr"], ns + 1)), *states,
         ("PART", tab["npart"]), ("PR", (ns + 2) // 2),
     ])  # fmt: skip
 
 
-def scratch_layout(tab: dict[str, Any], w: int) -> tuple[dict[str, int], int]:
+def scratch_layout(tab: dict[str, Any], holds_w: bool) -> tuple[dict[str, int], int]:
     """Return the global scratch of a call kernel's cell slot or a recover kernel's block (S_*, SR_*; the strides).
 
-    The rates (rate_slots), W (w doubles: 0 for the call, the recovery's W when it is not in shared memory), and the
-    copy of F, u and -Jn kept for the try after a rejection.
+    The rates (rate_slots), W when holds_w (the recovery's, when it is not in shared memory), and the copy kept for
+    the try after a rejection (retry_layout).
     """
-    ns, nr = tab["ns"], tab["nr"]
-    return regions([("RATES", regions(rate_slots(nr))[1]), ("W", w), ("RSC", 2 * ns + tab["nnz"])])
+    w = dense_w_doubles(tab) if holds_w else 0
+    return regions([("RATES", regions(rate_slots(tab["nr"]))[1]), ("W", w), ("RSC", retry_layout(tab)[1])])

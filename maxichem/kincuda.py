@@ -153,8 +153,8 @@ class CudaSolver(Solver):
         blocks = blocks_per_multiprocessor(self._call_kernel, threads * self.cpb, self.smem)
         rec_blocks = blocks_per_multiprocessor(self._recover_kernel, threads, self.smem_rec)
         self.max_blocks, self.rec_blocks = prop.multi_processor_count * blocks, prop.multi_processor_count * rec_blocks
-        self.stride = scratch_layout(tab, 0)[1]  # the call kernel's cell slot and the recover kernel's block
-        self.stride_rec = scratch_layout(tab, 0 if wsh else self.ns**2)[1]
+        self.stride = scratch_layout(tab, False)[1]  # the call kernel's cell slot and the recover kernel's block
+        self.stride_rec = scratch_layout(tab, not wsh)[1]
         self.info = {
             "ns": self.ns,
             "nr": self.nr,

@@ -88,11 +88,13 @@ kernels through `network.h`; the C++ caller keeps copies of a few (`kExportForma
 `kPhotolysisArgument`, `kDefaultRtol`, `kDefaultMaxSteps`), held equal by `tests/test_constants_source.py`. `_constants.py`
 holds the solver's settings; the coupling's few constants are named in its own modules (`coupling/`), and hardware
 limits and file formats beside the code that meets them (`kincuda.py`, `kinvulcan.py`).
-The kernels' memory has one owner: each region (the call's shared memory per cell, the recovery's, the scratch slots,
-a cell's rates, the adjoint's stored attempt) is an ordered list of arrays and sizes in `_tables.py` (`call_layout`,
-`recovery_layout`, `scratch_layout`, `rate_slots`) or `_ad_tables.py` (`scratch_layouts`, and `layout` for the
-derivative kernels' shared memory). `network.h` names each offset after its region (`C_DINV`, `R_PART`, `S_RSC`,
-`RATE_ZERO`, `VS_RHO`, `REC_PEN`, ...) and the launchers take the sizes from the same lists. `_ad_tables.py` also holds
+The kernels' memory has one owner: each region (the call's shared memory per cell and its rates region, the
+recovery's, the scratch slots and the copy kept for a retry, a cell's rates, the tangents' directions, the adjoint's
+stored attempt) is an ordered list of arrays and sizes in `_tables.py` (`call_layout`, `call_rates_layout`,
+`recovery_layout`, `scratch_layout`, `retry_layout`, `rate_slots`, `dense_w_doubles`) or `_ad_tables.py`
+(`scratch_layouts`, and `layout` for the derivative kernels' shared memory). `network.h` names each offset after its
+region (`C_DINV`, `CR_PART`, `R_PART`, `S_RSC`, `RSC_JN`, `RATE_ZERO`, `JD_NG`, `VS_RHO`, `REC_PEN`, `W_DOUBLES`, ...)
+and the launchers take the sizes from the same lists. `_ad_tables.py` also holds
 the fields of the adjoint's stream words (`GATHER_FIELDS`), and `_constants.py` the rest, in sections:
 the call settings, the data the reader accepts (`MAX_GIBBS_JUMP`), the method settings (step control, the recovery's
 pivoting, the guard's correction, the dense trailing block `NTAIL`, the warps per cell), the physical constants (`KB`, `P0`, `NASA_SPLIT_T`, `K_COLL`) and the layout. The kernels keep a `constexpr` of each method setting's

@@ -40,7 +40,17 @@ from ._constants import (
     WARP_LANES,
     X_SUM_TOL,
 )
-from ._tables import call_layout, pack_small_tables, rate_slots, recovery_layout, regions, scratch_layout
+from ._tables import (
+    call_layout,
+    call_rates_layout,
+    dense_w_doubles,
+    pack_small_tables,
+    rate_slots,
+    recovery_layout,
+    regions,
+    retry_layout,
+    scratch_layout,
+)
 
 _KERNELS = Path(__file__).parent / "kernels"
 _HEADER = "network.h"
@@ -154,13 +164,22 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
     rate_offsets, rate_size = regions(rate_slots(tab["nr"]))
     call, perc = call_layout(tab)
     recovery, perwr = recovery_layout(tab, wsh)
-    call_scratch, call_stride = scratch_layout(tab, 0)
-    recovery_scratch, recover_stride = scratch_layout(tab, 0 if wsh else ns * ns)
-    layouts = {"RATE": rate_offsets, "C": call, "R": recovery, "S": call_scratch, "SR": recovery_scratch}
+    call_scratch, call_stride = scratch_layout(tab, False)
+    recovery_scratch, recover_stride = scratch_layout(tab, not wsh)
+    layouts = {
+        "RATE": rate_offsets,
+        "C": call,
+        "CR": call_rates_layout(tab)[0],
+        "R": recovery,
+        "S": call_scratch,
+        "SR": recovery_scratch,
+        "RSC": retry_layout(tab)[0],
+    }
     macros = {
         "CALL_STRIDE": call_stride,
         "RECOVER_STRIDE": recover_stride,
         "RATE_SLOTS": rate_size,
+        "W_DOUBLES": dense_w_doubles(tab),
         **_offset_macros(layouts),
         "NS": ns,
         "NR": tab["nr"],

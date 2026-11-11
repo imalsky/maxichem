@@ -566,7 +566,7 @@ __device__ __forceinline__ void vjp_cells(VJP_ARGS, int* redo, const int* list, 
   if (lane == 0) kf[RATE_ZERO] = 0.0;  // the zero rate of the Jacobian's padding words
   double* recA = rec + wid * 2 * CP * REC;
   double* recB = recA + CP * REC;
-  double* Wd = DN ? wscr + wid * NS * NS : nullptr;
+  double* Wd = DN ? wscr + wid * W_DOUBLES : nullptr;
   const Streams streams = {sst, jt, lu, optr, didx, gt, xg, sround, jround, ground};
   const Tolerance tol = {rtol, atol};
   const int nc = DN ? count[COUNT_RECOMPUTED] : B;

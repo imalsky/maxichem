@@ -163,11 +163,11 @@ __device__ __forceinline__ CellArrays recover_arrays(double* smem, double* scrat
 __device__ __forceinline__ void restore_dense_try(const CellArrays& a, const u16* __restrict__ didx, int cl) {
   for (int s = cl; s < NS * NS; s += NL) a.M[s] = 0.0;
   for (int i = cl; i < NS; i += NL) {
-    a.F[i] = a.rsc[i];
-    a.u[i] = a.rsc[NS + i];
+    a.F[i] = a.rsc[RSC_F + i];
+    a.u[i] = a.rsc[RSC_U + i];
   }
   CSYNC(0);
-  for (int s = cl; s < NNZ; s += NL) a.M[__ldg(didx + s)] = a.rsc[2 * NS + s];
+  for (int s = cl; s < NNZ; s += NL) a.M[__ldg(didx + s)] = a.rsc[RSC_JN + s];
 }
 
 // A fresh try: F, u = w = S v / nd - Jn x and W = -Jn at N, and their copy for a retry.
@@ -187,10 +187,10 @@ __device__ __forceinline__ void fresh_dense_try(const CellArrays& a, double nd, 
   for (int i = cl; i < NS; i += NL) a.u[i] = a.u[i] + dense_times_x(i, a.M, a.N, tab) / ntot;
   CSYNC(0);
   for (int i = cl; i < NS; i += NL) {
-    a.rsc[i] = a.F[i];
-    a.rsc[NS + i] = a.u[i];
+    a.rsc[RSC_F + i] = a.F[i];
+    a.rsc[RSC_U + i] = a.u[i];
   }
-  for (int s = cl; s < NNZ; s += NL) a.rsc[2 * NS + s] = a.M[__ldg(didx + s)];
+  for (int s = cl; s < NNZ; s += NL) a.rsc[RSC_JN + s] = a.M[__ldg(didx + s)];
 }
 
 // The factorization and Rodas3 stages (gamma = 1/2), as the call kernel's, on the first warp.

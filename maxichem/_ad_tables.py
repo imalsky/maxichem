@@ -54,16 +54,17 @@ def supported(tab: dict[str, Any]) -> None:
 def scratch_layouts(tab: dict[str, Any]) -> dict[str, tuple[dict[str, int], int]]:
     """Return the derivative kernels' global scratch regions by their names' prefix in network.h (_tables.regions).
 
-    JS, per warp of the tangent kernels: the rates, a per-reaction work array and the collision limit's weights; the
-    directions' rate and state tangents follow, JVP_DIRECTION_STRIDE each. VS, per warp of the adjoint kernels: the
-    rates, their cotangents, rho (4 x 2 NR) and the limit's weights. REC, one stored attempt: N, h, t, accepted, then
-    the previous attempt's error, size and rejection.
+    JS, per warp of the tangent kernels: the rates, a per-reaction work array and the collision limit's weights; JD,
+    one direction's rate and state tangents, which follow JS for every direction, all the rate tangents first. VS, per
+    warp of the adjoint kernels: the rates, their cotangents, rho (4 x 2 NR) and the limit's weights. REC, one stored
+    attempt: N, h, t, accepted, then the previous attempt's error, size and rejection.
     """
     ns, nr = tab["ns"], tab["nr"]
     rates = ("RATES", regions(rate_slots(nr))[1])
     record = [("N", ns), ("H", 1), ("T", 1), ("OK", 1), ("PEN", 1), ("PHA", 1), ("PREJ", 1)]
     return {
         "JS": regions([rates, ("VA", nr), ("CW", 2 * nr)]),
+        "JD": regions([("DK", 2 * nr), ("NG", ns)]),
         "VS": regions([rates, ("LBK", 2 * nr), ("RHO", 8 * nr), ("CW", 2 * nr)]),
         "REC": regions(record),
     }
@@ -72,14 +73,14 @@ def scratch_layouts(tab: dict[str, Any]) -> dict[str, tuple[dict[str, int], int]
 def scratch_sizes(tab: dict[str, Any], cap: int) -> dict[str, int]:
     """Return the global scratch of the derivative kernels, in doubles, by the name the kernels read it.
 
-    The strides of scratch_layouts' regions; JVP_DIRECTION_STRIDE, per direction: the rate and state tangents; CAPR:
-    attempts stored per recovered cell, enough for its tries.
+    The strides of scratch_layouts' regions (JVP_DIRECTION_STRIDE: JD's); CAPR: attempts stored per recovered cell,
+    enough for its tries.
     """
     sizes = {name: size for name, (_, size) in scratch_layouts(tab).items()}
     return {
         "VJP_STRIDE": sizes["VS"],
         "JVP_STRIDE": sizes["JS"],
-        "JVP_DIRECTION_STRIDE": 2 * tab["nr"] + tab["ns"],
+        "JVP_DIRECTION_STRIDE": sizes["JD"],
         "REC": sizes["REC"],
         "CAPR": 2 * cap,
     }

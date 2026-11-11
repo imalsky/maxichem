@@ -24,7 +24,7 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
          *K2 = M + C_K2, *K3 = M + C_K3, *K4 = M + C_K4;
   // v and part sit in the trailing block's slots, free while that block is in registers, if they fit there (C_V =
   // TB0), else after the other arrays (_tables.call_layout)
-  double *v = M + C_V, *part = v + NR;
+  double *v = M + C_V + CR_V, *part = M + C_V + CR_PART;
   int* nextc = (int*)(M + C_NEXT);
   double* kf = scratch + ((size_t)blockIdx.x * CPB + grp) * CALL_STRIDE;  // per cell slot: rates, the copy
   double* kr = kf + RATE_KR;
@@ -54,10 +54,10 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
         // the rejected try's state: its F, u and -Jn, all slots, since v and the S v pieces overwrote the trailing
         // block's
         for (int i = cl; i < NS; i += NL) {
-          F[i] = rsc[i];
-          u[i] = rsc[NS + i];
+          F[i] = rsc[RSC_F + i];
+          u[i] = rsc[RSC_U + i];
         }
-        for (int s = cl; s < NNZ; s += NL) M[s] = rsc[2 * NS + s];
+        for (int s = cl; s < NNZ; s += NL) M[s] = rsc[RSC_JN + s];
       } else {
         const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, tab, sst, sround, lane, cl, grp);
         for (int s = cl; s < NNZ; s += NL) M[s] = 0.0;
@@ -72,10 +72,10 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
         for (int i = cl; i < NS; i += NL) u[i] = u[i] + jacobian_times_x(i, M, N, tab) / ntot;
         CSYNC(grp);
         for (int i = cl; i < NS; i += NL) {
-          rsc[i] = F[i];
-          rsc[NS + i] = u[i];
+          rsc[RSC_F + i] = F[i];
+          rsc[RSC_U + i] = u[i];
         }
-        for (int s = cl; s < NNZ; s += NL) rsc[2 * NS + s] = M[s];
+        for (int s = cl; s < NNZ; s += NL) rsc[RSC_JN + s] = M[s];
       }
       CSYNC(grp);
       for (int i = cl; i < NS; i += NL) M[tab.diag[i]] += igh;  // M = M0 = I / (gamma h) - Jn
