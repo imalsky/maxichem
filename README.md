@@ -140,17 +140,23 @@ truth data come from VULCAN-0D with corrections to its step
 control and the network data (see notes.md), run at rtol 5e-4. The domain is 300 to 3000 K, 1e-5 to 100 bar,
 metallicity 0.1 to 300 times solar, C/O 0.1 to 2, with and without photolysis.
 
-Results at the default tolerances (rtol 1e-3, atol 1e-25):
+Results at the default tolerances (rtol 1e-3, atol 1e-25), against the truth made with the current collision limit
+(truth_v3); the day-night rows (marked *) were measured against the earlier truth, which differs from it by at most
+4e-4 dex on those paths:
 
 | Test | States scored | Misses | Worst error |
 | --- | --- | --- | --- |
 | NCHO_photo: 131,072 boxes, 0 to 1e8 s, half lit | 6,160,384 | 0 | 0.066 dex |
-| NCHO_photo: 904 GCM-like paths (recorded forcing and mixing) | 1,016,411 | 0 | 0.004 dex |
-| NCHO_photo: 64 paths with photolysis on a one-day cycle, 1,000 calls each | 64,000 | 0 | 0.002 dex |
+| NCHO_photo: 1,096 GCM-like paths (recorded forcing and mixing) | 1,326,198 | 0 | 0.004 dex |
+| NCHO_photo: 64 paths with photolysis on a one-day cycle, 1,000 calls each (*) | 64,000 | 0 | 0.002 dex |
 | SNCHO_photo_2025 (91 species): 986 dark boxes | 46,342 | 0 | 0.030 dex |
-| SNCHO_photo_2025: 944 lit boxes | 44,368 | 7, in 1 box | 4.34 dex |
+| SNCHO_photo_2025: 945 lit boxes | 44,415 | 7, in 1 box | 4.34 dex |
 | SNCHO_photo_2025: 350 targeted lit boxes (C/O >= 0.8 at 500-1500 K, below 800 K, metallicity >= 100) | 16,450 | 1 | 0.155 dex |
-| SNCHO_photo_2025: 272 GCM-like paths (recorded forcing and mixing, 64 with a one-day light cycle) | 312,000 | 0 | 0.007 dex |
+| SNCHO_photo_2025: 208 GCM-like paths (recorded forcing and mixing) | 245,328 | 0 | 0.007 dex |
+| SNCHO_photo_2025: 272 GCM-like paths, 64 of them with a one-day light cycle (*) | 312,000 | 0 | 0.007 dex |
+
+One NCHO box (2973 K, 43 bar) has a call that the guard recomputes and the recovery does not save: its last step of
+5.6e7 s moves the element shares by 5.5e-6, above the allowance; its error is 0.0003 dex (notes.md).
 
 The sulfur boxes use the photolysis rates of a 1-D WASP-39b model on the same network; the paths replay the NCHO paths'
 forcing with sulfur added as H2S (S/H 1.41e-5 times the metallicity). Besides the 16 scored gases, C3H5, allene,

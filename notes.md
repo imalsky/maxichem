@@ -2087,6 +2087,20 @@ checks now read data/truth_v3, and refuse a set or a parity reference that does 
   scored error is still 0.0003 dex. On main (the old rule) the same call is flagged and recovered; at rtol 1e-4 the old
   rule takes two steps, the new rule still one; at rtol 1e-5 both pass (share change 1.8e-16). A one-step call of 5.6e7 s
   at 2973 K and 43 bar is not a GCM call; left as it is, for the owner (experiments/2026-11-10_truth_v3/box_drift.log).
+- Gate on the sulfur network against truth_v3 (kintest quick, cce9052): boxes_sncho25 1,931 boxes, 7 missed states, all
+  pinned (box 1939, S2, 1.647-4.341 dex, held); boxes_sncho25p 1 missed state, pinned (box 96, S2 0.155 dex, held); next
+  worst boxes 0.030 and 0.021 dex; 208 paths, 0 misses, worst 0.007 dex. The pins keep their reasons: both boxes' truth is
+  bitwise that of truth_v2. Boxes 117 and 1493, which moved against the old truth, are at 0.0003 and 0.0004 dex. TRUTH
+  declares 116 sulfur boxes without a result (box 892 now ends). New stored reference
+  data/benches/kintest/quick_sncho25_v3_ref1.npz.
+- Parity against libref10 and libref10_SNCHO25 (made by the torch generator with its masks mf + M >= 2; its coefficients
+  match VULCAN-JAX's capped ones within 3.48e-7): 48 passed; panel-P chains 1.3e-9 and 7.2e-9 dex, 0 and 2 step-count
+  mismatches in 2,048,000 cell-calls. Checks on cce9052 (the merged settings file): CPU 122 passed; slow CPU 4 passed;
+  parity and guard 48 passed; known answers, order, rate laws, kernel copies, dense LU, collision limit 26 passed;
+  test_ad 81 passed in 1,040 s; test_export_cpp 19 passed.
+- tests/test_rate_laws.py now caps a one-molecule-and-M row (fails on the old rule: the call does not finish its dt) and
+  leaves a first-order row of 1e10 s^-1 alone (fails when every one-molecule side counts). tests/rate_probe.cu is kept: it
+  checks what a call cannot show, each direction's coefficient apart and the derivative kernels' cap weights.
 
 ## References (by topic)
 
