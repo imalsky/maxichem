@@ -2036,6 +2036,38 @@ repository.
     coefficients, kernel codes), over declarations wrapped onto several lines; shown on a new kernel-local
     NEW_SETTING = 0.37 (fails), a 1e-3 in the guard (fails), RODAS_C43 wrapped over two lines (passes).
 
+### 2026-11-10 12:22 to 18:00: truth remade with the collision rule that counts M (experiments/2026-11-10_truth_v3)
+data/truth_v2 is old-rule truth, kept only as a record: the generator then left out every direction of one molecule. The
+checks now read data/truth_v3, and refuse a set or a parity reference that does not record RATE_RULE.
+- Truth generator: vulcan-truth 0ea6d9c ("fix(science): count M as a collision partner"). VULCAN-0D's coefficients have
+  M not folded in, so a direction counts when molecules + [M on that side] >= 2, at k M^(M + molecules - 2). RATE_RULE goes
+  into every box set's manifest and part (merge refuses a part or set of another rule) and every path's spec and path
+  set's manifest (history.py manifest). sobol.py adopt starts a set on a design copied byte for byte.
+- Validation before generation. The generator's capped coefficients against VULCAN-JAX's on 109 T x 29 P: within 3.48e-7
+  on all 390 NCHO and 532 sulfur pairs, the dissociations included (the k_B difference). check.py bitwise (fast against
+  stock, 40 boxes): IDENTICAL on NCHO and on the sulfur network; the sulfur one finished at 14:29, 18 min after its sets
+  had started. The settings were recovered by rerunning stored truth with the old rule, bit for bit: 25 sample boxes of the
+  three box sets (one step-cap rerun at 2e6 included) and 6 paths (QC, twin QC, QL, QD of both networks). The NCHO sets
+  were made with an earlier box.py (VULCAN's default atol, count_max 2e5; experiments/2026-11-03_atol/box_before_xatol.py),
+  so NCHO ran a copy of the generator with that box.py (experiments/2026-11-10_truth_v3/gen_ncho); its build differs from
+  the old stamp only in build.py's sulfur-network entry and in the staged NASA9 folder (VULCAN-JAX's HNO3 file, in neither
+  network).
+- Sets (new against truth_v2). boxes_ncho: 131,072 of 131,072 accepted, worst drift 9.87e-8 (the same), 97,500 CPU s
+  (94,041), design 58ecd80d (the same rows); 6 boxes stopped at the cap 2e5, 4 finished at 2e6 and 2 at 2e7 (before: 3 at
+  2e6, 3 at 2e7). qual_ncho 904 paths, 39,678 CPU s (39,471); daynight_ncho 64, 2,148 s (2,094); qual_sncho25 208, 42,202 s
+  (42,677); daynight_sncho25 64, 12,941 s (8,745); each with 0 missing, errors and forced steps. boxes_sncho25p: 350 of 404
+  accepted, the same 54 boxes without a result (step cap 2e6), 0 quarantined, worst drift 2.4e-8 (5.5e-10), 14,155 CPU s
+  (14,695).
+- Old against new truth on the scored gases at their floors. boxes_ncho: 57 boxes moved by more than 0.01 dex, none by
+  more than 0.1; largest 0.067 dex (box 95573, C2H2, 2870 K, 5e-4 bar); all 57 at 2477-3000 K where the new cap binds
+  (C2H2 54, HCN 3). boxes_sncho25p: 1 (box 117, 0.017 dex, C2H2, 2987 K). Paths: qual_ncho 1e-4 dex at most, daynight_ncho
+  0, qual_sncho25 4e-4, daynight_sncho25 1e-4. Boxes whose own T, P the cap does not touch still change by rounding when
+  their start comes from a donor box at a T, P where it binds (boxes_sncho25p: 103 boxes where the cap binds, 43 through
+  their donor, 204 bitwise equal, 0 unexplained).
+- Gate, kintest quick on NCHO against truth_v3 (db83a04): 0 misses; worst box 0.014 dex, paths 0.004. The 13 NCHO boxes
+  that moved against the old truth are at 0.0003-0.0010 dex again (they were 0.0105-0.0487). New stored reference
+  data/benches/kintest/quick_ncho_v3_ref1.npz.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
