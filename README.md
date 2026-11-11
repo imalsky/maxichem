@@ -256,7 +256,7 @@ under `CHEM_DATA`:
     truth_v3/qual_ncho/                VULCAN-0D truth paths (GCM-like forcing with mixing)
     truth_v3/boxes_sncho25/, boxes_sncho25p/, qual_sncho25/   the same for SNCHO_photo_network_2025
     truth_v2/old_network/boxes_ncho_r5e-3/boxes_000.npz   input states of the derivative check
-    benches/kintest/                   saved quick runs of bench/kintest.py (quick_ref6.npz NCHO, quick_sncho25_ref1.npz sulfur)
+    benches/kintest/                   saved quick runs of bench/kintest.py (quick_ncho_v3_ref1.npz NCHO, quick_sncho25_v3_ref1.npz sulfur)
 
 Each check stops with a message that names the missing files. Each stored reference of the parity tests
 carries a digest of its inputs, and the check refuses inputs that differ. The truth sets and the references record
