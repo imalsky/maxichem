@@ -60,6 +60,12 @@ def test_forms_the_scan_cannot_read_fail_instead_of_passing():
     macro = "\n#define PAIR(t) t first, t second\nvoid m(PAIR(int)) {}\n"
     assert _failures(pointer) == [UNSUPPORTED]
     assert _failures(macro, "") == ["k.cuh:3: " + UNSUPPORTED.split(": ", 1)[1]]
+    nested = "\n#define MANY(t) t a, t b\n#define ARGS MANY(int)\nvoid n(ARGS) {}\n"
+    assert _failures(nested, "") == ["k.cuh:4: " + UNSUPPORTED.split(": ", 1)[1]]
+    comparison = f"\nvoid c({THIRTEEN.replace('int a0,', 'bool a0 = 1 < 2,')}) {{}}\n"
+    assert _failures(comparison) == [UNSUPPORTED]
+    noexcept = f"\nvoid e({THIRTEEN}) noexcept(true) {{}}\n"
+    assert _failures(noexcept) == ["k.cuh:2: e has 13 arguments, limit 12"]
     # an exception does not let a form through that the scan cannot count
     assert _failures("\n// size-limit-ok: reason\n" + pointer.lstrip()) == [UNSUPPORTED.replace(":2:", ":3:")]
 

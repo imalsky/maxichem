@@ -38,7 +38,9 @@ EXCEPTION = re.compile(r"size-limit-ok:\s*\S")
 C_NOISE = re.compile(r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'""", re.DOTALL)
 C_PREPROCESSOR = re.compile(r"^[ \t]*#(?:[^\n]*\\\n)*[^\n]*", re.MULTILINE)
 C_BRANCH = re.compile(r"\b(?:if|for|while|case|catch)\b")
-C_SIGNATURE_END = re.compile(r"\)\s*(?:(?:const|noexcept|override|final|mutable)\s*)*(?:->[^;{}()]*)?$")
+C_SIGNATURE_END = re.compile(
+    r"\)\s*(?:(?:const|noexcept(?:\s*\([^()]*\))?|override|final|mutable)\s*)*(?:->[^;{}()]*)?$"
+)
 C_CONTROL_WORDS = {"if", "for", "while", "switch", "catch", "sizeof", "return"}
 C_WORD_BEFORE = re.compile(r"([A-Za-z_~][\w:~]*)\s*$")
 C_OBJECT_MACRO = re.compile(r"^[ \t]*#[ \t]*define[ \t]+(\w+)(?![\w(])[ \t]*((?:[^\n]*\\\n)*[^\n]*)", re.MULTILINE)
@@ -225,10 +227,9 @@ def c_parameter_count(parameters: str, macros: dict[str, list[str]]) -> int | No
     Returns
     -------
     int or None
-        The number of parameters; 0 for ``()`` and ``(void)``; None where the list calls a function-like macro.
+        The number of parameters; 0 for ``()`` and ``(void)``; None where the expanded list calls a function-like
+        macro, or a default argument holds ``<`` or ``>`` (a comparison and a template bracket read alike).
     """
-    if any(f"{name}(" in macros for name in re.findall(r"\b(\w+)\s*\(", parameters)):
-        return None
     for _ in range(len(macros) + 1):  # each pass expands one level of nesting
         expanded = re.sub(
             r"\b\w+\b",
@@ -238,6 +239,10 @@ def c_parameter_count(parameters: str, macros: dict[str, list[str]]) -> int | No
         if expanded == parameters:
             break
         parameters = expanded
+    if any(f"{name}(" in macros for name in re.findall(r"\b(\w+)\s*\(", parameters)):
+        return None
+    if re.search(r"=[^,]*[<>]", parameters):
+        return None
     text = parameters.strip()
     if not text or text == "void":
         return 0
