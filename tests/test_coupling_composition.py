@@ -1,9 +1,12 @@
 """Tracer conversions and the start gas: a hand-worked mixture, elements kept through a reaction, the start's ratios."""
 
+from fractions import Fraction
+
 import pytest
 import torch
 
 from maxichem.coupling.composition import (
+    GAS_CONSTANT,
     START_PER_H,
     element_moles,
     mass_to_mole,
@@ -64,6 +67,11 @@ def test_hand_mixture_and_elements_kept_through_a_reaction():
     totals = tracer_totals(q_out, volume_mass, mw, atoms)
     assert torch.allclose(totals, tracer_totals(q, volume_mass, mw, atoms), rtol=1e-13, atol=0)
     assert float(totals[0]) == pytest.approx(2.0 * float(mass.sum()), rel=1e-14)
+
+
+def test_gas_constant_is_exact():
+    # k_B and N_A, both exact in the SI, typed here
+    assert float(Fraction("1.380649e-23") * Fraction("6.02214076e23")) == GAS_CONSTANT
 
 
 def test_element_totals_by_hand():

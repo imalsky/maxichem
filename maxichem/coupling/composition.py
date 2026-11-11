@@ -22,7 +22,8 @@ __all__ = [
     "tracer_totals",
 ]
 
-GAS_CONSTANT = 8.314462618  # J mol^-1 K^-1, CODATA (exact); kintera, which snapy's EOS uses, has 8.31446 (3e-7 lower)
+# J mol^-1 K^-1: k_B N_A, exact in the SI. kintera, which snapy's EOS uses, has 8.31446 (3e-7 lower).
+GAS_CONSTANT = 8.31446261815324
 
 # kg/mol: pyharp's atomic weights (harp/element.cpp), so the tracers and the dynamics' gas weigh atoms alike
 ATOMIC_MASS = {"H": 1.008e-3, "He": 4.002602e-3, "C": 12.011e-3, "N": 14.007e-3, "O": 15.999e-3, "S": 32.06e-3}
