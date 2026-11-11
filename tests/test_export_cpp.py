@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 
-from maxichem import _constants, paths
+from maxichem import _constants, _solver, paths
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
@@ -51,6 +52,10 @@ def test_cpp_call_is_the_python_call(export_program, tmp_path, network, photo, t
     assert "bitwise identical" in result.stdout
     assert ("(default arguments)" in result.stdout) == (tries == _constants.DEFAULT_MAX_STEPS)
     assert ("J [B, 0] gives the same bits, J [B, 1] refused" in result.stdout) == (photo == 0)
+    if not photo:  # the C++ call refuses the [B, 1] J with the Python call's message
+        with pytest.raises(ValueError, match="no photolysis") as python:
+            _solver.check_photolysis(torch.zeros(CELLS, 1, dtype=torch.float64), CELLS, 0, torch.device("cpu"))
+        assert f"(maxichem: {python.value})" in result.stdout
     assert "accessors return copies" in result.stdout
 
 

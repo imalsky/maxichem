@@ -113,9 +113,12 @@ def test_photolysis_check_refuses_each_wrong_j():
     device = torch.device("cpu")
     good = torch.zeros(4, 2, dtype=torch.float64)
     assert _solver.check_photolysis(None, 4, 0, device) is None
+    assert _solver.check_photolysis(good[:, :0], 4, 0, device) is None  # an empty J is no J: the call passes none
     assert torch.equal(_solver.check_photolysis(good, 4, 2, device), good)
-    with pytest.raises(ValueError, match="no photolysis"):
+    with pytest.raises(ValueError, match=r"^J: none or an empty \[4, 0\] one expected, .*; got \[4, 2\]$"):
         _solver.check_photolysis(good, 4, 0, device)
+    with pytest.raises(ValueError, match=r"^J: float64 \[4, 0\]"):
+        _solver.check_photolysis(good[:-1, :0], 4, 0, device)
     with pytest.raises(ValueError, match="required"):
         _solver.check_photolysis(None, 4, 2, device)
     with pytest.raises(ValueError, match=r"^J: float64 \[4, 2\]"):

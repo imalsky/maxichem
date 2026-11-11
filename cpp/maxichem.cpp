@@ -283,15 +283,18 @@ std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T
   P = P.contiguous();
   dt = dt.contiguous();
   h = h.contiguous();
-  // a defined J is float64 [B, nj] on the device, so [B, 0] without photolysis; only a network without one may omit it
+  // the rule and the messages of check_photolysis in maxichem/_solver.py: without photolysis no J or an empty [B, 0]
+  // one, with it J [B, nj]
   if (J.defined()) {
+    TORCH_CHECK(nj_ || (J.dim() == 2 && J.size(1) == 0), "maxichem: J: none or an empty [", B,
+                ", 0] one expected, since this solver has no photolysis; got ", J.sizes());
     TORCH_CHECK(J.device() == device_ && J.scalar_type() == torch::kFloat64 && J.dim() == 2 && J.size(0) == B &&
                     J.size(1) == nj_,
                 "maxichem: J: float64 [", B, ", ", nj_, "] on ", device_, " expected, got ", J.scalar_type(), " ",
-                J.sizes(), " on ", J.device(), nj_ ? "" : " (this export has no photolysis: pass no J, or [B, 0])");
+                J.sizes(), " on ", J.device());
     J = J.contiguous();
   } else {
-    TORCH_CHECK(nj_ == 0, "maxichem: J [B, ", nj_, "] is required for a network exported with photo=True");
+    TORCH_CHECK(nj_ == 0, "maxichem: J [B, ", nj_, "] is required with photolysis: pass zeros for dark cells");
   }
   auto xo = torch::empty_like(x);
   auto ho = h.clone();

@@ -96,15 +96,16 @@ int main(int argc, char** argv) {
   if (chem.nj() == 0) {  // without photolysis an empty [B, 0] J is no J; any other J is refused before a launch
     auto r3 = chem(x, T, P, dt, h, torch::zeros({B, 0}, x.options()), maxichem::kDefaultRtol, -1.0, max_steps);
     bool const same_empty = all_same(r3, chem.count().cpu());
-    bool refused = false;
+    std::string refusal;
     try {
       chem(x, T, P, dt, h, torch::zeros({B, 1}, x.options()), maxichem::kDefaultRtol, -1.0, max_steps);
-    } catch (c10::Error const&) {
-      refused = true;
+    } catch (c10::Error const& e) {
+      refusal = e.what_without_backtrace();
     }
+    bool const refused = !refusal.empty();
     ok = ok && same_empty && refused;
     std::cout << "J [B, 0] " << (same_empty ? "gives the same bits" : "DIFFERENT") << ", J [B, 1] "
-              << (refused ? "refused" : "NOT REFUSED") << "; ";
+              << (refused ? "refused" : "NOT REFUSED") << " (" << refusal << "); ";
   }
   // what the accessors return is the caller's to change: the solver's counts and tables stay as they were
   auto const total_before = chem.total().cpu(), atoms_before = chem.atoms().cpu();

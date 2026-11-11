@@ -8,16 +8,17 @@
 //
 // x [B, ns] mole fractions in the network's species order, T [B] K, P [B] dyn cm^-2, dt [B] s, h [B] the
 // starting step sizes (all float64 on the solver's device); J [B, nj] s^-1 (float64 on the device), required for a
-// network exported with photo=True (zeros for dark cells). A network without photolysis (nj() == 0) takes no J: an
-// undefined tensor, or an empty [B, 0] one. Returns the new mole fractions, the next step sizes, done (bool) and the
-// accepted steps per cell (float64). `count()` copies the call's counts on the device (int32: queue, then bad_input,
-// cold, hot, nonfinite, unfinished, drift, recomputed, recovered, still_failed, nonfinite_h, then the recovery's queue)
-// and `total()` their sum since construction (int64). The call reads the counts back (its one host sync) and throws
-// std::invalid_argument if it refused a cell: bad input (x negative or non-finite, |sum(x) - 1| above the export's
-// x_sum_tol, no x above 0, T non-finite, P <= 0, dt negative or non-finite, J negative or non-finite) or T outside
-// [t_min, t_max]. The message names the counts, the limits and the first such cell; the counts stay readable.
-// The constructor throws std::runtime_error, before any CUDA work, if a kernel's argument list in the export differs
-// from the one this caller passes (a name unknown, missing, repeated or out of order, or J where a kernel takes none).
+// network exported with photo=True (zeros for dark cells). A network without photolysis (nj() == 0) takes no J (an
+// undefined tensor) or an empty [B, 0] one, and refuses a J with columns: the Python call's rule. Returns the new mole
+// fractions, the next step sizes, done (bool) and the accepted steps per cell (float64). `count()` copies the call's
+// counts on the device (int32: queue, then bad_input, cold, hot, nonfinite, unfinished, drift, recomputed, recovered,
+// still_failed, nonfinite_h, then the recovery's queue) and `total()` their sum since construction (int64). The call
+// reads the counts back (its one host sync) and throws std::invalid_argument if it refused a cell: bad input (x
+// negative or non-finite, |sum(x) - 1| above the export's x_sum_tol, no x above 0, T non-finite, P <= 0, dt negative or
+// non-finite, J negative or non-finite) or T outside [t_min, t_max]. The message names the counts, the limits and the
+// first such cell; the counts stay readable. The constructor throws std::runtime_error, before any CUDA work, if a
+// kernel's argument list in the export differs from the one this caller passes (a name unknown, missing, repeated or
+// out of order, or J where a kernel takes none).
 //
 // The cubin is for one GPU architecture (meta.txt "arch"): export on the machine that runs it.
 // Calls share the scratch and the counts, so they run one at a time: on one stream, or synchronize before

@@ -48,8 +48,9 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 | `info` | The kernel's layout |
 | `close()` | Unloads the kernels and drops the tables and scratch; the counts stay readable |
 
-J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells) and refused
-without it.
+J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells). Without
+photolysis a call takes no J or an empty one, [B, 0], and refuses a J with columns. The C++ caller follows the same rule, with the
+same messages; there an undefined tensor is no J.
 
 The results are named tuples, so `x, h, done, steps = solver(...)` and indexing work as before:
 
@@ -110,9 +111,8 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 
 Loads an export from `cpp/maxichem.hpp`. `chem(x, T, P, dt, h, J, rtol, atol, max_steps)` returns the new mole fractions, the next
 step sizes, done and the accepted steps. A negative `atol` takes the export's default. It refuses the cells `CudaSolver` refuses,
-with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits. A defined J must be float64
-[B, `nj()`] on the device; an export without photolysis (`nj()` 0) takes an undefined J or an empty [B, 0] one, and refuses any
-other. Before any CUDA work, the constructor checks each kernel's argument list in `meta.txt` against the one the call passes
+with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits. J follows `CudaSolver`'s rule
+above. Before any CUDA work, the constructor checks each kernel's argument list in `meta.txt` against the one the call passes
 (`KERNEL_ARGUMENTS`, with J last for call and recover with photolysis): an unknown, missing, repeated or misplaced name, or J on
 the guard, is refused as `std::runtime_error` naming the kernel and the argument.
 
