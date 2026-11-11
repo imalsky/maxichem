@@ -2078,6 +2078,19 @@ per-cell setup for the tangent and adjoint kernels would take about 18 arguments
   test_vulcan_truth 2 passed in 208 s (NCHO 0 misses, worst 0.014 dex on boxes; sulfur pins held); test_export_cpp
   19 passed in 542 s; test_ad 81 passed in 1036 s (0 FAIL lines). The same tiers passed on 6204fa6 before the
   review's commits.
+- A second review of the branch found three more gaps, fixed. (1) The checker passed three 13-argument definitions:
+  a function-like macro reached through an object-like one (ARGS -> MANY(int)), a `noexcept(true)` qualifier, and a
+  default argument holding `1 < 2`. It now reads the qualifier, looks for function-like macros after expanding, and
+  reports a default argument with `<` or `>` as unsupported; the previous checker passes all three (shown on a copy).
+  (2) The rate family's reasons: rates, its one group (the rate tables) would save 2 for an untimed change; rates_tan
+  and rate_cotangents, a tangent or cotangent per rate-law input, the same group saving 2 of 18. (3) The last hand
+  carvings: tangent_step and rhs_vjp_n step their stage loops by the table's spacing (A_K2 - A_K1, A_KD2 - A_KD1, with
+  static_asserts that the stages are evenly spaced), and the recovery's ints have their own table (RI_PR, RI_NEXT in
+  R_INTS). Machine code equal to 6827801's in every one of the 117 variants (the jvp variants' cubins byte-equal at
+  the card's size; at 49152 B only `.nv.info.recover` differs, NVRTC's own spread); a first form that took a pointer
+  per stage changed jvp's code in 4 variants and was not kept. The int region equals the old carving in 36 of 36
+  cases. Checks after: CPU 115 passed, tests/test_size_limits.py 4 passed, pre-commit on the changed files passes. No
+  GPU check was rerun, since no machine code changed.
 
 ## References (by topic)
 
