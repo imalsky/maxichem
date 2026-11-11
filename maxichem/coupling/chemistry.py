@@ -2,8 +2,9 @@
 
 A cell the call did not finish holds a state for the wrong elapsed time, so the run stops; the message names the cause
 from the call's own counts, and the fix that matches it. The call itself raises on refused cells (cold, hot, bad
-input), so here those are seen only where that raise was switched off; the cells left are those still failing after
-the recovery. docs/architecture.md places this module.
+input) before it returns, so after a real call those counts are 0 here, and the cells left are those still failing
+after the recovery. The causes named for those three counts serve counts from a solver whose raise is replaced, as in
+the tests. docs/architecture.md places this module.
 """
 
 from collections.abc import Mapping
