@@ -599,8 +599,8 @@ def test_determinism(checks, verdict):
     a2 = checks.ad.vjp(s.x, s.T, s.P, s.d, s.h, s.c, lm=s.lm, J=s.J)[4]._asdict()
     perm = torch.randperm(s.B, generator=torch.Generator().manual_seed(1)).to(checks.device)
     a3 = checks.ad.vjp(s.x[perm], s.T[perm], s.P[perm], s.d[perm], s.h[perm], s.c[perm], lm=s.lm[perm], J=s.J[perm])[4]
-    det = all(torch.equal(a1[k], a2[k]) for k in a1)
-    pm = all(torch.equal(a1[k][perm], a3._asdict()[k]) for k in a1 if k != "rc")
+    det = all(torch.equal(a1[k], a2[k]) for k in a1 if a1[k] is not None)  # J is None without photolysis
+    pm = all(torch.equal(a1[k][perm], a3._asdict()[k]) for k in a1 if k != "rc" and a1[k] is not None)
     verdict(
         "determinism", det and pm, f"same call twice bitwise: {det}; cells permuted, per-cell cotangents bitwise: {pm}"
     )
@@ -620,7 +620,7 @@ def test_non_finite_step_acts_as_twice_dt(checks, verdict):
         nonfin[str(q)] = (
             all(torch.equal(a, b) for a, b in zip(jn, j2, strict=True))
             and all(torch.equal(a, b) for a, b in zip(vn[:4], v2[:4], strict=True))
-            and all(torch.equal(a, b) for a, b in zip(vn[4], v2[4], strict=True))
+            and all(torch.equal(a, b) for a, b in zip(vn[4], v2[4], strict=True) if a is not None)
             and bool((vn[4].h == 0).all())
             and checks.ad.fallback["nonfinite_h"] == s.x.shape[0]
         )
@@ -675,10 +675,12 @@ def test_failed_cell_is_left_out_of_the_rate_table(checks, verdict):
         alone = checks.ad.vjp(s.x[:-1], s.T[:-1], s.P[:-1], d[:-1], h[:-1], s.c[:-1], lm=lm[:-1], J=s.J[:-1], **tries)
         cotangents, own = failed[4]._asdict(), alone[4]._asdict()
         others_equal = all(torch.equal(a[:-1], b) for a, b in zip(failed[:4], alone[:4], strict=True)) and all(
-            torch.equal(cotangents[k][:-1], own[k]) for k in cotangents if k != "rc"
+            torch.equal(cotangents[k][:-1], own[k]) for k in cotangents if k != "rc" and cotangents[k] is not None
         )
         rc_equal = torch.equal(cotangents["rc"], own["rc"]) and bool(cotangents["rc"].isfinite().all())
-        own_nan = all(bool(cotangents[k][-1].isnan().all()) for k in cotangents if k != "rc")
+        own_nan = all(
+            bool(cotangents[k][-1].isnan().all()) for k in cotangents if k != "rc" and cotangents[k] is not None
+        )
         verdict(
             f"failed cell, {name}",
             int(flag[-1]) == 2 and counts["still_failed"] == 1 and others_equal and rc_equal and own_nan,
@@ -789,6 +791,10 @@ def test_negative_x_is_refused(checks, verdict, monkeypatch):
         and torch.equal(jb[4][:, 1:], j2[4][:, 1:])  # tangents [D, B, S], [D, B]
         and torch.equal(jb[5][:, 1:], j2[5][:, 1:])
         # rc sums over the cells
-        and all(torch.equal(a[1:], b[1:]) for k, a, b in zip(vb[4]._fields, vb[4], v2[4], strict=True) if k != "rc")
+        and all(
+            torch.equal(a[1:], b[1:])
+            for k, a, b in zip(vb[4]._fields, vb[4], v2[4], strict=True)
+            if k != "rc" and a is not None
+        )
     )
     verdict("negative x", negok, f"jvp {cj}; vjp {cv}; cell 0 not done, the others bitwise the valid batch's")
