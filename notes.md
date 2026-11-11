@@ -2087,20 +2087,25 @@ checks now read data/truth_v3, and refuse a set or a parity reference that does 
   scored error is still 0.0003 dex. On main (the old rule) the same call is flagged and recovered; at rtol 1e-4 the old
   rule takes two steps, the new rule still one; at rtol 1e-5 both pass (share change 1.8e-16). A one-step call of 5.6e7 s
   at 2973 K and 43 bar is not a GCM call; left as it is, for the owner (experiments/2026-11-10_truth_v3/box_drift.log).
-- Is it the rule or the lottery (lottery.py, lottery_98666.jsonl, lottery_33162.jsonl)? The state before that call was
-  saved as reached under each rule (main cecbf8e and f2ab956), and each state was run on three kernels: the old rule,
-  the new rule, and the old rule with only the changed pair (H + C2H4 + M -> C2H5 + M, capped 1.0987 times more at this
-  T, P) under the new one. 2,048 matched cells each: cell 0 as saved, the others x times 1 + s 10^U(-15, -12) per
-  species and dt times 1 + U(-1e-3, 1e-3), one seed for all. Still failed after the recovery, at the production drift
-  allowance (flagged by the guard in brackets): old kernel 0 (472) on the old state, 2 (516) on the new; new kernel 4
-  (468) and 5 (521); the pair-only kernel exactly the new kernel's, so the pair is the whole difference. Together 2 of
-  4,096 against 9 of 4,096 (exact two-sided binomial p = 0.065). Cell 0 fails only on the new kernel from the new state.
-  Control box 33162 (2740 K, 86 bar, where the cap does not bind): 7 still failed (180 flagged) of 2,048 on every
-  kernel and state, bitwise the same counts. At 10 times the allowance at most 1 cell fails anywhere. Verdict: the
-  lottery of the 2026-11-06 17:22 entry (where, under the old rule, box 33162's recovery failed in 29 of 6,144 noisy
-  draws and box 98666's in 0 of 6,144, and a rounding move had about a 2 % chance per run of turning kintest full red):
-  a recovery that fails for about 0.1-0.3 % of perturbed hot dense cells under either rule, the failing cells moved by
-  the 10 % change of one rate; the new rule's excess here is not significant. No change made; the question of these one-step 5.6e7-s calls stays with the owner.
+- Is it the rule or the lottery? Paired test (lottery.py, lottery2_98666.jsonl, lottery2_33162.jsonl, the per-cell flags
+  in lottery2_<box>_<kernel>.npz, counts in lottery_paired.log). The state before that call was saved as reached under
+  each rule (main cecbf8e and f2ab956), and each state was run on three kernels: old (cecbf8e), new (61fa409, its kernels
+  f2ab956's) and pair-only (61fa409 with only H + C2H4 + M -> C2H5 + M under the new rule, lottery2_pair.diff). 2,048
+  matched cells each: cell 0 as saved, the others x times 1 + s 10^U(-15, -12) per species and dt times
+  1 + U(-1e-3, 1e-3), one seed for all. Box 98666, still failed after the recovery at the production drift allowance,
+  old kernel to new: 0 to 4 of 2,048 on the old-rule state, 2 to 5 on the new-rule state. The excess points the same way
+  on both states. Paired (failed on the new kernel only / old only / both): 4 / 0 / 0 (exact McNemar p 0.125) and
+  5 / 2 / 0 (p 0.45); pooled 9 / 2 / 0, p 0.065. At 2, 5 and 10 times the allowance, pooled 7 / 1 (p 0.070), 4 / 0
+  (p 0.125), 1 / 0. The pair-only kernel's flags equal the new kernel's, cell for cell. That is expected, not more
+  evidence: at this T, P only that pair's capped rate changes (1.0987 times more). Control box 33162 (2740 K, 86 bar,
+  where the cap does not bind): 7 still failed (180 flagged) on every kernel and state, the same cells. These are one
+  sample of 2,048 a state; the 2026-11-06 17:22 entry's 29 of 6,144 (box 33162) and 0 of 6,144 (box 98666) used another
+  setup and are not pooled with them. No new kind of failure: the control box fails 7 of 2,048 under the old rule on
+  main, at 10 times the allowance at most 1 cell fails anywhere, and box 98666's scored error is 0.0003 dex. But the
+  unperturbed call of box 98666 (cell 0) fails its recovery on every run under the new rule from the new state (flag 2 at
+  1 and 2 times the allowance, passes at 5), so at this head kintest full on NCHO exits 1 on every run, not on about 2 %
+  of runs. Verdict: inconclusive whether the rule raises the failure rate (pooled p 0.065); the failure of box 98666 is
+  deterministic. No change made here.
 - Gate on the sulfur network against truth_v3 (kintest quick, cce9052): boxes_sncho25 1,931 boxes, 7 missed states, all
   pinned (box 1939, S2, 1.647-4.341 dex, held); boxes_sncho25p 1 missed state, pinned (box 96, S2 0.155 dex, held); next
   worst boxes 0.030 and 0.021 dex; 208 paths, 0 misses, worst 0.007 dex. The pins keep their reasons: both boxes' truth is
