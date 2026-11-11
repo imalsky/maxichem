@@ -2066,8 +2066,8 @@ checks now read data/truth_v3, and refuse a set or a parity reference that does 
   more than 0.1; largest 0.067 dex (box 95573, C2H2, 2870 K, 5e-4 bar); all 57 at 2477-3000 K where the new cap binds
   (C2H2 54, HCN 3). boxes_sncho25p: 1 (box 117, 0.017 dex, C2H2, 2987 K). Paths: qual_ncho 1e-4 dex at most, daynight_ncho
   0, qual_sncho25 4e-4, daynight_sncho25 1e-4. Boxes whose own T, P the cap does not touch still change by rounding when
-  their start comes from a donor box at a T, P where it binds (boxes_sncho25p: 103 boxes where the cap binds, 43 through
-  their donor, 204 bitwise equal, 0 unexplained).
+  their start comes from a donor box at a T, P where it binds (boxes_ncho: 18,295 boxes where the cap binds, 6,281 through
+  their donor, 106,496 bitwise equal, 0 unexplained; boxes_sncho25p: 103, 43, 204, 0).
 - Gate, kintest quick on NCHO against truth_v3 (db83a04): 0 misses; worst box 0.014 dex, paths 0.004. The 13 NCHO boxes
   that moved against the old truth are at 0.0003-0.0010 dex again (they were 0.0105-0.0487). New stored reference
   data/benches/kintest/quick_ncho_v3_ref1.npz.
