@@ -79,7 +79,14 @@ def _require_same(path: Path, saved: dict[str, Any] | None, gas: DryGas, grid: d
             f"{path} does not record the gas and grid it was made for (an older driver saved it), so it cannot be "
             f"checked against this deck ({gas}); loading it would give another T = p / (rho R). {remake}"
         )
-    s_gas = saved["gas"]
+    try:
+        s_gas = {name: saved["gas"][name] for name in ("composition", "cv_R", "molar_mass")}
+        s_grid = saved["grid"]
+    except (KeyError, TypeError):
+        raise FlowFileError(
+            f"{path} holds a malformed record (it needs gas, with composition, cv_R and molar_mass, and grid), got "
+            f"{saved!r}. {remake}"
+        ) from None
     differ = [
         f"{name}: file {s_gas[name]!r}, deck {getattr(gas, name)!r}"
         for name in ("composition", "cv_R")
@@ -87,8 +94,8 @@ def _require_same(path: Path, saved: dict[str, Any] | None, gas: DryGas, grid: d
     ]
     if not math.isclose(s_gas["molar_mass"], gas.molar_mass, rel_tol=_MOLAR_MASS_RTOL):
         differ.append(f"molar_mass: file {s_gas['molar_mass']!r}, deck {gas.molar_mass!r} kg/mol")
-    if saved["grid"] != grid:
-        differ.append(f"grid: file {saved['grid']!r}, deck {grid!r}")
+    if s_grid != grid:
+        differ.append(f"grid: file {s_grid!r}, deck {grid!r}")
     if differ:
         raise FlowFileError(f"{path} was made for another deck ({'; '.join(differ)}). {remake}")
 
@@ -195,7 +202,8 @@ def load_start_column(path: str | Path, gas: DryGas, grid: dict[str, Any]) -> np
     with np.load(path, allow_pickle=False) as f:
         saved = json.loads(str(f["record"])) if "record" in f.files else None
         remake = "Make the column again with re_start.py under this deck's gas and grid, and start from that."
-        _require_same(path, saved, gas, grid, remake)
+        # the record went through JSON, which reads a tuple back as a list: compare with the deck's grid read alike
+        _require_same(path, saved, gas, json.loads(json.dumps(grid)), remake)
         levels = np.asarray(f["L"])
     _check_levels(path, levels, grid)
     return levels

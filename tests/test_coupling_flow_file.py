@@ -1,5 +1,8 @@
 """Saved flows and start columns load only into the deck they were made for, and old files without a record never."""
 
+import json
+from dataclasses import asdict
+
 import numpy as np
 import pytest
 import torch
@@ -76,3 +79,31 @@ def test_start_column_loads_only_for_its_own_gas(tmp_path):
     np.savez(short, L=levels[:2], record=record)
     with pytest.raises(FlowFileError, match=r"4 layers need 5 level temperatures, got shape \(2,\)"):
         load_start_column(short, DECK_GAS, grid)
+
+
+def test_start_column_grid_with_a_tuple_loads(tmp_path):
+    # the column's record goes through JSON, which reads a tuple back as a list
+    grid = {"nz": 4, "faces_m": (0.0, 6.0e6)}
+    levels = np.linspace(1800.0, 900.0, 5)
+    path = tmp_path / "column.npz"
+    save_start_column(path, levels, DECK_GAS, grid)
+    assert np.array_equal(load_start_column(path, DECK_GAS, grid), levels)
+    with pytest.raises(FlowFileError, match="grid: file"):
+        load_start_column(path, DECK_GAS, {"nz": 4, "faces_m": (0.0, 7.0e6)})
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{"gas": {"composition": {"H": 2.0}}, "grid": GRID}, {"gas": asdict(DECK_GAS)}, ["gas"]],
+    ids=["gas without cv_R", "no grid", "not a mapping"],
+)
+def test_malformed_record_is_refused(tmp_path, record):
+    w = [torch.zeros(2, 3, dtype=torch.float64)]
+    flow = tmp_path / "flow.pt"
+    torch.save({"hydro_w": w, "tsim": 700.0, "record": record}, flow)
+    with pytest.raises(FlowFileError, match="malformed record"):
+        load_flow(flow, DECK_GAS, GRID, [(2, 3)], CPU)
+    column = tmp_path / "column.npz"
+    np.savez(column, L=np.linspace(1800.0, 900.0, 5), record=np.array(json.dumps(record)))
+    with pytest.raises(FlowFileError, match="malformed record"):
+        load_start_column(column, DECK_GAS, {"nz": 4})
