@@ -127,9 +127,9 @@ def test_small_network_runs_in_every_kernel(read_network, gpu):
     difference = (up - down) / (2.0 * step)
     assert torch.allclose(tangent[4], difference, rtol=SMALL_TANGENT_TOLERANCE, atol=1e-9)
     contraction = (weights * tangent[4]).sum(1)
-    print(f"small network: adjoint {adjoint[4]['T'].tolist()}, tangent {contraction.tolist()}")
+    print(f"small network: adjoint {adjoint.cotangents.T.tolist()}, tangent {contraction.tolist()}")
     assert bool((contraction != 0.0).all())
-    assert torch.allclose(adjoint[4]["T"], contraction, rtol=SMALL_ADJOINT_TOLERANCE, atol=0.0)
+    assert torch.allclose(adjoint.cotangents.T, contraction, rtol=SMALL_ADJOINT_TOLERANCE, atol=0.0)
 
 
 # CO_1's NASA-9 ranges: every term of Cp / R depends on T, with other coefficients below and above the split
