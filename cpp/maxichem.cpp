@@ -5,6 +5,7 @@
 #include <cuda.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -257,9 +258,8 @@ Solver::~Solver() {
   cuModuleUnload(static_cast<CUmodule>(module_));
 }
 
-std::array<torch::Tensor, 4> Solver::operator()(torch::Tensor x, torch::Tensor T, torch::Tensor P, torch::Tensor dt,
-                                                torch::Tensor h, torch::Tensor J, double rtol, double atol,
-                                                int max_steps) {
+CallResult Solver::operator()(torch::Tensor x, torch::Tensor T, torch::Tensor P, torch::Tensor dt, torch::Tensor h,
+                              torch::Tensor J, double rtol, double atol, int max_steps) {
   std::array<std::pair<char const*, torch::Tensor const*>, 5> given{
       {{"x", &x}, {"T", &T}, {"P", &P}, {"dt", &dt}, {"h", &h}}};
   for (auto const& [name, a] : given)

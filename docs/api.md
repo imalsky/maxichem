@@ -109,8 +109,8 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 
 ## C++: `maxichem::Solver(folder, device)`
 
-Loads an export from `cpp/maxichem.hpp`. `chem(x, T, P, dt, h, J, rtol, atol, max_steps)` returns the new mole fractions, the next
-step sizes, done and the accepted steps. A negative `atol` takes the export's default. It refuses the cells `CudaSolver` refuses,
+Loads an export from `cpp/maxichem.hpp`. `chem(x, T, P, dt, h, J, rtol, atol, max_steps)` returns a `maxichem::CallResult`, a
+struct with `CallResult`'s fields `x`, `h`, `done` and `steps`, so `auto [x1, h1, done, steps] = chem(...)` works. A negative `atol` takes the export's default. It refuses the cells `CudaSolver` refuses,
 with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits. J follows `CudaSolver`'s rule
 above. Before any CUDA work, the constructor checks each kernel's argument list in `meta.txt` against the one the call passes
 (`KERNEL_ARGUMENTS`, with J last for call and recover with photolysis): an unknown, missing, repeated or misplaced name, or J on
@@ -130,3 +130,6 @@ than calling it in a hot loop.
 Interface change: these were public data members (`chem.ns`, `chem.nj`, `chem.species`, `chem.elements`, `chem.default_atol`,
 `chem.count`, `chem.total`); write them with `()`. The call trusts them and its kernels write to the counts, so a caller can no
 longer rebind or resize them.
+
+Interface change: the call returned `std::array<torch::Tensor, 4>`; it returns `maxichem::CallResult` now. Structured bindings
+compile as before; indexing (`r[0]`, `r[3]`) does not: write `r.x`, `r.h`, `r.done`, `r.steps`.

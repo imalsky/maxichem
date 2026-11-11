@@ -89,8 +89,12 @@ int main(int argc, char** argv) {
   auto same = [](torch::Tensor a, torch::Tensor b) {
     return torch::equal(a.cpu().contiguous().view(torch::kInt64), b.contiguous().view(torch::kInt64));
   };
-  auto all_same = [&](std::array<torch::Tensor, 4> const& q, torch::Tensor const& c) {
-    return same(q[0], xo) && same(q[1], ho) && same(q[3], so) && torch::equal(q[2].cpu(), dn) && torch::equal(c, co);
+  // the result's fields by name, as in Python, and the structured binding the header promises, in the same order
+  auto all_same = [&](maxichem::CallResult const& q, torch::Tensor const& c) {
+    auto const& [qx, qh, qdone, qsteps] = q;
+    bool const in_order = qx.is_same(q.x) && qh.is_same(q.h) && qdone.is_same(q.done) && qsteps.is_same(q.steps);
+    return in_order && same(q.x, xo) && same(q.h, ho) && same(q.steps, so) && torch::equal(q.done.cpu(), dn) &&
+           torch::equal(c, co);
   };
   bool ok = all_same(r, counts) && all_same(r2, counts2);
   if (chem.nj() == 0) {  // without photolysis an empty [B, 0] J is no J; any other J is refused before a launch
