@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 
+from ._constants import WARP_LANES
 from ._tables import balance_lanes
 from .kinvulcan import VulcanNetwork
 
@@ -94,7 +95,7 @@ def ad_tables(net: VulcanNetwork, tab: dict[str, Any]) -> dict[str, Any]:
                 rest = sl[:m] + sl[m + 1 :]
                 rest = rest + [ns] * (2 - len(rest))
                 rows[sl[m]].append((k, rest[0], rest[1]))
-    ch = -(-sum(len(t) for t in rows) // 32)
+    ch = -(-sum(len(t) for t in rows) // WARP_LANES)
     pieces, xg, nx = [], [0], 0
     for i, t in enumerate(rows):
         for c in range(0, len(t), ch):
@@ -106,8 +107,8 @@ def ad_tables(net: VulcanNetwork, tab: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"too many gather pieces: {npg}, below {_MAX_PIECES}; this network is too large for the adjoint"
         )
-    lanes, ground = balance_lanes(range(len(pieces)), lambda q: len(pieces[q][1]), 32)
-    gt = np.zeros((ground, 32), np.uint64)
+    lanes, ground = balance_lanes(range(len(pieces)), lambda q: len(pieces[q][1]), WARP_LANES)
+    gt = np.zeros((ground, WARP_LANES), np.uint64)
     for l_, its in enumerate(lanes):
         q = 0
         for it in its:

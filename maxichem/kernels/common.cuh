@@ -1,26 +1,27 @@
 // Constants, the shared helpers, the right-hand side and the triangular solves of the call kernels.
 
 #define NL (32 * W)
-// The method's numbers (docs/method.md). Times are in s and temperatures in K; the others have no unit.
-constexpr double GAMMA = 0.5;              // Rodas3's diagonal coefficient
-constexpr double RODAS_C21 = 4.0;          // Rodas3's stage coupling C_21
-constexpr double RODAS_C43 = 8.0 / 3.0;    // Rodas3's stage coupling, -C_43
-constexpr double H_MIN = 1e-12;            // s: the smallest first try of a call
-constexpr double CALL_END = 1.0 - 1e-14;   // a call ends at this share of dt, so rounding does not force one more step
-constexpr double STEP_SAFETY = 0.9;        // the safety factor on err^(-1/3)
-constexpr double ERR_FLOOR = 1e-10;        // keeps the step factor finite at err = 0
-constexpr double FAC_NONFINITE = 0.1;      // the step factor after a non-finite err
-constexpr double FACACC = 0.2;             // the smallest step factor after an accepted step
-constexpr double FACREJ = 0.2;             // the smallest step factor after a rejected try
-constexpr double FACMAX = 20.0;            // the largest step factor
-constexpr double FAC_AFTER_REJECT = 0.5;   // the largest step factor after a rejected try
-constexpr double SECMIN = 1e-4;            // the smallest secant shrink
-constexpr double SECANT_MIN_ORDER = 0.05;  // below this fitted order of err in h, the shrink is SECMIN
-constexpr double SECANT_MAX_ORDER = 3.0;   // the method's error order: the largest order the fit may use
-constexpr double SECANT_TARGET = 0.5;      // the err a secant shrink aims at
-constexpr double PIVTAU = 0.1;             // recovery: exchange rows only below this share of the column's largest
-constexpr double ELEMENT_PIVOT_MIN = 1e-10;      // the guard leaves out an element whose pivot falls below this share
-constexpr double NASA_SPLIT_T = NASA_SPLIT_T_K;  // K: where the NASA-9 fits change range (kinvulcan.NASA_SPLIT_T)
+// Rodas3's coefficients (Sandu et al. 1997; docs/method.md).
+constexpr double GAMMA = 0.5;            // the diagonal coefficient
+constexpr double RODAS_C21 = 4.0;        // the stage coupling C_21
+constexpr double RODAS_C43 = 8.0 / 3.0;  // the stage coupling, -C_43
+// The method's settings, from maxichem/_constants.py through the header, where each has its unit and reason.
+constexpr double H_MIN = H_MIN_VALUE;
+constexpr double CALL_END = CALL_END_VALUE;
+constexpr double STEP_SAFETY = STEP_SAFETY_VALUE;
+constexpr double ERR_FLOOR = ERR_FLOOR_VALUE;
+constexpr double FAC_NONFINITE = FAC_NONFINITE_VALUE;
+constexpr double FACACC = FACACC_VALUE;
+constexpr double FACREJ = FACREJ_VALUE;
+constexpr double FACMAX = FACMAX_VALUE;
+constexpr double FAC_AFTER_REJECT = FAC_AFTER_REJECT_VALUE;
+constexpr double SECMIN = SECMIN_VALUE;
+constexpr double SECANT_MIN_ORDER = SECANT_MIN_ORDER_VALUE;
+constexpr double SECANT_MAX_ORDER = SECANT_MAX_ORDER_VALUE;
+constexpr double SECANT_TARGET = SECANT_TARGET_VALUE;
+constexpr double PIVTAU = PIVTAU_VALUE;
+constexpr double ELEMENT_PIVOT_MIN = ELEMENT_PIVOT_MIN_VALUE;
+constexpr double NASA_SPLIT_T = NASA_SPLIT_T_K;  // K, from maxichem/_constants.py
 // The Troe factor's published coefficients (Venot et al. 2012, eq. C.2-C.5).
 constexpr double TROE_C0 = 0.4;
 constexpr double TROE_C1 = 0.67;
@@ -28,7 +29,7 @@ constexpr double TROE_N0 = 0.75;
 constexpr double TROE_N1 = 1.27;
 constexpr double TROE_D = 0.14;
 #define FULL 0xffffffffu
-constexpr double GMAX = 1e-3;  // the element-share correction changes a species by at most this, relative
+constexpr double GMAX = GMAX_VALUE;                      // from maxichem/_constants.py
 #define DNAN __longlong_as_double(0x7ff8000000000000ll)  // poisons the bad-input sum; a failed cell's derivatives
 #define CSYNC(g) asm volatile("bar.sync %0, %1;" ::"r"((g) + 1), "r"(NL) : "memory")  // the cell's threads
 typedef unsigned short u16;
@@ -82,7 +83,8 @@ __device__ __forceinline__ double wmax(double v) {
 }
 
 // Step-size factor after a try of size ha with err en, accepted or not (ok); prej, pen, pha: the call's previous try
-// was rejected, its err, its size (docs/method.md).
+// was rejected, its err, its size (docs/method.md). The plain law's cube root is err^(-1 / SECANT_MAX_ORDER).
+static_assert(SECANT_MAX_ORDER == 3.0, "step_factor takes cbrt, and step_factor_partials its derivative");
 __device__ __forceinline__ double step_factor(double en, bool ok, bool prej, double pen, double pha, double ha) {
   const bool efin = isfinite(en);
   double fac = efin ? STEP_SAFETY / cbrt(fmax(en, ERR_FLOOR)) : FAC_NONFINITE;

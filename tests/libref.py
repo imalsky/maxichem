@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from maxichem import paths
-from maxichem._checks import RATE_RULE  # the input digests cannot see a change of the kernels' rates
+from maxichem._constants import RATE_RULE  # the input digests cannot see a change of the kernels' rates
 
 _D: dict[Path, Any] = {}  # the open reference files: a cache
 

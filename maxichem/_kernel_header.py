@@ -7,18 +7,37 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from . import kinvulcan
 from ._ad_tables import GATHER_FIELDS, layout, scratch_sizes
 from ._constants import (
     ARRH_BLOCK_THREADS,
+    CALL_END,
     COUNT_SLOTS,
     DMAX,
+    ELEMENT_PIVOT_MIN,
+    ERR_FLOOR,
+    FAC_AFTER_REJECT,
+    FAC_NONFINITE,
+    FACACC,
+    FACMAX,
+    FACREJ,
+    GMAX,
+    H_MIN,
     K_COLL,
+    KB,
+    NASA_SPLIT_T,
     NO_SLOT,
+    P0,
+    PIVTAU,
     RATE_LAW_FLAGS,
     RATE_LAW_SHIFTS,
+    SECANT_MAX_ORDER,
+    SECANT_MIN_ORDER,
+    SECANT_TARGET,
+    SECMIN,
+    STEP_SAFETY,
     T_MAX,
     T_MIN,
+    WARP_LANES,
     X_SUM_TOL,
 )
 from ._tables import (
@@ -31,6 +50,25 @@ from ._tables import (
 
 _KERNELS = Path(__file__).parent / "kernels"
 _HEADER = "network.h"
+# The method's settings, which the kernels' constexprs of the same names read as NAME_VALUE
+_METHOD_SETTINGS = {
+    "H_MIN": H_MIN,
+    "CALL_END": CALL_END,
+    "STEP_SAFETY": STEP_SAFETY,
+    "ERR_FLOOR": ERR_FLOOR,
+    "FAC_NONFINITE": FAC_NONFINITE,
+    "FACACC": FACACC,
+    "FACREJ": FACREJ,
+    "FACMAX": FACMAX,
+    "FAC_AFTER_REJECT": FAC_AFTER_REJECT,
+    "SECMIN": SECMIN,
+    "SECANT_MIN_ORDER": SECANT_MIN_ORDER,
+    "SECANT_MAX_ORDER": SECANT_MAX_ORDER,
+    "SECANT_TARGET": SECANT_TARGET,
+    "PIVTAU": PIVTAU,
+    "ELEMENT_PIVOT_MIN": ELEMENT_PIVOT_MIN,
+    "GMAX": GMAX,
+}
 
 
 def kernel_sources(header: str) -> dict[str, str]:
@@ -126,7 +164,7 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         "NPART": tab["npart"],
         "K0": tab["k0"],
         "NT": ns - tab["k0"],
-        "RP": max(1, -(-tab["k0"] // 32)),
+        "RP": max(1, -(-tab["k0"] // WARP_LANES)),
         "RCW": tab["rc"].shape[1],
         "CPB": cpb,
         "W": tab["warps"],
@@ -142,12 +180,14 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         "XSUMTOL": repr(X_SUM_TOL),
         "DRIFT": repr(float(drift)),
         "KCOLL": repr(K_COLL),
-        "KBOLTZ": repr(kinvulcan.KB),
-        "NASA_SPLIT_T_K": repr(kinvulcan.NASA_SPLIT_T),
-        "P0BAR": repr(kinvulcan.P0),
+        "KBOLTZ": repr(KB),
+        "NASA_SPLIT_T_K": repr(NASA_SPLIT_T),
+        "P0BAR": repr(P0),
+        # repr gives the double back exactly
+        **{f"{name}_VALUE": repr(float(value)) for name, value in _METHOD_SETTINGS.items()},
         "WSH": int(wsh),
         "VR": max(tab["nr"], ns + 1),
-        "RPD": -(-ns // 32),
+        "RPD": -(-ns // WARP_LANES),
         "PERWR": shared_doubles_recover(tab, wsh),
         "HAS_TROE": int("troe" in law),
         "HAS_EFF": int("eff" in law),

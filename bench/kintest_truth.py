@@ -8,7 +8,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from maxichem import paths
-from maxichem._checks import H2S_PER_H2_SOLAR, MISS, RATE_RULE, floored_log10
+from maxichem._checks import H2S_PER_H2_SOLAR, MISS, floored_log10
+from maxichem._constants import RATE_RULE
 
 HOLD = 1500.0  # s: one row of a held path
 BOX_KEYS = ("box", "X", "T", "P", "J", "lit", "kind")

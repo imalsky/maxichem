@@ -14,6 +14,7 @@ from ._constants import (
     COUNTS,
     DEFAULT_MAX_STEPS,
     DEFAULT_RTOL,
+    DOUBLE_BYTES,
     DRIFT,
     GUARD_BLOCK_THREADS,
     PHOTOLYSIS_ARGUMENT,
@@ -21,6 +22,7 @@ from ._constants import (
     SOLVER_KERNEL_NAMES,
     T_MAX,
     T_MIN,
+    WARP_LANES,
     X_SUM_TOL,
 )
 from ._cuda import (
@@ -137,17 +139,17 @@ class CudaSolver(Solver):
         prop = torch.cuda.get_device_properties(self.dev)
         tab = tables_for_device(net, photo, prop.shared_memory_per_block_optin)
         self.ns, self.nr, self.w, self.nj = tab["ns"], tab["nr"], tab["warps"], tab["nj"]
-        threads = 32 * self.w
+        threads = WARP_LANES * self.w
         blob, _ = pack_small_tables(tab)
         # the recover kernel's W in shared memory if it fits
-        wsh = 8 * shared_doubles_recover(tab, True) + len(blob) <= prop.shared_memory_per_block_optin
+        wsh = DOUBLE_BYTES * shared_doubles_recover(tab, True) + len(blob) <= prop.shared_memory_per_block_optin
         arch = f"{prop.major}{prop.minor}"
         self._load_packed(tab, wsh, arch, prop)
         self._build = (tab, wsh, arch)  # what export() recompiles
         self._names = (list(net.species), list(net.elements))  # export() writes them
         self.wpb = self.w * self.cpb  # warps per block
-        self.smem = 8 * self.cpb * shared_doubles_per_cell(tab) + len(blob)
-        self.smem_rec = 8 * shared_doubles_recover(tab, wsh) + len(blob)
+        self.smem = DOUBLE_BYTES * self.cpb * shared_doubles_per_cell(tab) + len(blob)
+        self.smem_rec = DOUBLE_BYTES * shared_doubles_recover(tab, wsh) + len(blob)
         blocks = blocks_per_multiprocessor(self._call_kernel, threads * self.cpb, self.smem)
         rec_blocks = blocks_per_multiprocessor(self._recover_kernel, threads, self.smem_rec)
         self.max_blocks, self.rec_blocks = prop.multi_processor_count * blocks, prop.multi_processor_count * rec_blocks
@@ -184,7 +186,7 @@ class CudaSolver(Solver):
         The start comes from the registers of a one-cell compile. It then grows while the shared memory and the named
         barriers allow, and the compiler fits the cells in the registers without more local memory.
         """
-        threads = 32 * self.w
+        threads = WARP_LANES * self.w
         fit = cells_per_block(tab, prop.shared_memory_per_block_optin)
         top = min(MAX_THREADS_PER_BLOCK // threads, MAX_NAMED_BARRIERS, fit)
 
@@ -303,14 +305,14 @@ class CudaSolver(Solver):
         }
         grid = max(1, min(-(-B // self.cpb), self.max_blocks))
         launch_kernel(
-            self._call_kernel, grid, 32 * self.w * self.cpb, self.smem, stream, self._arguments("call", values)
+            self._call_kernel, grid, WARP_LANES * self.w * self.cpb, self.smem, stream, self._arguments("call", values)
         )
         guard_grid = -(-B // GUARD_BLOCK_THREADS) or 1
         launch_kernel(self._guard_kernel, guard_grid, GUARD_BLOCK_THREADS, 0, stream, self._arguments("guard", values))
         values |= {"max_steps": ctypes.c_int(REC_STEPS * max_steps), "scratch": self._scratch["recover"]}
         grid = max(1, min(B, self.rec_blocks))
         arguments = self._arguments("recover", values)
-        launch_kernel(self._recover_kernel, grid, 32 * self.w, self.smem_rec, stream, arguments)
+        launch_kernel(self._recover_kernel, grid, WARP_LANES * self.w, self.smem_rec, stream, arguments)
         self.total += self.count
         self._refuse(x, T, P, dt, jx, status)
         self.flag = redo

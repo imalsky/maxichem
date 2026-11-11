@@ -11,18 +11,21 @@ from typing import Any
 
 import numpy as np
 
+from ._constants import (
+    KB,
+    KIND_FALLOFF,
+    KIND_LOW_PRESSURE,
+    KIND_SPECIAL,
+    KIND_TWO_BODY,
+    MAX_GIBBS_JUMP,
+    NASA_SPLIT_T,
+    P0,
+    THREE_BODY_KINDS,
+)
+
 __all__ = ["KB", "MAX_GIBBS_JUMP", "P0", "SPECIAL", "VulcanNetwork", "formula"]
 
-KB = 1.380649e-16  # erg K^-1
-P0 = 1.0e6  # dyn cm^-2 (1 bar)
-NASA_SPLIT_T = 1000.0  # K: where the NASA-9 fits change range; the kernels get it through their header
-# Largest |G/RT, low range - G/RT, high range| at NASA_SPLIT_T. Sound fits meet: over the 11 networks the largest jump
-# is 1.6e-6 (TiC). TiH, at 0.143, is refused on purpose, and TiSNCHO with it: below 1000 K its fit has Cp / R from -36
-# to 819 (notes.md). A file with a wrong coefficient set reaches 17.6 (HNO3 with its below-200 K set read as the low
-# range).
-MAX_GIBBS_JUMP = 1.0e-5
 TROE_FIELDS = 4  # the a, T3, T1, T2 of a "Troe [...]" line
-_THREE_BODY_KINDS = (3, 5, 6)  # the laws with M: falloff, low-pressure only, special
 NASA_FILE_SIZES = (20, 30, 40)  # numbers in a NASA-9 file: two to four ranges of 10 (those past the second are unused)
 
 
@@ -117,7 +120,7 @@ def _check_third_body(equation: str, kind: int, where: str) -> None:
     """
     lhs, rhs = (side.split("+") for side in equation.split("->"))
     on_side = ["M" in [q.strip() for q in side] for side in (lhs, rhs)]
-    three_body = kind in _THREE_BODY_KINDS
+    three_body = kind in THREE_BODY_KINDS
     if on_side != [three_body, three_body]:
         sides = " and ".join(s for s, m in zip(("reactant", "product"), on_side, strict=True) if m) or "no"
         need = "on both sides (a three-body law)" if three_body else "on neither side (a two-body law)"
@@ -131,21 +134,21 @@ def _thermal_reaction(line: str, where: str, section: str) -> dict[str, Any]:
     names = ([q.strip() for q in lhs if q.strip() != "M"], [q.strip() for q in rhs if q.strip() != "M"])
     reaction: dict[str, Any] = {"eq": equation, "names": names}
     if section == "two":
-        reaction["kind"] = 2
+        reaction["kind"] = KIND_TWO_BODY
         reaction["A"], reaction["B"], reaction["C"] = _numbers(fields, 3, where, line)
     elif section == "three":
-        reaction["kind"] = 3
+        reaction["kind"] = KIND_FALLOFF
         keys = ("A0", "B0", "C0", "Ai", "Bi", "Ci")
         reaction.update(zip(keys, _numbers(fields, 6, where, line), strict=True))
     elif section == "irrev":
         raise ValueError(f"no reverse law for the irreversible reaction {equation}: the reader has none")
     elif section == "low":
-        reaction["kind"] = 5
+        reaction["kind"] = KIND_LOW_PRESSURE
         reaction["A0"], reaction["B0"], reaction["C0"] = _numbers(fields, 3, where, line)
     else:
         if equation.replace(" ", "") not in SPECIAL:
             raise ValueError(f"unknown special reaction {equation}")
-        reaction["kind"] = 6
+        reaction["kind"] = KIND_SPECIAL
         reaction.update(SPECIAL[equation.replace(" ", "")])
     _check_third_body(equation, reaction["kind"], where)
     return reaction
@@ -346,7 +349,7 @@ class VulcanNetwork:
         seen: dict[Any, str] = {}
         duplicates = []
         for r in reactions:
-            m = ("M",) if r["kind"] != 2 else ()
+            m = ("M",) if r["kind"] != KIND_TWO_BODY else ()
             key = tuple(sorted((tuple(sorted(r["names"][0])) + m, tuple(sorted(r["names"][1])) + m)))
             if key in seen:
                 duplicates.append((seen[key], r["eq"]))

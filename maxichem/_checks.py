@@ -21,9 +21,6 @@ LARGE_MISS = 1.0  # dex: a large miss
 TINY = 1e-300  # mole fraction: keeps log10 finite, far below every floor
 SOLAR_START = {"H2": 0.84, "He": 0.16, "H2O": 9e-4, "CO": 5e-4, "CH4": 1e-5, "N2": 6e-5, "NH3": 1e-6}  # mole fractions
 H2S_PER_H2_SOLAR = 1.41e-5  # the sulfur of a solar gas, for starts made here
-# The rate rule the checks' truth sets and stored references must be made with (the collision limit counts M as a
-# collision partner, docs/method.md); the truth generator and the torch reference generator write the same string
-RATE_RULE = "collision-limit-2026-11-10: M counts as a collision partner"
 
 
 def scored_gases(elements: list[str]) -> tuple[list[str], list[float]]:

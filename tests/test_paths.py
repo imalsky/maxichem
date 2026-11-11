@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from bench import kintest_truth
-from maxichem import _checks, paths
+from maxichem import _constants, paths
 
 
 def test_data_root_follows_the_environment(monkeypatch, tmp_path):
@@ -28,22 +28,22 @@ def test_need_names_what_is_missing(tmp_path):
         paths.need(tmp_path, tmp_path / "absent")
 
 
-@pytest.mark.parametrize("rule", [None, "another rule", _checks.RATE_RULE])
+@pytest.mark.parametrize("rule", [None, "another rule", _constants.RATE_RULE])
 def test_reference_of_another_rate_rule_is_refused(tmp_path, rule):
     path = tmp_path / "reference.npz"
     np.savez(path, atol=1e-25, **({"rate_rule": rule} if rule else {}))
-    if rule == _checks.RATE_RULE:
+    if rule == _constants.RATE_RULE:
         assert float(libref.load(path)["atol"]) == 1e-25
         return
-    with pytest.raises(ValueError, match=f"rate rule '{rule or 'none recorded'}', not '{_checks.RATE_RULE}'"):
+    with pytest.raises(ValueError, match=f"rate rule '{rule or 'none recorded'}', not '{_constants.RATE_RULE}'"):
         libref.load(path)
 
 
-@pytest.mark.parametrize("rule", [None, "another rule", _checks.RATE_RULE])
+@pytest.mark.parametrize("rule", [None, "another rule", _constants.RATE_RULE])
 def test_truth_of_another_rate_rule_is_refused(tmp_path, rule):
     (tmp_path / "manifest.json").write_text(json.dumps({"boxes": 1} | ({"rate_rule": rule} if rule else {})))
-    if rule == _checks.RATE_RULE:
+    if rule == _constants.RATE_RULE:
         assert kintest_truth.rate_rule_manifest(tmp_path)["boxes"] == 1
         return
-    with pytest.raises(SystemExit, match=f"rate rule '{rule or 'none recorded'}', not '{_checks.RATE_RULE}'"):
+    with pytest.raises(SystemExit, match=f"rate rule '{rule or 'none recorded'}', not '{_constants.RATE_RULE}'"):
         kintest_truth.rate_rule_manifest(tmp_path)

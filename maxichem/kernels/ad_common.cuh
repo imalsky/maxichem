@@ -434,8 +434,9 @@ __device__ __forceinline__ double run_attempt(double* work, double (&c)[NT], dou
 // Step-size factor of the controller after an attempt of size ha with error en (accepted ok; prej, pen, pha: the
 // previous attempt was rejected, its error and size), bitwise the call kernel's step_factor, and its partial
 // derivatives on the branch taken: dfe = d fac / d en, dfh = / d ha, dfp = / d pen, dfq = / d pha (0 where a limit
-// holds or the factor is a constant of its branch). Secant branch: fac = (0.5 / en)^(1 / p), p = min(pe, 3),
-// pe = ln(pen / en) / L, L = ln(pha / ha).
+// holds or the factor is a constant of its branch). Secant branch: fac = (SECANT_TARGET / en)^(1 / p),
+// p = min(pe, SECANT_MAX_ORDER), pe = ln(pen / en) / L, L = ln(pha / ha). Plain branch: fac = STEP_SAFETY
+// en^(-1 / SECANT_MAX_ORDER), so d fac / d en = -fac / (SECANT_MAX_ORDER en).
 __device__ __forceinline__ double step_factor_partials(double en, bool ok, bool prej, double pen, double pha, double ha,
                                                        double& dfe, double& dfh, double& dfp, double& dfq) {
   const double fac = step_factor(en, ok, prej, pen, pha, ha);
@@ -461,7 +462,8 @@ __device__ __forceinline__ double step_factor_partials(double en, bool ok, bool 
     }
   } else if (efin && en >= ERR_FLOOR) {
     const double f0 = STEP_SAFETY / cbrt(en);
-    if (f0 >= (ok ? FACACC : FACREJ) && f0 <= FACMAX && (ok || f0 <= FAC_AFTER_REJECT)) dfe = -f0 / (3.0 * en);
+    if (f0 >= (ok ? FACACC : FACREJ) && f0 <= FACMAX && (ok || f0 <= FAC_AFTER_REJECT))
+      dfe = -f0 / (SECANT_MAX_ORDER * en);
   }
   return fac;
 }

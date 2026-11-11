@@ -64,8 +64,9 @@ def check_inputs(
         ms = operator.index(max_steps)
     except TypeError:
         raise ValueError(f"max_steps: an integer expected, got {max_steps!r}") from None
-    if ms < 1 or REC_STEPS * ms > 2**31 - 1:
-        raise ValueError(f"max_steps from 1 to {(2**31 - 1) // REC_STEPS} expected, got {ms}")
+    most = int(np.iinfo(np.int32).max)  # the kernels count tries in an int, up to REC_STEPS * max_steps
+    if ms < 1 or REC_STEPS * ms > most:
+        raise ValueError(f"max_steps from 1 to {most // REC_STEPS} expected, got {ms}")
     return int(B)
 
 

@@ -31,7 +31,7 @@ def data() -> Path:
 def truth(name: str) -> Path:
     """Return a VULCAN truth set by name: boxes (Sobol design, shards) or paths (QC, QCs, QL, ...).
 
-    truth_v3 holds the truth made with the collision limit that counts M (_checks.RATE_RULE); truth_v2 holds the
+    truth_v3 holds the truth made with the collision limit that counts M (_constants.RATE_RULE); truth_v2 holds the
     truth of the rule before, kept only as a record.
     """
     return data() / "truth_v3" / name

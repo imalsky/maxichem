@@ -13,14 +13,17 @@ import torch
 from ._ad_tables import ad_tables, layout, scratch_sizes, supported
 from ._constants import (
     ARRH_BLOCK_THREADS,
+    ARRHENIUS_COLUMNS,
     ATOL,
     CAP,
     DEFAULT_MAX_STEPS,
     DEFAULT_RTOL,
     DMAX,
+    DOUBLE_BYTES,
     GUARD_BLOCK_THREADS,
     PHOTOLYSIS_ARGUMENT,
     REC_STEPS,
+    WARP_LANES,
 )
 from ._cuda import (
     blocks_per_multiprocessor,
@@ -141,19 +144,19 @@ class ADSolver(Solver):
         self._sizes = scratch_sizes(tab, cap)
         for kind in ("jvp", "vjp"):
             _, perwa = layout(tab, ext, kind)
-            wpb = min(MAX_WARPS_PER_BLOCK, (prop.shared_memory_per_block_optin - len(blob)) // (8 * perwa))
+            wpb = min(MAX_WARPS_PER_BLOCK, (prop.shared_memory_per_block_optin - len(blob)) // (DOUBLE_BYTES * perwa))
             if wpb < 1:
                 raise RuntimeError(
-                    f"the {kind} kernel needs {8 * perwa + len(blob)} B of shared memory per block; "
+                    f"the {kind} kernel needs {DOUBLE_BYTES * perwa + len(blob)} B of shared memory per block; "
                     f"the device has {prop.shared_memory_per_block_optin}"
                 )
-            self.wpb[kind], self.smem[kind] = wpb, 8 * wpb * perwa + len(blob)
+            self.wpb[kind], self.smem[kind] = wpb, DOUBLE_BYTES * wpb * perwa + len(blob)
             sources = kernel_sources(derivative_header(tab, ext, kind, wpb, cap, self.drift))
             cubin = compile_cubin(f"{kind}.cu", sources, f"{prop.major}{prop.minor}")
             names = (kind, f"{kind}_rec", "arrh" if kind == "vjp" else "guard")
             _, functions = load_module(cubin, names, self._modules)
             self._kernels |= dict(zip(names, functions, strict=True))
-            blocks = blocks_per_multiprocessor(self._kernels[kind], 32 * wpb, self.smem[kind])
+            blocks = blocks_per_multiprocessor(self._kernels[kind], WARP_LANES * wpb, self.smem[kind])
             opt_in_shared_memory(self._kernels[f"{kind}_rec"], self.smem[kind])
             self.max_blocks[kind] = prop.multi_processor_count * blocks
         self._upload_tables(tab, ext, blob)
@@ -274,7 +277,7 @@ class ADSolver(Solver):
             "dt": torch.empty_like(T),
             "h": torch.empty_like(T),
             "lm": torch.empty(cells, self.nr, dtype=torch.float64, device=self.dev),
-            "rc": torch.empty(self.nr, 9, dtype=torch.float64, device=self.dev),
+            "rc": torch.empty(self.nr, ARRHENIUS_COLUMNS, dtype=torch.float64, device=self.dev),
         }
         if self.nj:
             cotangents["J"] = torch.empty(cells, self.nj, dtype=torch.float64, device=self.dev)
@@ -305,7 +308,7 @@ class ADSolver(Solver):
             "ddt": (*lead, cells),
             "dh": (*lead, cells),
             "dlm": (*lead, cells, self.nr),
-            "drc": (*lead, self.nr, 9),
+            "drc": (*lead, self.nr, ARRHENIUS_COLUMNS),
             "dJ": (*lead, cells, self.nj),
         }
         for name, a in tangents.items():
@@ -409,7 +412,7 @@ class ADSolver(Solver):
             "scratch": self._scratch["jvp"],
             "dJin": _pointer(dJ),
         }
-        block = 32 * self.wpb["jvp"]
+        block = WARP_LANES * self.wpb["jvp"]
         launch_kernel(self._kernels["jvp"], nb, block, self.smem["jvp"], stream, self._arguments("jvp", values))
         flags = self._run_guard(values, stream)
         values |= {**flags, "max_steps": ctypes.c_int(REC_STEPS * max_steps)}
@@ -510,7 +513,7 @@ class ADSolver(Solver):
             "gJ": _pointer(g.get("J")),
             "gA": g_ln_a,
         }
-        block = 32 * self.wpb["vjp"]
+        block = WARP_LANES * self.wpb["vjp"]
         launch_kernel(self._kernels["vjp"], nb, block, self.smem["vjp"], stream, self._arguments("vjp", values))
         flags = self._run_guard(values, stream)
         values |= {**flags, "max_steps": ctypes.c_int(REC_STEPS * max_steps), "rec": self._scratch["rec_recovery"]}
