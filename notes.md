@@ -2101,6 +2101,14 @@ checks now read data/truth_v3, and refuse a set or a parity reference that does 
 - tests/test_rate_laws.py now caps a one-molecule-and-M row (fails on the old rule: the call does not finish its dt) and
   leaves a first-order row of 1e10 s^-1 alone (fails when every one-molecule side counts). tests/rate_probe.cu is kept: it
   checks what a call cannot show, each direction's coefficient apart and the derivative kernels' cap weights.
+- test_vulcan_truth on both networks against the new quick references: 2 passed in 204 s.
+- Speed, the old rule (main cecbf8e) against the new (cce9052), GPU 1 with nothing else on it, 4 paired rounds in separate
+  processes, 262,144 cells over 800-3000 K and 1e-4-10 bar, 70-s calls, 10 timed calls a kind (the kernel-debt agent's
+  CPU jobs ran on CPUs 8-23 meanwhile). Medians, old / new us per cell-call and the paired ratio's range: NCHO settled
+  0.3631 / 0.3656 (+0.40 to +0.73 %), disturbed 16.487 / 16.440 (-0.18 to -0.32 %; steps 59.80 / 59.61); sulfur settled
+  0.6730 / 0.6751 (+0.27 to +0.38 %), disturbed 37.18 / 36.62 (-1.1 to -1.8 %; steps 64.48 / 63.55). Settled gas takes
+  one step a call both ways, so its +0.3-0.7 % is the k / n_tot of the new branch; disturbed gas takes fewer steps with
+  the new cap. No cell recomputed, recovered or unfinished in any round. Below the 1 % rule for settled gas.
 
 ## References (by topic)
 
