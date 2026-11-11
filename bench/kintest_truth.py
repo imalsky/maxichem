@@ -39,7 +39,8 @@ TRUTH = {
     ),
     "SNCHO_photo_network_2025.txt": TruthSets(
         ("boxes_sncho25", "boxes_sncho25p"),
-        {"boxes_sncho25": (117, "21b9ae4b86f02ac9"), "boxes_sncho25p": (54, "58d5356b1e18f59f")},
+        # truth_v3: box 892, at the cap in truth_v2, now ends; the same 54 in boxes_sncho25p
+        {"boxes_sncho25": (116, "8ac97421fdbca9be"), "boxes_sncho25p": (54, "58d5356b1e18f59f")},
         "qual_sncho25",
         ("QC", "QCs", "twins/QC"),
         (),

@@ -102,7 +102,7 @@ The truth sets are those under `truth_v3/` (`maxichem/paths.py`); kintest refuse
 the rate rule `RATE_RULE` (`maxichem/_constants.py`, the collision limit that counts M), as `tests/libref.py` refuses such a
 parity reference. The sulfur sets score 16 gases: the 12 and H2S, SO2, COS, S2 at 1e-10 (`maxichem/_checks.py`). Their truth holds two condensates the
 reader skips, which must be 0 in every state. A box set's manifest lists as errors the boxes whose VULCAN run ended before a stop, at the
-truth generator's step cap: `TRUTH` declares their count and a digest of their ids (117 and 54), kintest prints them and scores the rest,
+truth generator's step cap: `TRUTH` declares their count and a digest of their ids (116 and 54 on truth_v3), kintest prints them and scores the rest,
 and it refuses a set with any other error or other such boxes. Misses that are understood are pinned in `KNOWN_MISSES` point by point:
 set, box, gas, each missed stored state with its floored error, and the reason. Pinned are S2 in box 1939 of boxes_sncho25 (VULCAN's
 error) and S2 in box 96 of boxes_sncho25p (maxichem's at atol 1e-25). The run fails on any missed point that is not pinned, in any gas
