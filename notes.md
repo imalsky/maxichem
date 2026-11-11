@@ -159,6 +159,9 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   the same check on SNCHO_photo_network_2025 (--network; 27 of 28, see the 2026-11-04 log); kincuda/jref_SNCHO25.npz:
   its J table. kincuda/libref7_SNCHO.npz: the old sulfur network's parity (15 of 15), superseded. kintest/quick_ref6.npz: the kintest quick reference. Earlier references belong to superseded
   numerics.
+- Superseded 2026-11-10: the references of the collision rule that counts M are kincuda/libref10.npz and
+  libref10_SNCHO25.npz (they record RATE_RULE) and kintest/quick_ncho_v3_ref1.npz and quick_sncho25_v3_ref1.npz (runs on
+  truth_v3). The ones above, libref8 and libref9_SNCHO25 among them, belong to the old rule.
 
 ### The 53-species truth sets
 - qual (2026-10-31_data; 2,466 files, 65.3 CPU-h): QC 512 per-call GCM paths x 10,000 calls (128 near-solar) + 128 kick
@@ -2060,14 +2063,19 @@ checks now read data/truth_v3, and refuse a set or a parity reference that does 
   (42,677); daynight_sncho25 64, 12,941 s (8,745; its summed VULCAN steps are the same, 23,332,211 against 23,336,117, so
   the time is the machine's load); each with 0 missing, errors and forced steps. boxes_sncho25p: 350 of 404 accepted, the
   same 54 boxes without a result (step cap 2e6), 0 quarantined, worst drift 2.4e-8 (5.5e-10; now box 45, 2434 K, 97 bar,
-  where the cap lowers S2 + S2 + M by 427x), 14,155 CPU s (14,695). A box set's CPU seconds count the boxes' own runs,
+  where the cap lowers S2 + S2 + M by 427x), 14,155 CPU s (14,695). boxes_sncho25: 1,931 of 2,048 accepted (1,930), 116
+  without a result at the cap 2e6 (117: box 892, 425 K, lit, a reheat start whose donor the cap touches, now ends), the
+  same quarantined box 810, worst drift 3.7e-8 (3.5e-8), 54,276 CPU s (56,189); its 8 workers ran 14:11-23:42, the
+  slowest held 23 boxes that end at the cap (sobol.py records no seconds for those). The pinned boxes 1939 and 96 have
+  bitwise the same truth in both versions (the cap touches neither nor their donors). A box set's CPU seconds count the boxes' own runs,
   not their donors' nor runs that ended at the step cap.
 - Old against new truth on the scored gases at their floors. boxes_ncho: 57 boxes moved by more than 0.01 dex, none by
   more than 0.1; largest 0.067 dex (box 95573, C2H2, 2870 K, 5e-4 bar); all 57 at 2477-3000 K where the new cap binds
-  (C2H2 54, HCN 3). boxes_sncho25p: 1 (box 117, 0.017 dex, C2H2, 2987 K). Paths: qual_ncho 1e-4 dex at most, daynight_ncho
+  (C2H2 54, HCN 3). boxes_sncho25p: 1 (box 117, 0.017 dex, C2H2, 2987 K). boxes_sncho25: 1 (box 1493, 0.015 dex, C2H2,
+  2828 K), the next 0.0044 dex. Paths: qual_ncho 1e-4 dex at most, daynight_ncho
   0, qual_sncho25 4e-4, daynight_sncho25 1e-4. Boxes whose own T, P the cap does not touch still change by rounding when
   their start comes from a donor box at a T, P where it binds (boxes_ncho: 18,295 boxes where the cap binds, 6,281 through
-  their donor, 106,496 bitwise equal, 0 unexplained; boxes_sncho25p: 103, 43, 204, 0).
+  their donor, 106,496 bitwise equal, 0 unexplained; boxes_sncho25: 912, 178, 840, 0; boxes_sncho25p: 103, 43, 204, 0).
 - Gate, kintest quick on NCHO against truth_v3 (db83a04): 0 misses; worst box 0.014 dex, paths 0.004. The 13 NCHO boxes
   that moved against the old truth are at 0.0003-0.0010 dex again (they were 0.0105-0.0487). New stored reference
   data/benches/kintest/quick_ncho_v3_ref1.npz.
