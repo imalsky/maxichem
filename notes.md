@@ -2071,6 +2071,14 @@ checks now read data/truth_v3, and refuse a set or a parity reference that does 
 - Gate, kintest quick on NCHO against truth_v3 (db83a04): 0 misses; worst box 0.014 dex, paths 0.004. The 13 NCHO boxes
   that moved against the old truth are at 0.0003-0.0010 dex again (they were 0.0105-0.0487). New stored reference
   data/benches/kintest/quick_ncho_v3_ref1.npz.
+- kintest full on NCHO against truth_v3 (db83a04): 3,483 s wall (boxes 10 s, loop 3,441 s, 4.98 ms per tick). All
+  131,072 boxes, 6,160,384 states: 0 misses, worst 0.066 dex (box 87219, 487 K, CH4; the same as on the old truth). 1,096
+  truth paths, 1,326,198 states: 0 misses, worst 0.004 dex; panel P: unfinished, non-finite and negative 0. Exit 1 for one
+  box: 98666 (2973 K, 43 bar, lit, hot-H start), whose last call (4.4e7 to 1e8 s, one step) moves the element shares by
+  5.5e-6, above the allowance 1e-6; the guard recomputes it and the recovery's step fails too (still failed, done 0). Its
+  scored error is still 0.0003 dex. On main (the old rule) the same call is flagged and recovered; at rtol 1e-4 the old
+  rule takes two steps, the new rule still one; at rtol 1e-5 both pass (share change 1.8e-16). A one-step call of 5.6e7 s
+  at 2973 K and 43 bar is not a GCM call; left as it is, for the owner (experiments/2026-11-10_truth_v3/box_drift.log).
 
 ## References (by topic)
 
