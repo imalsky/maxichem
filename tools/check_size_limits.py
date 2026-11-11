@@ -42,7 +42,10 @@ C_SIGNATURE_END = re.compile(r"\)\s*(?:(?:const|noexcept|override|final|mutable)
 C_CONTROL_WORDS = {"if", "for", "while", "switch", "catch", "sizeof", "return"}
 C_WORD_BEFORE = re.compile(r"([A-Za-z_~][\w:~]*)\s*$")
 C_OBJECT_MACRO = re.compile(r"^[ \t]*#[ \t]*define[ \t]+(\w+)(?![\w(])[ \t]*((?:[^\n]*\\\n)*[^\n]*)", re.MULTILINE)
+C_OPERATOR_BEFORE = re.compile(r"([\w:]*operator\s*(?:\(\)|\[\]|[^\s\w()]+))\s*$")
+C_FUNCTION_MACRO = re.compile(r"^[ \t]*#[ \t]*define[ \t]+(\w+)\(", re.MULTILINE)
 C_DECLARATION_START = re.compile(r"[;{}]")  # what ends the code before a declaration
+UNSUPPORTED = "<unsupported declaration>"  # a definition whose name or parameters the scan cannot read
 
 
 def _blank(match: re.Match[str]) -> str:
@@ -112,8 +115,9 @@ def _signature(head: str) -> tuple[str, int, int] | None:
     Returns
     -------
     tuple or None
-        The word before the parameter list, unless that word is a control keyword, and the positions of the list's
-        opening and closing parentheses.
+        The word before the parameter list (past an explicit specialisation's ``<...>``), unless that word is a control
+        keyword, and the positions of the list's opening and closing parentheses. The word is UNSUPPORTED where the
+        text ends like a signature but no name stands before the list (a function returning a function pointer).
     """
     match = C_SIGNATURE_END.search(head)
     if match is None:
@@ -125,11 +129,25 @@ def _signature(head: str) -> tuple[str, int, int] | None:
         elif head[position] == "(":
             depth -= 1
             if depth == 0:
-                word = C_WORD_BEFORE.search(head[:position])
-                if word is None or word.group(1) in C_CONTROL_WORDS:
+                before = _strip_template_arguments(head[:position])
+                word = C_OPERATOR_BEFORE.search(before) or C_WORD_BEFORE.search(before)
+                if word is not None and word.group(1) in C_CONTROL_WORDS:
                     return None
-                return word.group(1), position, match.start()
+                return (UNSUPPORTED if word is None else word.group(1)), position, match.start()
     return None
+
+
+def _strip_template_arguments(text: str) -> str:
+    """Return the text without one balanced ``<...>`` at its end (a specialisation's template arguments)."""
+    text = text.rstrip()
+    if not text.endswith(">"):
+        return text
+    depth = 0
+    for position in range(len(text) - 1, -1, -1):
+        depth += (text[position] == ">") - (text[position] == "<")
+        if depth == 0:
+            return text[:position]
+    return text
 
 
 def c_functions(code: str) -> list[tuple[str, int, int, int, str]]:
@@ -158,7 +176,7 @@ def c_functions(code: str) -> list[tuple[str, int, int, int, str]]:
                     ends = [m.end() for m in C_DECLARATION_START.finditer(code, 0, opening)]
                     head = code[ends[-1] if ends else 0 : opening]
                     first = opening - len(head.lstrip())
-                    line = code.rfind("\n", 0, code.rfind(name, 0, opening)) + 1
+                    line = code.rfind("\n", 0, code.rfind(name, 0, opening) if name != UNSUPPORTED else opening) + 1
                     current = (name, code.rfind("\n", 0, first) + 1, line, depth, code[opening + 1 : closing])
             depth += 1
         else:
@@ -170,24 +188,31 @@ def c_functions(code: str) -> list[tuple[str, int, int, int, str]]:
 
 
 def c_macros(texts: list[str]) -> dict[str, list[str]]:
-    """Return the bodies of every object-like macro the texts define, by name, continuation lines joined."""
+    """Return the macros the texts define, by name, continuation lines joined.
+
+    An object-like macro maps to its bodies; a function-like one is listed as ``NAME(`` with none, since a parameter
+    list that uses one cannot be counted.
+    """
     macros: dict[str, list[str]] = {}
     for text in texts:
-        for name, body in C_OBJECT_MACRO.findall(C_NOISE.sub(_blank, text)):
+        clean = C_NOISE.sub(_blank, text)
+        for name, body in C_OBJECT_MACRO.findall(clean):
             macros.setdefault(name, []).append(body.replace("\\\n", " "))
+        for name in C_FUNCTION_MACRO.findall(clean):
+            macros[f"{name}("] = []
     return macros
 
 
 def _top_level_commas(text: str) -> int:
-    """Return the commas outside any parentheses, brackets or braces."""
+    """Return the commas outside any parentheses, brackets, braces or template angle brackets."""
     depth, commas = 0, 0
     for character in text:
-        depth += (character in "([{") - (character in ")]}")
+        depth = max(0, depth + (character in "([{<") - (character in ")]}>"))
         commas += character == "," and depth == 0
     return commas
 
 
-def c_parameter_count(parameters: str, macros: dict[str, list[str]]) -> int:
+def c_parameter_count(parameters: str, macros: dict[str, list[str]]) -> int | None:
     """Return the parameters of a list, its object-like macros expanded (the definition with the most, of several).
 
     Parameters
@@ -199,9 +224,11 @@ def c_parameter_count(parameters: str, macros: dict[str, list[str]]) -> int:
 
     Returns
     -------
-    int
-        The number of parameters; 0 for ``()`` and ``(void)``.
+    int or None
+        The number of parameters; 0 for ``()`` and ``(void)``; None where the list calls a function-like macro.
     """
+    if any(f"{name}(" in macros for name in re.findall(r"\b(\w+)\s*\(", parameters)):
+        return None
     for _ in range(len(macros) + 1):  # each pass expands one level of nesting
         expanded = re.sub(
             r"\b\w+\b",
@@ -241,12 +268,16 @@ def check_c_family(path: Path, text: str, macros: dict[str, list[str]] | None = 
     for name, start, name_start, end, parameters in c_functions(code):
         first_line = code.count("\n", 0, start) + 1
         name_line = code.count("\n", 0, name_start) + 1
+        arguments = c_parameter_count(parameters, macros)
+        if name == UNSUPPORTED or arguments is None:  # never certified, an exception or not
+            failures.append(f"{path}:{first_line}: unsupported declaration: the scan cannot read its name or count its "
+                            "parameters; write it in a plain form")  # fmt: skip
+            continue
         if any(_has_exception(lines, line) for line in range(first_line, name_line + 1)):
             continue
         body = code[name_start:end]
         length = body.count("\n") + 1
         complexity = 1 + len(C_BRANCH.findall(body))
-        arguments = c_parameter_count(parameters, macros)
         if length > MAX_FUNCTION_LINES:
             failures.append(f"{path}:{first_line}: {name} has {length} lines, limit {MAX_FUNCTION_LINES}")
         if complexity > MAX_COMPLEXITY:

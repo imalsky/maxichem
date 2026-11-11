@@ -41,6 +41,29 @@ def test_arguments_count_macro_lists_nested_declarators_and_the_wider_definition
     assert _failures("void none() {}\nint unused(void) { return 0; }\n") == []
 
 
+THIRTEEN = ", ".join(f"int a{i}" for i in range(13))
+UNSUPPORTED = "k.cuh:2: unsupported declaration: the scan cannot read its name or count its parameters; write it in a "
+UNSUPPORTED += "plain form"
+
+
+def test_specialisations_operators_and_template_parameters_are_counted():
+    assert _failures(f"\ntemplate <>\nvoid f<int>({THIRTEEN}) {{}}\n") == ["k.cuh:2: f has 13 arguments, limit 12"]
+    assert _failures(f"\nstd::array<int, 4> S::operator()({THIRTEEN}) {{}}\n") == [
+        "k.cuh:2: S::operator() has 13 arguments, limit 12"
+    ]
+    twelve = ", ".join(f"A<int, int> a{i}" for i in range(12))
+    assert _failures(f"\nvoid g({twelve}) {{}}\n") == []
+
+
+def test_forms_the_scan_cannot_read_fail_instead_of_passing():
+    pointer = "\nint (*h(int a, int b))(int) { return 0; }\n"
+    macro = "\n#define PAIR(t) t first, t second\nvoid m(PAIR(int)) {}\n"
+    assert _failures(pointer) == [UNSUPPORTED]
+    assert _failures(macro, "") == ["k.cuh:3: " + UNSUPPORTED.split(": ", 1)[1]]
+    # an exception does not let a form through that the scan cannot count
+    assert _failures("\n// size-limit-ok: reason\n" + pointer.lstrip()) == [UNSUPPORTED.replace(":2:", ":3:")]
+
+
 def test_an_exception_sits_above_the_declaration_or_inside_it():
     above = "// what it does\n// size-limit-ok: the reason\n" + OVER.lstrip()
     inside = OVER.replace("template <bool DN>\n", "template <bool DN>\n// size-limit-ok: the reason\n")
