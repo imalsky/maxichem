@@ -383,7 +383,8 @@ void Solver::refuse(torch::Tensor const& x, torch::Tensor const& T, torch::Tenso
     if (any) m << "; ";
     int64_t const i = first(refused & (is_cold | is_hot).logical_not());
     m << bad << " cells of bad input: x negative or non-finite, |sum(x) - 1| above " << x_sum_tol_
-      << " or no x above 0; T non-finite, P not above 0, dt negative or non-finite, or J negative or non-finite "
+      << " or no x above 0; T non-finite, P non-finite, not above 0 or so large that P / (k_B T) overflows, dt negative"
+      << " or non-finite, or J negative or non-finite "
       << "(first: cell " << i << ": sum(x) - 1 = " << (x[i].sum() - 1.0).item<double>()
       << " (added in another order than the kernel's, so it can differ in the last bits), min(x) = "
       << x[i].min().item<double>() << ", T = " << T[i].item<double>() << " K, P = " << P[i].item<double>()

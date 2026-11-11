@@ -66,7 +66,7 @@ constructors' optional arguments are keyword only too: `CudaSolver(net, device, 
 write `drift=` and `photo=` (and `cap=` for `ADSolver`).
 
 A cell is refused when it is bad input (a negative or non-finite mole fraction, |sum(x) - 1| above `X_SUM_TOL`, no mole fraction
-above 0, a non-finite T, P <= 0, a negative or non-finite dt, or a negative or non-finite J) or outside [`T_MIN`, `T_MAX`] (counted
+above 0, a non-finite T, a non-finite P, P <= 0 or a P so large that the number density P / (k_B T) overflows, a negative or non-finite dt, or a negative or non-finite J) or outside [`T_MIN`, `T_MAX`] (counted
 as cold or hot). The kernel that steps the cell decides this once (method.md, "Refused cells"); it does not step the cell, and the
 guard counts it. After the kernels, `launch` and a call read the counts back, the call's one host sync, and raise ValueError when any
 cell was refused, naming the count of each kind, the limits and the first refused cell of each kind with its values. The counts are

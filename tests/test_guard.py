@@ -179,6 +179,24 @@ def test_bad_inputs_are_refused(parity, verdict, monkeypatch):
     )
 
 
+def test_non_finite_and_overflowing_pressures_are_refused_and_named(parity, verdict):
+    # the kernel refuses a cell whose number density P / (k_B T) is not finite: P = inf, NaN, and a finite P so large
+    # that the density overflows (1e300 dyn cm^-2 does at every T of the solver's range)
+    cells = 4
+    x0, T, P = parity.starts(cells, 1, 0.0)
+    p_bad = P.clone()
+    p_bad[1:] = helpers.tensor([float("inf"), float("nan"), 1e300], parity.device)
+    named = r"^the call refused cells: 3 cells of bad input: .*P non-finite, not above 0 or so large that P / \(k_B T\)"
+    with pytest.raises(ValueError, match=rf"{named} overflows.*first: cell 1:") as raised:
+        parity.solver(x0, T, p_bad, parity.full(cells, 50.0), parity.full(cells, 1e-10))
+    counts = dict(parity.solver.fallback)
+    verdict(
+        "guard: P = inf, NaN and 1e300 dyn cm^-2 refused as bad input, the cause named",
+        counts["bad_input"] == 3,
+        f"counts {counts}; ValueError: {raised.value}",
+    )
+
+
 def test_just_outside_the_range_is_refused_and_named(parity, verdict, monkeypatch):
     # T one float64 step outside each end, with dt = 0 and dt > 0: every such cell is refused, named and not done.
     x0, _, P = parity.starts(4, 2, 1.0)

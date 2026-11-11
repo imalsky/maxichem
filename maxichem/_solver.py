@@ -217,8 +217,9 @@ class Solver:
             )
             problems.append(
                 f"{n['bad_input']} cells of bad input: x negative or non-finite, |sum(x) - 1| above {X_SUM_TOL:g} "
-                f"or no x above 0; T non-finite, P not above 0, dt negative or non-finite, or J negative or "
-                f"non-finite (first: {where}); pass x normalized to sum 1 in float64, clamped at 0"
+                "or no x above 0; T non-finite, P non-finite, not above 0 or so large that P / (k_B T) overflows, dt "
+                f"negative or non-finite, or J negative or non-finite (first: {where}); pass x normalized to sum 1 in "
+                "float64, clamped at 0"
             )
         raise ValueError("the call refused cells: " + "; ".join(problems))
 
