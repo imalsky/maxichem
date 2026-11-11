@@ -4,6 +4,8 @@
 // is the adjoint kernels' (kincuda_ad.py); tests/test_collision_limit.py builds and runs it.
 #include "vjp.cu"
 
+// The parameters are the launch list _cuda.launch_kernel fills from tensors.
+// size-limit-ok: 19 arguments; a struct of them would need a ctypes mirror kept equal to it
 extern "C" __global__ void rate_probe(const double* __restrict__ Ta, const double* __restrict__ Pa,
                                       const double* __restrict__ dTa, const double* __restrict__ dlnda,
                                       const double* __restrict__ lbk, const double* __restrict__ Jin,
