@@ -2282,7 +2282,7 @@ maxichem/kernels` is empty after the merge).
   dex; sulfur: the two pinned misses held, paths worst 0.007 dex); test_export_cpp 19 passed in 552 s, bitwise on every
   case; test_ad 81 passed in 1022 s, 0 FAIL. The known-answer tier (collision limit, known answers, rate laws, order,
   kernel copies, dense LU) failed 1 of 26: `test_known_answers.py` still read the cotangents as a dict; fixed after, and
-  the tier rerun on the fixed head (below).
+  the tier rerun on the fixed head fbf7cd6: 26 passed in 379 s; CPU 134 passed there.
 - Not done: `signed_mole_fractions` still takes mixed precisions; `jvp`'s `dJ` refuses any tangent without photolysis,
   also an empty one.
 
