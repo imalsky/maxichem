@@ -506,7 +506,7 @@ __device__ __forceinline__ void error_cotangent(const double* N, const double* Y
 
 // The rate cotangents lbk -> the log multipliers glm, J, gA (the forward coefficients before the limit, for arrh), and
 // this lane's parts of the cotangents of T (gTl) and ln nd (gnl).
-// size-limit-ok: rates()'s inputs and a cotangent output for each, so it shrinks only with rates()
+// size-limit-ok: a cotangent output per rate-law input; its one group, the rate tables, would save 2 of 18
 __device__ __forceinline__ void rate_cotangents(double* work, const double* lbk, const double* kf, const double* cw,
                                                 const double* lmc, const double* __restrict__ rc,
                                                 const int* __restrict__ rf, const double* __restrict__ nasa,
