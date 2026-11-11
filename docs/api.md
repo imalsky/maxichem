@@ -49,8 +49,10 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 | `close()` | Unloads the kernels and drops the tables and scratch; the counts stay readable |
 
 J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells). Without
-photolysis a call takes no J or an empty one, [B, 0], and refuses a J with columns. The C++ caller follows the same rule, with the
-same messages; there an undefined tensor is no J.
+photolysis a call takes no J or an empty one, [B, 0], and refuses a J with columns. The C++ caller follows the same rule; there an
+undefined tensor is no J. Its messages for a J with columns without photolysis and for a missing J are the Python ones after its
+"maxichem: " prefix; its message for a J of the wrong dtype, shape or device names the same fault in libtorch's words for the dtype
+(`Float` where Python says `torch.float32`).
 
 The results are named tuples, so `x, h, done, steps = solver(...)` and indexing work as before:
 

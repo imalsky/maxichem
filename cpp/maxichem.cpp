@@ -283,8 +283,8 @@ CallResult Solver::operator()(torch::Tensor x, torch::Tensor T, torch::Tensor P,
   P = P.contiguous();
   dt = dt.contiguous();
   h = h.contiguous();
-  // the rule and the messages of check_photolysis in maxichem/_solver.py: without photolysis no J or an empty [B, 0]
-  // one, with it J [B, nj]
+  // the rule of check_photolysis in maxichem/_solver.py, with its two rule messages: without photolysis no J or an
+  // empty [B, 0] one, with it J [B, nj]. The form message names the dtype as libtorch prints it (Float, not float32).
   if (J.defined()) {
     TORCH_CHECK(nj_ || (J.dim() == 2 && J.size(1) == 0), "maxichem: J: none or an empty [", B,
                 ", 0] one expected, since this solver has no photolysis; got ", J.sizes());

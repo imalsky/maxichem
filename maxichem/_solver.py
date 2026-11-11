@@ -74,7 +74,7 @@ def check_photolysis(J: torch.Tensor | None, cells: int, branches: int, device: 
     """Return the call's J, None without photolysis; refuse a J that breaks the rule of docs/api.md.
 
     Without photolysis the call takes no J or an empty one, [B, 0]; with it, J [B, branches] is required. The C++
-    caller (cpp/maxichem.cpp) gives the same messages.
+    caller (cpp/maxichem.cpp) gives the same two rule messages; its form message differs in the dtype's name.
     """
     if not branches:
         if J is None:
