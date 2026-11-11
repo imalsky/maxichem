@@ -1,7 +1,7 @@
 """The per-cell setup and step-control tail, written four times (call, recover, jvp, vjp), on the edge inputs.
 
-The cells hold a non-finite or too long starting step, dt = 0, refused cells beside good ones and a first try too long
-to pass twice running. Each kernel must return the same bits for the same cell: x, h, done, steps, status and flag.
+The cells hold a non-finite or too long starting step, dt = 0, refused cells beside good ones and a cell with two or
+more rejected tries. Each kernel must return the same bits for the same cell: x, h, done, steps, status and flag.
 """
 
 import helpers
@@ -29,7 +29,7 @@ CELLS = {
     "beside the cold cell": (T_GOOD, DT, 1e-6 * DT),
     "bad input": (T_GOOD, DT, DT),
     "hot": (3500.0, DT, DT),
-    "first try rejected twice": (T_GOOD, 1e3, 1e3),
+    "two tries rejected": (T_GOOD, 1e3, 1e3),
 }
 SAME_AS_H_DT = ("h = NaN", "h = +inf", "h = 10 dt")
 
@@ -100,6 +100,13 @@ def test_every_copy_returns_the_same_cells(read_network, gpu, monkeypatch, max_s
     assert counts["nonfinite_h"] == 2
     stepped = [c for c, q in enumerate(names) if q not in ("cold", "bad input", "hot", "dt = 0")]
     assert bool(done[stepped].all())  # every stepped cell finishes, through the recovery at FEW_TRIES
+    if max_steps == _constants.DEFAULT_MAX_STEPS:  # one try more than its accepted steps leaves the cell unfinished
+        c = names.index("two tries rejected")
+        net = read_network("synthetic_small")
+        cell = [q[c : c + 1] for q in _inputs(net, gpu)]
+        with kincuda.CudaSolver(net, gpu, photo=True) as solver:
+            solver.launch(*cell[:-1], max_steps=int(steps[c]) + 1, J=cell[-1])
+            assert solver.fallback["unfinished"] == 1, f"{int(steps[c])} accepted steps, a try more: done"
     if max_steps == FEW_TRIES:
         assert counts["recomputed"] == counts["recovered"] == len(stepped)  # each ran out of tries, then recovered
         net = read_network("synthetic_small")
