@@ -129,7 +129,10 @@ counts = solver.check()  # guard counts; raises if a cell was outside 300-3000 K
   -DPython3_EXECUTABLE=<python with torch> -DCUDAToolkit_ROOT=<CUDA toolkit>`. Check: `tests/test_export_cpp.py` writes
   an export and one call, and compares the C++ call with it bit for bit. Interface change: the C++ solver's sizes,
   names and counts are read-only accessors now (`chem.ns()`, `chem.nj()`, `chem.species()`, `chem.count()`, ...; the
-  tensors come back as copies), and an export without photolysis takes no J or an empty [B, 0] one.
+  tensors come back as copies), and an export without photolysis takes no J or an empty [B, 0] one. The C++ call
+  returns a `maxichem::CallResult`: structured bindings work as before, indexing does not (`r[i]` becomes `r.x`, `r.h`,
+  `r.done`, `r.steps`). In Python, `ADSolver.vjp`'s cotangents are a `Cotangents` named tuple, not a dict
+  (`cotangents["x"]` becomes `cotangents.x`).
 
 ## Accuracy
 
