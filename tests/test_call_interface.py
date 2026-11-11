@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from maxichem.kincuda import CallResult, CudaSolver, LaunchResult
-from maxichem.kincuda_ad import ADSolver, JvpResult, VjpResult
+from maxichem.kincuda_ad import ADSolver, Cotangents, JvpResult, VjpResult
 
 # each call, its function under the device decorator, and the number of tensors it takes by position
 CALLS: dict[str, tuple[type, Callable[..., object], int]] = {
@@ -44,6 +44,7 @@ def test_results_are_named_tuples_in_the_old_order():
         LaunchResult: ("x", "h", "done", "steps", "flag"),
         JvpResult: ("x", "h", "done", "steps", "dx", "dh"),
         VjpResult: ("x", "h", "done", "steps", "cotangents"),
+        Cotangents: ("x", "T", "P", "dt", "h", "lm", "rc", "J"),  # one per input
     }
     for result, names in fields.items():
         assert result._fields == names

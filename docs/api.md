@@ -87,8 +87,12 @@ A non-finite h acts as dt and is counted in `nonfinite_h`. `launch` and a call b
 
 Everything after the required tensors (after `dh` in `jvp`, after `gx` in `vjp`) is keyword only. The results are named tuples:
 `JvpResult` holds `CallResult`'s fields, then `dx` ([B, S], or [D, B, S] with a leading axis of directions) and `dh` ([B] or [D, B],
-s); `VjpResult` holds `CallResult`'s fields, then `cotangents`, a dict: x [B, S], T [B], P [B], dt [B], h [B], lm [B, R], rc [R, 9]
-and, with `photo=True`, J [B, branches], each per unit of its input. The per-cell flag is `flag`, as in `CudaSolver`.
+s); `VjpResult` holds `CallResult`'s fields, then `cotangents`, a `Cotangents` named tuple with one field per input: x [B, S],
+T [B], P [B], dt [B], h [B], lm [B, R], rc [R, 9] and J [B, branches] (None without photolysis), each per unit of its input. The per-cell flag is `flag`, as in `CudaSolver`.
+
+Interface change: `cotangents` was a dict of str to tensor. Write `cotangents.x` for `cotangents["x"]`, and
+`cotangents._asdict()` where code looped over its keys; without photolysis J is a field holding None, where the dict had no
+key "J".
 
 A non-finite log multiplier in `lm` takes no try: its cell comes back with done 0, flag 2 and NaN derivatives, counted as unfinished,
 recomputed and still failed.
@@ -105,7 +109,7 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 ## Constants in `kincuda`
 
 `ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `T_MAX`, `X_SUM_TOL`, `COUNTS`. The result types are `kincuda.CallResult`,
-`kincuda.LaunchResult`, `kincuda_ad.JvpResult` and `kincuda_ad.VjpResult`.
+`kincuda.LaunchResult`, `kincuda_ad.JvpResult`, `kincuda_ad.VjpResult` and `kincuda_ad.Cotangents`.
 
 ## C++: `maxichem::Solver(folder, device)`
 

@@ -38,7 +38,7 @@ from ._solver import Solver, check_inputs, check_photolysis, check_tensor, share
 from ._tables import dense_w_doubles, pack_small_tables, tables_for_device
 from .kinvulcan import VulcanNetwork
 
-__all__ = ["ADSolver", "JvpResult", "VjpResult"]
+__all__ = ["ADSolver", "Cotangents", "JvpResult", "VjpResult"]
 MAX_WARPS_PER_BLOCK = 32  # the derivative kernels' queue and shared memory hold at most this many
 
 
@@ -63,6 +63,35 @@ class JvpResult(NamedTuple):
     dh: torch.Tensor
 
 
+class Cotangents(NamedTuple):
+    """The cotangents of ``ADSolver.vjp``'s inputs, float64, each per unit of its input.
+
+    Attributes
+    ----------
+    x : torch.Tensor [B, S]
+        Of the mole fractions.
+    T, P : torch.Tensor [B]
+        Of the temperature, per K, and of the pressure, per dyn cm^-2.
+    dt, h : torch.Tensor [B]
+        Of the call length and of the starting step, per s.
+    lm : torch.Tensor [B, R]
+        Of the log rate multipliers.
+    rc : torch.Tensor [R, 9]
+        Of the rate table: a sum over the cells.
+    J : torch.Tensor [B, branches] or None
+        Of the photolysis rates, per s^-1; None without photolysis.
+    """
+
+    x: torch.Tensor
+    T: torch.Tensor
+    P: torch.Tensor
+    dt: torch.Tensor
+    h: torch.Tensor
+    lm: torch.Tensor
+    rc: torch.Tensor
+    J: torch.Tensor | None
+
+
 class VjpResult(NamedTuple):
     """What ``ADSolver.vjp`` returns, per cell; ``self.flag`` holds the per-cell flag.
 
@@ -70,17 +99,15 @@ class VjpResult(NamedTuple):
     ----------
     x, h, done, steps : torch.Tensor
         As ``kincuda.CallResult``: mole fractions [B, S], next step size [B] (s), done [B] (bool), accepted steps [B].
-    cotangents : dict of str to torch.Tensor
-        The cotangents of the inputs, float64, per unit of each input (T per K, P per dyn cm^-2, dt and h per s, J
-        per s^-1): x [B, S], T [B], P [B], dt [B], h [B], lm [B, R], rc [R, 9] (a sum over the cells) and, with
-        ``photo=True``, J [B, branches].
+    cotangents : Cotangents
+        The cotangents of the inputs.
     """
 
     x: torch.Tensor
     h: torch.Tensor
     done: torch.Tensor
     steps: torch.Tensor
-    cotangents: dict[str, torch.Tensor]
+    cotangents: Cotangents
 
 
 def _pointer(a: torch.Tensor | None) -> Any:
@@ -267,21 +294,19 @@ class ADSolver(Solver):
             PHOTOLYSIS_ARGUMENT: _pointer(J),
         }
 
-    def _empty_cotangents(self, x: torch.Tensor, T: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _empty_cotangents(self, x: torch.Tensor, T: torch.Tensor) -> Cotangents:
         """Allocate the cotangents a vjp call fills."""
         cells = x.shape[0]
-        cotangents = {
-            "x": torch.empty_like(x),
-            "T": torch.empty_like(T),
-            "P": torch.empty_like(T),
-            "dt": torch.empty_like(T),
-            "h": torch.empty_like(T),
-            "lm": torch.empty(cells, self.nr, dtype=torch.float64, device=self.dev),
-            "rc": torch.empty(self.nr, ARRHENIUS_COLUMNS, dtype=torch.float64, device=self.dev),
-        }
-        if self.nj:
-            cotangents["J"] = torch.empty(cells, self.nj, dtype=torch.float64, device=self.dev)
-        return cotangents
+        return Cotangents(
+            x=torch.empty_like(x),
+            T=torch.empty_like(T),
+            P=torch.empty_like(T),
+            dt=torch.empty_like(T),
+            h=torch.empty_like(T),
+            lm=torch.empty(cells, self.nr, dtype=torch.float64, device=self.dev),
+            rc=torch.empty(self.nr, ARRHENIUS_COLUMNS, dtype=torch.float64, device=self.dev),
+            J=torch.empty(cells, self.nj, dtype=torch.float64, device=self.dev) if self.nj else None,
+        )
 
     def _grow_tangent_scratch(self, directions: int) -> None:
         """Make the tangent kernels' scratch large enough for this many directions."""
@@ -466,8 +491,8 @@ class ADSolver(Solver):
         Returns
         -------
         VjpResult
-            x, h, done, accepted steps, and a dict of the cotangents x, T, P, dt, h, lm [B, R], rc [R, 9] and, with
-            ``photo=True``, J [B, branches]. A cell with flag 2 (``self.flag``) has NaN in its own cotangents and is
+            x, h, done, accepted steps, and the ``Cotangents`` x, T, P, dt, h, lm [B, R], rc [R, 9] and J [B, branches]
+            (None without photolysis). A cell with flag 2 (``self.flag``) has NaN in its own cotangents and is
             left out of the sum that rc is; ``fallback["still_failed"]`` counts the cells left out.
 
         Raises
@@ -501,16 +526,16 @@ class ADSolver(Solver):
             "doneo": done,
             "noko": nok,
             "status": status,
-            "gx0": g["x"],
-            "gT": g["T"],
-            "gP": g["P"],
-            "gdt": g["dt"],
-            "ghin": g["h"],
-            "glm": g["lm"],
-            "grc": g["rc"],
+            "gx0": g.x,
+            "gT": g.T,
+            "gP": g.P,
+            "gdt": g.dt,
+            "ghin": g.h,
+            "glm": g.lm,
+            "grc": g.rc,
             "scratch": self._scratch["vjp"],
             "rec": self._scratch["rec"],
-            "gJ": _pointer(g.get("J")),
+            "gJ": _pointer(g.J),
             "gA": g_ln_a,
         }
         block = WARP_LANES * self.wpb["vjp"]

@@ -332,13 +332,13 @@ class DerivativeChecks:
         if adapt:
             lt = torch.cat([lt, (ch * th)[:, None]], 1)
         rt = {
-            "x": gg["x"] * dx,
-            "T": (gg["T"] * dT)[:, None],
-            "P": (gg["P"] * dP)[:, None],
-            "dt": (gg["dt"] * ddt)[:, None],
-            "h": (gg["h"] * dh)[:, None],
-            "lm": gg["lm"] * dlm,
-            "J": gg["J"] * dJ,
+            "x": gg.x * dx,
+            "T": (gg.T * dT)[:, None],
+            "P": (gg.P * dP)[:, None],
+            "dt": (gg.dt * ddt)[:, None],
+            "h": (gg.h * dh)[:, None],
+            "lm": gg.lm * dlm,
+            "J": gg.J * dJ,
         }[cls]
         sc = torch.maximum(lt.abs().sum(1), rt.abs().sum(1))
         e = (lt.sum(1) - rt.sum(1)).abs() / sc.clamp_min(1e-300)
@@ -502,13 +502,13 @@ def test_recovered_dot_products(checks, verdict):
             bad2 = t.flag == 2
             nan2 = bool(
                 torch.isnan(t.tx[bad2]).all()
-                and torch.isnan(t.cotangents["x"][bad2]).all()
-                and torch.isnan(t.cotangents["T"][bad2]).all()
+                and torch.isnan(t.cotangents.x[bad2]).all()
+                and torch.isnan(t.cotangents.T[bad2]).all()
                 and (not adapt or torch.isnan(t.th[bad2]).all())
             )
             fin = bool(
                 torch.isfinite(t.tx[torch.logical_not(bad2)]).all()
-                and torch.isfinite(t.cotangents["x"][torch.logical_not(bad2)]).all()
+                and torch.isfinite(t.cotangents.x[torch.logical_not(bad2)]).all()
             )
             dot_verdict(
                 verdict,
@@ -537,8 +537,8 @@ def test_recovered_rate_table(checks, verdict):
         allrec = bool((checks.ad.flag == 1).all())
         c = torch.where(x1 > 1e-20, rn(*xr.shape) / x1.clamp_min(1e-300), 0.0)
         gg = checks.ad.vjp(xr, t_r, p_r, dr, hr, c, J=j_r, adapt=adapt, max_steps=3)[4]
-        lhs, rhs = float((c * tx).sum()), float((gg["rc"] * drc).sum())
-        e = abs(lhs - rhs) / max(float((c * tx).abs().sum()), float((gg["rc"] * drc).abs().sum()))
+        lhs, rhs = float((c * tx).sum()), float((gg.rc * drc).sum())
+        e = abs(lhs - rhs) / max(float((c * tx).abs().sum()), float((gg.rc * drc).abs().sum()))
         verdict(
             f"recovered cells rc (batch) {'adaptive' if adapt else 'frozen'}",
             allrec and e <= RC_BATCH,
@@ -555,9 +555,9 @@ def test_rate_table_dot_products(checks, verdict):
             x1, _, _, _, tx, _ = checks.ad.jvp(x, T, P, d, h, *checks.zt(x), drc=drc, J=J, adapt=adapt)
             c = torch.where(x1 > 1e-20, rn(*x.shape) / x1.clamp_min(1e-300), 0.0)
             gg = checks.ad.vjp(x, T, P, d, h, c, J=J, adapt=adapt)[4]
-            lhs, rhs = float((c * tx).sum()), float((gg["rc"] * drc).sum())
-            e = abs(lhs - rhs) / max(float((c * tx).abs().sum()), float((gg["rc"] * drc).abs().sum()))
-            zero = bool((gg["rc"][checks.ad.nr - checks.ad.nj :] == 0).all())
+            lhs, rhs = float((c * tx).sum()), float((gg.rc * drc).sum())
+            e = abs(lhs - rhs) / max(float((c * tx).abs().sum()), float((gg.rc * drc).abs().sum()))
+            zero = bool((gg.rc[checks.ad.nr - checks.ad.nj :] == 0).all())
             verdict(
                 f"dot rc (batch) {name} {'adaptive' if adapt else 'frozen'}",
                 e <= RC_BATCH and zero,
@@ -595,12 +595,12 @@ def test_directions_share_one_call(checks, verdict):
 
 def test_determinism(checks, verdict):
     s = _directions(checks)
-    a1 = checks.ad.vjp(s.x, s.T, s.P, s.d, s.h, s.c, lm=s.lm, J=s.J)[4]
-    a2 = checks.ad.vjp(s.x, s.T, s.P, s.d, s.h, s.c, lm=s.lm, J=s.J)[4]
+    a1 = checks.ad.vjp(s.x, s.T, s.P, s.d, s.h, s.c, lm=s.lm, J=s.J)[4]._asdict()
+    a2 = checks.ad.vjp(s.x, s.T, s.P, s.d, s.h, s.c, lm=s.lm, J=s.J)[4]._asdict()
     perm = torch.randperm(s.B, generator=torch.Generator().manual_seed(1)).to(checks.device)
     a3 = checks.ad.vjp(s.x[perm], s.T[perm], s.P[perm], s.d[perm], s.h[perm], s.c[perm], lm=s.lm[perm], J=s.J[perm])[4]
     det = all(torch.equal(a1[k], a2[k]) for k in a1)
-    pm = all(torch.equal(a1[k][perm], a3[k]) for k in a1 if k != "rc")
+    pm = all(torch.equal(a1[k][perm], a3._asdict()[k]) for k in a1 if k != "rc")
     verdict(
         "determinism", det and pm, f"same call twice bitwise: {det}; cells permuted, per-cell cotangents bitwise: {pm}"
     )
@@ -620,8 +620,8 @@ def test_non_finite_step_acts_as_twice_dt(checks, verdict):
         nonfin[str(q)] = (
             all(torch.equal(a, b) for a, b in zip(jn, j2, strict=True))
             and all(torch.equal(a, b) for a, b in zip(vn[:4], v2[:4], strict=True))
-            and all(torch.equal(vn[4][k], v2[4][k]) for k in vn[4])
-            and bool((vn[4]["h"] == 0).all())
+            and all(torch.equal(a, b) for a, b in zip(vn[4], v2[4], strict=True))
+            and bool((vn[4].h == 0).all())
             and checks.ad.fallback["nonfinite_h"] == s.x.shape[0]
         )
     verdict(
@@ -673,11 +673,11 @@ def test_failed_cell_is_left_out_of_the_rate_table(checks, verdict):
         failed = checks.ad.vjp(s.x, s.T, s.P, d, h, s.c, lm=lm, J=s.J, **tries)
         flag, counts = checks.ad.flag.clone(), checks.ad.fallback
         alone = checks.ad.vjp(s.x[:-1], s.T[:-1], s.P[:-1], d[:-1], h[:-1], s.c[:-1], lm=lm[:-1], J=s.J[:-1], **tries)
-        cotangents = failed[4]
+        cotangents, own = failed[4]._asdict(), alone[4]._asdict()
         others_equal = all(torch.equal(a[:-1], b) for a, b in zip(failed[:4], alone[:4], strict=True)) and all(
-            torch.equal(cotangents[k][:-1], alone[4][k]) for k in cotangents if k != "rc"
+            torch.equal(cotangents[k][:-1], own[k]) for k in cotangents if k != "rc"
         )
-        rc_equal = torch.equal(cotangents["rc"], alone[4]["rc"]) and bool(cotangents["rc"].isfinite().all())
+        rc_equal = torch.equal(cotangents["rc"], own["rc"]) and bool(cotangents["rc"].isfinite().all())
         own_nan = all(bool(cotangents[k][-1].isnan().all()) for k in cotangents if k != "rc")
         verdict(
             f"failed cell, {name}",
@@ -694,7 +694,7 @@ def test_a_nan_from_a_passing_cell_reaches_the_rate_table(checks):
     bad[0, 0] = float("nan")
     cotangents = checks.ad.vjp(s.x, s.T, s.P, s.d, 2.0 * s.d, bad, lm=s.lm, J=s.J)[4]
     assert checks.ad.fallback["still_failed"] == 0
-    assert bool(cotangents["rc"].isnan().any())
+    assert bool(cotangents.rc.isnan().any())
 
 
 def test_missing_j_is_refused(checks):
@@ -788,6 +788,7 @@ def test_negative_x_is_refused(checks, verdict, monkeypatch):
         and all(torch.equal(a[1:], b[1:]) for a, b in zip(vb[:4], v2[:4], strict=True))
         and torch.equal(jb[4][:, 1:], j2[4][:, 1:])  # tangents [D, B, S], [D, B]
         and torch.equal(jb[5][:, 1:], j2[5][:, 1:])
-        and all(torch.equal(vb[4][k][1:], v2[4][k][1:]) for k in vb[4] if k != "rc")  # rc sums over the cells
+        # rc sums over the cells
+        and all(torch.equal(a[1:], b[1:]) for k, a, b in zip(vb[4]._fields, vb[4], v2[4], strict=True) if k != "rc")
     )
     verdict("negative x", negok, f"jvp {cj}; vjp {cv}; cell 0 not done, the others bitwise the valid batch's")
