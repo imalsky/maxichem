@@ -85,7 +85,7 @@ def molar_masses(atoms: np.ndarray | torch.Tensor, elements: Sequence[str]) -> t
     """
     missing = [e for e in elements if e not in ATOMIC_MASS]
     if missing:
-        raise ValueError(f"no atomic mass for {missing}: add them to coupling.composition.ATOMIC_MASS")
+        raise ValueError(f"no atomic mass for {missing}: add them to maxichem.coupling.composition.ATOMIC_MASS")
     a = torch.as_tensor(atoms, dtype=torch.float64).cpu()
     if a.dim() != 2 or a.shape[1] != len(elements):
         raise ValueError(f"atoms must be [species, {len(elements)}], got shape {tuple(a.shape)}")
@@ -247,7 +247,9 @@ def start_mole_fractions(species: Sequence[str], elements: Sequence[str]) -> tor
     """
     unknown = [e for e in elements if e not in _CARRIER]
     if unknown:
-        raise ValueError(f"the network has elements {unknown} with no start carrier: add one to coupling.composition")
+        raise ValueError(
+            f"the network has elements {unknown} with no start carrier: add one to maxichem.coupling.composition"
+        )
     need = [e for e in _CARRIER if e in elements or e not in _OPTIONAL]
     lacking = [f"{_CARRIER[e]} (for {e})" for e in need if _CARRIER[e] not in species]
     if lacking:

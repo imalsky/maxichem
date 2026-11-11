@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from coupling.chemistry import UnfinishedCellsError, require_finished
+from maxichem.coupling.chemistry import UnfinishedCellsError, require_finished
 from maxichem.kincuda import COUNTS
 
 T = torch.tensor([1500.0, 280.0, 1200.0], dtype=torch.float64)

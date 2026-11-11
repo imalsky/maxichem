@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from coupling.composition import (
+from maxichem.coupling.composition import (
     START_PER_H,
     element_moles,
     mass_to_mole,

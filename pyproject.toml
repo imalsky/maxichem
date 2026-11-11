@@ -21,7 +21,7 @@ dependencies = [
 Repository = "https://github.com/imalsky/maxichem"
 
 [tool.setuptools]
-packages = ["maxichem"]
+packages = ["maxichem", "maxichem.coupling"]
 
 [tool.setuptools.package-data]
 maxichem = ["kernels/*"]
@@ -85,7 +85,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["maxichem", "coupling"]  # so a lint of a copy without the package sorts imports the same
+known-first-party = ["maxichem"]  # so a lint of a copy without the package sorts imports the same
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
@@ -117,14 +117,14 @@ xfail_strict = true
 filterwarnings = ["error"]  # list any allowed warning here, with its reason
 log_level = "INFO"
 testpaths = ["tests"]
-pythonpath = ["."]  # coupling/ is a top-level folder beside the package
+pythonpath = ["."]  # the checkout's package, also without an install
 markers = [
   "slow: takes long or needs data CI does not have; outside the default CI run",
   "gpu: needs a GPU; runs locally, never in CI",
 ]
 
 [tool.coverage.run]
-source = ["maxichem", "coupling"]
+source = ["maxichem"]
 omit = [  # these only run on a GPU; the local GPU tests cover them
   "maxichem/_cuda.py",
   "maxichem/_export.py",
@@ -141,7 +141,7 @@ exclude_also = [
 ]
 
 [tool.mypy]
-files = ["maxichem", "coupling", "tests"]
+files = ["maxichem", "tests"]
 strict = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 warn_unreachable = true
@@ -150,7 +150,7 @@ disallow_incomplete_defs = false
 disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
-module = ["maxichem.*", "coupling.*"]
+module = ["maxichem.*"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_untyped_calls = true

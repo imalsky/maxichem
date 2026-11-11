@@ -6,7 +6,7 @@ from fractions import Fraction
 import pytest
 import torch
 
-from coupling.radiation import (
+from maxichem.coupling.radiation import (
     RadiationBudgetError,
     RadiationClock,
     check_budget,

@@ -21,8 +21,8 @@ How the code is laid out, and why the kernels look as they do. [method.md](metho
 | `paths.py` | Data locations of the checks and benches |
 | `_checks.py` | What the checks and benches share: the scored gases and their floors, the start gas |
 
-Outside the package, `coupling/` holds the pieces that the snapy coupling drivers (scripts in `experiments/`) share, each
-held once and tested on the CPU. The drivers stay scripts and may print; these modules raise, with the offending value and the
+The subpackage `maxichem.coupling` (`maxichem/coupling/`) holds the pieces that the snapy coupling drivers (scripts in
+`experiments/`) share, each held once and tested on the CPU. `import maxichem` does not import it. The drivers stay scripts and may print; these modules raise, with the offending value and the
 fix, and never fall back silently. They import torch and numpy, and `chemistry.py` imports maxichem's constants; none imports
 snapy or pyharp. The GCM side is in SI units; `chemistry.PA_TO_DYN_CM2` converts the pressure at the solver's edge.
 

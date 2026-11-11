@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from coupling.flow_file import (
+from maxichem.coupling.flow_file import (
     DryGas,
     FlowFileError,
     load_flow,

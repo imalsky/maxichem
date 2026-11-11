@@ -17,8 +17,8 @@ import torch
 
 __all__ = ["DryGas", "Flow", "FlowFileError", "load_flow", "load_start_column", "save_flow", "save_start_column"]
 
-# Two sums of the same atomic weights (the model's and coupling.composition's) agree to round-off; another gas differs
-# by percents.
+# Two sums of the same atomic weights (the model's and maxichem.coupling.composition's) agree to round-off; another gas
+# differs by percents.
 _MOLAR_MASS_RTOL = 1.0e-9
 
 
