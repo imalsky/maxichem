@@ -136,25 +136,26 @@ struct CellArrays {
   double *M, *dinv, *n, *N, *Y, *F, *u, *K1, *K2, *K3, *K4, *v, *part, *kf, *kr, *rsc;
 };
 
-// The arrays of the recovery's one cell in shared memory, and its slot of the global scratch; M is the dense W.
+// The arrays of the recovery's one cell in shared memory, and its slot of the global scratch; M is the dense W
+// (_tables.recovery_layout, scratch_layout).
 __device__ __forceinline__ CellArrays recover_arrays(double* smem, double* scratch, size_t slot) {
   CellArrays a;
   a.kf = scratch + slot * RECOVER_STRIDE;
-  a.kr = a.kf + NR;
-  a.M = WSH ? smem : a.kf + 2 * NR + 2;
-  a.rsc = a.kf + 2 * NR + 2 + (WSH ? 0 : NS * NS);  // F, u, -Jn's slots of the last fresh evaluation
-  a.dinv = smem + (WSH ? NS * NS : 0);
-  a.n = a.dinv + NS;
-  a.v = a.n + NS + 1;
-  a.N = a.v + VR;
-  a.Y = a.N + NS;
-  a.F = a.Y + NS;
-  a.u = a.F + NS;
-  a.K1 = a.u + NS;
-  a.K2 = a.K1 + NS;
-  a.K3 = a.K2 + NS;
-  a.K4 = a.K3 + NS;
-  a.part = a.K4 + NS;
+  a.kr = a.kf + RATE_KR;
+  a.M = WSH ? smem + R_W : a.kf + SR_W;
+  a.rsc = a.kf + SR_RSC;  // F, u, -Jn's slots of the last fresh evaluation
+  a.dinv = smem + R_DINV;
+  a.n = smem + R_N0;
+  a.v = smem + R_V;
+  a.N = smem + R_NN;
+  a.Y = smem + R_Y;
+  a.F = smem + R_F;
+  a.u = smem + R_U;
+  a.K1 = smem + R_K1;
+  a.K2 = smem + R_K2;
+  a.K3 = smem + R_K3;
+  a.K4 = smem + R_K4;
+  a.part = smem + R_PART;
   return a;
 }
 
@@ -162,11 +163,11 @@ __device__ __forceinline__ CellArrays recover_arrays(double* smem, double* scrat
 __device__ __forceinline__ void restore_dense_try(const CellArrays& a, const u16* __restrict__ didx, int cl) {
   for (int s = cl; s < NS * NS; s += NL) a.M[s] = 0.0;
   for (int i = cl; i < NS; i += NL) {
-    a.F[i] = a.rsc[i];
-    a.u[i] = a.rsc[NS + i];
+    a.F[i] = a.rsc[RSC_F + i];
+    a.u[i] = a.rsc[RSC_U + i];
   }
   CSYNC(0);
-  for (int s = cl; s < NNZ; s += NL) a.M[__ldg(didx + s)] = a.rsc[2 * NS + s];
+  for (int s = cl; s < NNZ; s += NL) a.M[__ldg(didx + s)] = a.rsc[RSC_JN + s];
 }
 
 // A fresh try: F, u = w = S v / nd - Jn x and W = -Jn at N, and their copy for a retry.
@@ -186,10 +187,10 @@ __device__ __forceinline__ void fresh_dense_try(const CellArrays& a, double nd, 
   for (int i = cl; i < NS; i += NL) a.u[i] = a.u[i] + dense_times_x(i, a.M, a.N, tab) / ntot;
   CSYNC(0);
   for (int i = cl; i < NS; i += NL) {
-    a.rsc[i] = a.F[i];
-    a.rsc[NS + i] = a.u[i];
+    a.rsc[RSC_F + i] = a.F[i];
+    a.rsc[RSC_U + i] = a.u[i];
   }
-  for (int s = cl; s < NNZ; s += NL) a.rsc[2 * NS + s] = a.M[__ldg(didx + s)];
+  for (int s = cl; s < NNZ; s += NL) a.rsc[RSC_JN + s] = a.M[__ldg(didx + s)];
 }
 
 // The factorization and Rodas3 stages (gamma = 1/2), as the call kernel's, on the first warp.
@@ -226,6 +227,7 @@ __device__ __forceinline__ void dense_stages(const CellArrays& a, int* pr, doubl
 // Jacobian streams, stages and step control, with the dense W = I / (gamma h) - Jn - w 1^T factored by dense_lu on the
 // first warp; writes the result over the call's (xout, hio, doneo, noko), sets redo to 1 (the result passes the guard's
 // test) or 2 and counts it in COUNT_RECOVERED or COUNT_STILL_FAILED. Returns at once when the list is empty.
+// size-limit-ok: a kernel entry: Python and C++ bind each argument by name from _constants.KERNEL_ARGUMENTS
 extern "C" __global__ void __launch_bounds__(NL, 1)
     recover(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
             const double* __restrict__ dta, const double* __restrict__ hin, double* xout, double* hio, int* doneo,
@@ -242,9 +244,9 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
   const int cl = (int)threadIdx.x, lane = cl & 31;
   const CellArrays a = recover_arrays(smem, scratch, (size_t)blockIdx.x);
   double* N = a.N;
-  int* pr = (int*)(a.part + NPART);
-  int* nextq = pr + NS;
-  if (cl == 0) a.kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
+  int* ints = (int*)(smem + R_INTS);
+  int *pr = ints + RI_PR, *nextq = ints + RI_NEXT;
+  if (cl == 0) a.kf[RATE_ZERO] = 0.0;  // the zero rate of the Jacobian's padding words
   int q = (int)blockIdx.x;
   while (q < nfl) {
     const int cell = list[q];
@@ -255,12 +257,11 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
     cell_rates(a.v, a.kf, a.kr, Tc, nd, rc, rf, nasa, tab, J_OR_NULL, cell, cl, 0);
     CSYNC(0);
     const double h0 = isfinite(hin[cell]) ? hin[cell] : dt;  // a non-finite h acts as dt (the call kernel counted it)
-    double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
-    bool prej = false;
+    StepState s = {fmax(fmin(h0, dt), H_MIN), 0.0, 0.0, 0.0, 0.0, false};
     int it = dt > 0.0 ? 0 : max_steps;
-    while (it < max_steps && t < dt * CALL_END) {
-      const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
-      if (prej)
+    while (it < max_steps && s.t < dt * CALL_END) {
+      const double ha = fmin(s.h, dt - s.t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
+      if (s.prej)
         restore_dense_try(a, didx, cl);
       else
         fresh_dense_try(a, nd, tab, sst, jt, didx, sround, jround, lane, cl);
@@ -271,28 +272,21 @@ extern "C" __global__ void __launch_bounds__(NL, 1)
       dense_stages(a, pr, ih, nd, tab, sst, sround, lane, cl);
       // step control (docs/method.md); every warp reaches the same decision
       bool ok = false;
-      const double en = try_error(N, a.K1, a.K3, a.K4, a.Y, cl < 32, t == 0.0, rtol, atol, lane, ok);
+      const double en = try_error(N, a.K1, a.K3, a.K4, a.Y, cl < 32, s.t == 0.0, rtol, atol, lane, ok);
       CSYNC(0);
-      if (ok) {
-        for (int i = cl; i < NS; i += NL) N[i] = fmax(a.Y[i], 0.0);
-        t += ha;
-        nok += 1.0;
-      }
+      accept_try(s, N, a.Y, ok, ha, cl, NL);
       CSYNC(0);
-      h = ha * step_factor(en, ok, prej, pen, pha, ha);
-      prej = !ok;
-      pen = en;
-      pha = ha;
+      next_try(s, step_factor(en, ok, s.prej, s.pen, s.pha, ha), ok, en, ha);
       it++;
     }
     write_state(N, xout + (size_t)cell * NS, perm, lane, cl, NL);
-    const int dn = (t >= dt * CALL_END) ? 1 : 0;
+    const int dn = (s.t >= dt * CALL_END) ? 1 : 0;
     CSYNC(0);
     if (cl == 0) {
-      const int c = check_cell(x0, xout, dn, nok, atoms, atol, cell);
-      hio[cell] = h;
+      const int c = check_cell(x0, xout, dn, s.nok, atoms, atol, cell);
+      hio[cell] = s.h;
       doneo[cell] = c ? 0 : dn;  // done: finished and passing the guard
-      noko[cell] = nok;
+      noko[cell] = s.nok;
       redo[cell] = c ? 2 : 1;
       atomicAdd(count + (c ? COUNT_STILL_FAILED : COUNT_RECOVERED), 1);
       *nextq = (int)(gridDim.x + atomicAdd(count + COUNT_RECOVERY_QUEUE, 1));

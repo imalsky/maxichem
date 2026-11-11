@@ -97,6 +97,33 @@ __device__ __forceinline__ double step_factor(double en, bool ok, bool prej, dou
   return fac;
 }
 
+// The step control's state over a call: the next try's size h and the time reached t (s), the accepted steps nok, and
+// the previous try's error pen, size pha (s) and rejection prej.
+struct StepState {
+  double h, t, nok, pen, pha;
+  bool prej;
+};
+
+// An accepted try of size ha: the new state N = max(Y, 0) over the rows first, first + stride, ..., and the step
+// counted. The caller's barrier follows, then next_try.
+__device__ __forceinline__ void accept_try(StepState& s, double* N, const double* Y, bool ok, double ha, int first,
+                                           int stride) {
+  if (ok) {
+    for (int i = first; i < NS; i += stride) N[i] = fmax(Y[i], 0.0);
+    s.t += ha;
+    s.nok += 1.0;
+  }
+}
+
+// The next try's size from the step factor fac after a try of size ha with error en, and what the next factor reads
+// of this one.
+__device__ __forceinline__ void next_try(StepState& s, double fac, bool ok, double en, double ha) {
+  s.h = ha * fac;
+  s.prej = !ok;
+  s.pen = en;
+  s.pha = ha;
+}
+
 // Rate coefficient of the law in row q (_law) at T, ln T, 1 / T, n_tot; three-body n_tot excluded.
 __device__ __forceinline__ double law(const double* q, int fl, double Tc, double lT, double iT, double nd) {
   double k = exp(q[0] + q[1] * lT - q[2] * iT);
@@ -183,6 +210,7 @@ __device__ __forceinline__ void rate_pair(int r, int fl, const double* __restric
 }
 
 // Rate coefficients of a cell across the cell's lanes (grp: its named barrier); photolysis rows kf = J, kr = 0.
+// size-limit-ok: in the call kernel; a struct of its one group, rc, rf and nasa, saves 2 for an untimed call change
 __device__ __forceinline__ void cell_rates(double* g, double* kf, double* kr, double Tc, double nd,
                                            const double* __restrict__ rc, const int* __restrict__ rf,
                                            const double* __restrict__ nasa, const Tab& tab,
@@ -292,6 +320,7 @@ __device__ __forceinline__ void gather_row(int i, const double* part, double* F,
 
 // F = (n_tot / nd) S v(n) at the state Y (n = nd Y / n_tot, n_tot = sum Y); u0 = S v / nd unless null; returns n_tot.
 // Every warp of the cell sums n_tot itself; the rest is spread over the cell's NL lanes (cl).
+// size-limit-ok: 15; __noinline__, so a struct by reference would have to sit in local memory
 __device__ __noinline__ double rhs(const double* Y, double* F, double* u0, double* n, double* v, double* part,
                                    const double* kf, const double* kr, double nd, const Tab& tab,
                                    const unsigned* __restrict__ sst, int sround, int lane, int cl, int grp) {

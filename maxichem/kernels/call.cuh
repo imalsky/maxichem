@@ -1,8 +1,8 @@
 // The call kernel: every cell's rates, Rodas3 steps and step control in one launch.
 
 // one block per SM is enough: without that bound ptxas may cap the registers below what the block size allows and spill
+// size-limit-ok: arguments bound by name (KERNEL_ARGUMENTS); split, it cost 1.1 % (0.654 to 0.661 us with photolysis)
 extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
-    // size-limit-ok: split into forced-inline helpers it cost 1.1 % (lit 0.654 to 0.661 us per cell-call), bits equal
     call(const double* __restrict__ x0, const double* __restrict__ Ta, const double* __restrict__ Pa,
          const double* __restrict__ dta, double* __restrict__ hio, double* __restrict__ xout, int* __restrict__ doneo,
          double* __restrict__ noko, int* __restrict__ status, int* __restrict__ count, int B, double rtol, double atol,
@@ -19,17 +19,17 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
   double c[NT];                           // that row: M0, then its LU factors
 #pragma unroll
   for (int j = 0; j < NT; j++) c[j] = 0.0;
-  double* M = smem + grp * PERC;  // M0 by slot, then its LU factors (leading slots, then the block)
-  double *dinv = M + NNZ, *n = dinv + NS + 1, *N = n + NS + 1, *Y = N + NS, *F = Y + NS, *u = F + NS, *K1 = u + NS,
-         *K2 = K1 + NS, *K3 = K2 + NS, *K4 = K3 + NS;
-  // v and part sit in the trailing block's slots, free while that block is in registers, if they fit there (VOFF =
-  // TB0), else after the other arrays
-  double *v = M + VOFF, *part = v + NR;
-  int* nextc = (int*)(K4 + NS);
+  double* M = smem + grp * PERC + C_M;  // M0 by slot, then its LU factors (leading slots, then the block)
+  double *dinv = M + C_DINV, *n = M + C_N0, *N = M + C_NN, *Y = M + C_Y, *F = M + C_F, *u = M + C_U, *K1 = M + C_K1,
+         *K2 = M + C_K2, *K3 = M + C_K3, *K4 = M + C_K4;
+  // v and part sit in the trailing block's slots, free while that block is in registers, if they fit there (C_V =
+  // TB0), else after the other arrays (_tables.call_layout)
+  double *v = M + C_V + CR_V, *part = M + C_V + CR_PART;
+  int* nextc = (int*)(M + C_NEXT);
   double* kf = scratch + ((size_t)blockIdx.x * CPB + grp) * CALL_STRIDE;  // per cell slot: rates, the copy
-  double* kr = kf + NR;
-  double* rsc = kf + 2 * NR + 2;  // F, u, -Jn of the last fresh evaluation (a retry at the same state)
-  if (cl == 0) kf[2 * NR] = 0.0;  // the zero rate of the Jacobian's padding words
+  double* kr = kf + RATE_KR;
+  double* rsc = kf + S_RSC;          // F, u, -Jn of the last fresh evaluation (a retry at the same state)
+  if (cl == 0) kf[RATE_ZERO] = 0.0;  // the zero rate of the Jacobian's padding words
   int cell = (int)(blockIdx.x * CPB + grp);
   while (cell < B) {
     const double Tc = Ta[cell], dt = dta[cell], nd = Pa[cell] / (KBOLTZ * Tc);
@@ -46,19 +46,18 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
     CSYNC(grp);
     const double h0 = isfinite(hio[cell]) ? hio[cell] : dt;  // a non-finite h acts as dt, and is counted
     if (cl == 0 && !isfinite(hio[cell])) atomicAdd(count + COUNT_NONFINITE_H, 1);
-    double h = fmax(fmin(h0, dt), H_MIN), t = 0.0, nok = 0.0, pen = 0.0, pha = 0.0;
-    bool prej = false;                               // the last try was rejected (its err pen, its size pha)
+    StepState step = {fmax(fmin(h0, dt), H_MIN), 0.0, 0.0, 0.0, 0.0, false};
     int it = (dt > 0.0 && st == 0) ? 0 : max_steps;  // no step for a refused cell
-    while (it < max_steps && t < dt * CALL_END) {
-      const double ha = fmin(h, dt - t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
-      if (prej) {
+    while (it < max_steps && step.t < dt * CALL_END) {
+      const double ha = fmin(step.h, dt - step.t), igh = 1.0 / (GAMMA * ha), ih = 1.0 / ha;
+      if (step.prej) {
         // the rejected try's state: its F, u and -Jn, all slots, since v and the S v pieces overwrote the trailing
         // block's
         for (int i = cl; i < NS; i += NL) {
-          F[i] = rsc[i];
-          u[i] = rsc[NS + i];
+          F[i] = rsc[RSC_F + i];
+          u[i] = rsc[RSC_U + i];
         }
-        for (int s = cl; s < NNZ; s += NL) M[s] = rsc[2 * NS + s];
+        for (int s = cl; s < NNZ; s += NL) M[s] = rsc[RSC_JN + s];
       } else {
         const double ntot = rhs(N, F, u, n, v, part, kf, kr, nd, tab, sst, sround, lane, cl, grp);
         for (int s = cl; s < NNZ; s += NL) M[s] = 0.0;
@@ -73,10 +72,10 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
         for (int i = cl; i < NS; i += NL) u[i] = u[i] + jacobian_times_x(i, M, N, tab) / ntot;
         CSYNC(grp);
         for (int i = cl; i < NS; i += NL) {
-          rsc[i] = F[i];
-          rsc[NS + i] = u[i];
+          rsc[RSC_F + i] = F[i];
+          rsc[RSC_U + i] = u[i];
         }
-        for (int s = cl; s < NNZ; s += NL) rsc[2 * NS + s] = M[s];
+        for (int s = cl; s < NNZ; s += NL) rsc[RSC_JN + s] = M[s];
       }
       CSYNC(grp);
       for (int i = cl; i < NS; i += NL) M[tab.diag[i]] += igh;  // M = M0 = I / (gamma h) - Jn
@@ -159,25 +158,18 @@ extern "C" __global__ void __launch_bounds__(NL* CPB, 1)
       }
       // step control (docs/method.md); every warp of the cell reaches the same decision
       bool ok = false;
-      const double en = try_error(N, K1, K3, K4, Y, w0, t == 0.0, rtol, atol, lane, ok);
+      const double en = try_error(N, K1, K3, K4, Y, w0, step.t == 0.0, rtol, atol, lane, ok);
       CSYNC(grp);
-      if (ok) {
-        for (int i = cl; i < NS; i += NL) N[i] = fmax(Y[i], 0.0);
-        t += ha;
-        nok += 1.0;
-      }
+      accept_try(step, N, Y, ok, ha, cl, NL);
       CSYNC(grp);
-      h = ha * step_factor(en, ok, prej, pen, pha, ha);
-      prej = !ok;
-      pen = en;
-      pha = ha;
+      next_try(step, step_factor(en, ok, step.prej, step.pen, step.pha, ha), ok, en, ha);
       it++;
     }
     write_state(N, xout + (size_t)cell * NS, perm, lane, cl, NL);
     if (cl == 0) {
-      hio[cell] = h;
-      doneo[cell] = (st == 0 && t >= dt * CALL_END) ? 1 : 0;  // a refused cell is not done, also at dt = 0
-      noko[cell] = nok;
+      hio[cell] = step.h;
+      doneo[cell] = (st == 0 && step.t >= dt * CALL_END) ? 1 : 0;  // a refused cell is not done, also at dt = 0
+      noko[cell] = step.nok;
     }
     if (cl == 0) *nextc = (int)(gridDim.x * CPB + atomicAdd(count + COUNT_QUEUE, 1));
     CSYNC(grp);

@@ -42,12 +42,12 @@ from ._export import write_export
 from ._kernel_header import call_header, kernel_sources
 from ._solver import Solver, check_inputs, check_photolysis, shared_tables
 from ._tables import (
+    call_layout,
     cells_per_block,
     pack_small_tables,
     rates_fit_in_block,
-    scratch_strides,
-    shared_doubles_per_cell,
-    shared_doubles_recover,
+    recovery_layout,
+    scratch_layout,
     tables_for_device,
 )
 from .kinvulcan import VulcanNetwork
@@ -142,18 +142,19 @@ class CudaSolver(Solver):
         threads = WARP_LANES * self.w
         blob, _ = pack_small_tables(tab)
         # the recover kernel's W in shared memory if it fits
-        wsh = DOUBLE_BYTES * shared_doubles_recover(tab, True) + len(blob) <= prop.shared_memory_per_block_optin
+        wsh = DOUBLE_BYTES * recovery_layout(tab, True)[1] + len(blob) <= prop.shared_memory_per_block_optin
         arch = f"{prop.major}{prop.minor}"
         self._load_packed(tab, wsh, arch, prop)
         self._build = (tab, wsh, arch)  # what export() recompiles
         self._names = (list(net.species), list(net.elements))  # export() writes them
         self.wpb = self.w * self.cpb  # warps per block
-        self.smem = DOUBLE_BYTES * self.cpb * shared_doubles_per_cell(tab) + len(blob)
-        self.smem_rec = DOUBLE_BYTES * shared_doubles_recover(tab, wsh) + len(blob)
+        self.smem = DOUBLE_BYTES * self.cpb * call_layout(tab)[1] + len(blob)
+        self.smem_rec = DOUBLE_BYTES * recovery_layout(tab, wsh)[1] + len(blob)
         blocks = blocks_per_multiprocessor(self._call_kernel, threads * self.cpb, self.smem)
         rec_blocks = blocks_per_multiprocessor(self._recover_kernel, threads, self.smem_rec)
         self.max_blocks, self.rec_blocks = prop.multi_processor_count * blocks, prop.multi_processor_count * rec_blocks
-        self.stride, self.stride_rec = scratch_strides(tab, wsh)
+        self.stride = scratch_layout(tab, False)[1]  # the call kernel's cell slot and the recover kernel's block
+        self.stride_rec = scratch_layout(tab, not wsh)[1]
         self.info = {
             "ns": self.ns,
             "nr": self.nr,

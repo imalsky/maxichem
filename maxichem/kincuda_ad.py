@@ -35,7 +35,7 @@ from ._cuda import (
 )
 from ._kernel_header import derivative_header, kernel_sources
 from ._solver import Solver, check_inputs, check_photolysis, check_tensor, shared_tables, to_device
-from ._tables import pack_small_tables, tables_for_device
+from ._tables import dense_w_doubles, pack_small_tables, tables_for_device
 from .kinvulcan import VulcanNetwork
 
 __all__ = ["ADSolver", "JvpResult", "VjpResult"]
@@ -174,7 +174,7 @@ class ADSolver(Solver):
             "jvp": rates,  # grows with the tangent directions
             "rec": doubles(self._nw["vjp"] * 2 * self.cap * self._sizes["REC"]),
             "rec_recovery": doubles(self._nw["vjp"] * 2 * self._sizes["CAPR"] * self._sizes["REC"]),
-            "wscr": doubles(max(self._nw.values()) * self.ns**2),
+            "wscr": doubles(max(self._nw.values()) * dense_w_doubles(tab)),
         }
         self._tables = {
             **shared_tables(tab, blob, self.dev),
