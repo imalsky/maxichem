@@ -127,13 +127,34 @@ def test_photolysis_check_refuses_each_wrong_j():
     device = torch.device("cpu")
     good = torch.zeros(4, 2, dtype=torch.float64)
     assert _solver.check_photolysis(None, 4, 0, device) is None
+    assert _solver.check_photolysis(good[:, :0], 4, 0, device) is None  # an empty J is no J: the call passes none
     assert torch.equal(_solver.check_photolysis(good, 4, 2, device), good)
-    with pytest.raises(ValueError, match="no photolysis"):
+    with pytest.raises(ValueError, match=r"^J: none or an empty \[4, 0\] one expected, .*; got \[4, 2\]$"):
         _solver.check_photolysis(good, 4, 0, device)
+    with pytest.raises(ValueError, match=r"^J: float64 \[4, 0\]"):
+        _solver.check_photolysis(good[:-1, :0], 4, 0, device)
     with pytest.raises(ValueError, match="required"):
         _solver.check_photolysis(None, 4, 2, device)
     with pytest.raises(ValueError, match=r"^J: float64 \[4, 2\]"):
         _solver.check_photolysis(good[:-1], 4, 2, device)
+
+
+def test_tangent_of_j_follows_the_rule_for_j():
+    ad = object.__new__(kincuda_ad.ADSolver)  # the check reads only the sizes and the device
+    ad.ns, ad.nr, ad.nj, ad.dev = 3, 5, 0, torch.device("cpu")
+    for lead in ((), (2,)):
+        tangents = {
+            "dx": torch.zeros(*lead, 4, 3, dtype=torch.float64),
+            **{name: torch.zeros(*lead, 4, dtype=torch.float64) for name in ("dT", "dP", "ddt", "dh")},
+            "dlm": None,
+            "drc": None,
+        }
+        directions = lead[0] if lead else 1
+        assert ad._check_tangents(tangents | {"dJ": None}, 4) == directions
+        assert ad._check_tangents(tangents | {"dJ": torch.zeros(*lead, 4, 0, dtype=torch.float64)}, 4) == directions
+        empty = re.escape(str([*lead, 4, 0]))
+        with pytest.raises(ValueError, match=rf"^dJ: none or an empty {empty} one expected, .*no photolysis; got"):
+            ad._check_tangents(tangents | {"dJ": torch.zeros(*lead, 4, 2, dtype=torch.float64)}, 4)
 
 
 @pytest.mark.parametrize("drift", [float("nan"), float("inf"), -1e-6])

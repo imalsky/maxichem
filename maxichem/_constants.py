@@ -3,9 +3,9 @@
 The kernels get the call and method settings and the physical constants through their generated header
 (_kernel_header.py), so each value is written once, here. The method is in docs/method.md; a published formula's
 coefficients stay beside the formula in kernels/, and the checks' acceptance bars are in _checks.py. This file holds
-the solver's settings; the coupling's few constants are named in its own modules (coupling/). Hardware limits and file
-formats stay beside the code that meets them (kincuda.py, kinvulcan.py), and cpp/ keeps copies of a few values here,
-held equal by tests/test_constants_source.py.
+the solver's settings; the coupling's few constants are named in its own modules (maxichem/coupling/). Hardware
+limits and file formats stay beside the code that meets them (kincuda.py, kinvulcan.py), and cpp/ keeps copies of a
+few values here, held equal by tests/test_constants_source.py.
 """
 
 # Call settings: what a call accepts, and its defaults.

@@ -54,7 +54,7 @@ KNOWN_MISSES = {
     ("boxes_sncho25", 1939): (  # the states after the calls ending at 7.0e5 s to 1e8 s
         "S2",
         {41: 1.647, 42: 2.394, 43: 2.853, 44: 3.249, 45: 3.622, 46: 3.985, 47: 4.341},
-        "VULCAN's error: a Radau reference is within 0.084 dex of maxichem (notes.md, 2026-11-04 15:47)",
+        'VULCAN\'s error: a Radau reference is within 0.084 dex of maxichem (notes.md, "VULCAN reference errors")',
     ),
     ("boxes_sncho25p", 96): (  # the state after the call ending at 1.9e7 s
         "S2",

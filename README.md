@@ -117,7 +117,7 @@ counts = solver.check()  # guard counts; raises if a cell was outside 300-3000 K
 - The call refuses a cell below 300 K or above 3000 K (the NASA-9 fits reach 6000 K, but accuracy against VULCAN is
   checked only up to 3000 K), or with a non-finite x, T, P or dt, a negative mole fraction (clamp at 0 before
   the call), mole fractions that do not sum to 1 within `kincuda.X_SUM_TOL` = 1e-10 (normalize in float64 before the
-  call), no mole fraction above 0, P <= 0, dt < 0, or a negative or non-finite J: the kernels do not step it, and the
+  call), no mole fraction above 0, P <= 0 or so large that P / (k_B T) overflows, dt < 0, or a negative or non-finite J: the kernels do not step it, and the
   whole call raises ValueError (C++: `std::invalid_argument`) when any cell is refused, naming the count and the first
   cell of each kind. The sum is judged once, in the order the call kernel adds it. Reading the counts back for this is
   the call's one host sync. Inputs of the wrong shape, dtype or device raise before any launch.
@@ -129,7 +129,10 @@ counts = solver.check()  # guard counts; raises if a cell was outside 300-3000 K
   -DPython3_EXECUTABLE=<python with torch> -DCUDAToolkit_ROOT=<CUDA toolkit>`. Check: `tests/test_export_cpp.py` writes
   an export and one call, and compares the C++ call with it bit for bit. Interface change: the C++ solver's sizes,
   names and counts are read-only accessors now (`chem.ns()`, `chem.nj()`, `chem.species()`, `chem.count()`, ...; the
-  tensors come back as copies), and an export without photolysis takes no J or an empty [B, 0] one.
+  tensors come back as copies), and an export without photolysis takes no J or an empty [B, 0] one. The C++ call
+  returns a `maxichem::CallResult`: structured bindings work as before, indexing does not (`r[i]` becomes `r.x`, `r.h`,
+  `r.done`, `r.steps`). In Python, `ADSolver.vjp`'s cotangents are a `Cotangents` named tuple, not a dict
+  (`cotangents["x"]` becomes `cotangents.x`).
 
 ## Accuracy
 

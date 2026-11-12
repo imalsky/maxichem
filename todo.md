@@ -22,7 +22,7 @@ Tasks put off to return to, with the date deferred.
   - Bug: heat = -(A_top F_top - A_bot F_bot) / V with the column's plane-parallel fluxes gives a false 2 F / r per volume on
     the sphere. It cools the night side and heats the day side, most near the lid, and crashed 140 layers.
   - Correct form: heat = -(F_top - F_bot) / dz.
-  - State: `coupling/radiation.py` holds the correct form and the per-column budget check, with tests that fail on the old form
+  - State: `maxichem/coupling/radiation.py` holds the correct form and the per-column budget check, with tests that fail on the old form
     (notes.md, 2026-11-07 21:49). The three experiment drivers use it; only the box driver has run with it.
   - Still needed: run the sphere drivers (the rerun below); use the same form in the C++ sphere coupling when it is written.
 - 2026-11-05. Rerun the sphere work with the corrected heating formula (notes.md, 2026-11-05 18:53), after the code cleanup.

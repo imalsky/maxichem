@@ -147,7 +147,7 @@ Each cell's arithmetic depends only on its inputs, so results are bitwise reprod
 
 The kernel that steps a cell (the call kernel, or a derivative kernel) screens it once, before stepping, and writes the result
 as the cell's status: 0, or why it is refused. Refused are bad input (a negative or non-finite x, $|\sum_i x_i - 1| >$
-`X_SUM_TOL`, no x above 0, a non-finite T, P <= 0, a negative or non-finite dt, a negative or non-finite J) and cells below
+`X_SUM_TOL`, no x above 0, a non-finite T, a non-finite P, P <= 0 or a P so large that the number density $P / (k_B T)$ overflows, a negative or non-finite dt, a negative or non-finite J) and cells below
 `T_MIN` or above `T_MAX`. A refused cell is not stepped and is not done, also at dt = 0. The guard counts the refused cells
 from their status, without screening them again, and does not list them for recovery; the recovery steps only listed cells.
 So the sum, which depends on the order it is added in, is judged once, in the screening kernel's order. The kernels' state is N,

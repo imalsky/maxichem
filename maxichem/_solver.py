@@ -71,13 +71,23 @@ def check_inputs(
 
 
 def check_photolysis(J: torch.Tensor | None, cells: int, branches: int, device: torch.device) -> torch.Tensor | None:
-    """Return the call's J; refuse a missing J, or one given to a solver without photolysis or of the wrong form."""
+    """Return the call's J, None without photolysis; refuse a J that breaks the rule of docs/api.md.
+
+    Without photolysis the call takes no J or an empty one, [B, 0]; with it, J [B, branches] is required. The C++
+    caller (cpp/maxichem.cpp) gives the same two rule messages; its form message differs in the dtype's name.
+    """
     if not branches:
-        if J is not None:
-            raise ValueError("J given, but this solver has no photolysis (built with photo=False)")
+        if J is None:
+            return None
+        if J.dim() != 2 or J.shape[1] != 0:
+            raise ValueError(
+                f"J: none or an empty [{cells}, 0] one expected, since this solver has no photolysis; got "
+                f"{list(J.shape)}"
+            )
+        check_tensor("J", J, (cells, 0), device)
         return None
     if J is None:
-        raise ValueError(f"J [B, {branches}] is required with photo=True: pass zeros for dark cells")
+        raise ValueError(f"J [B, {branches}] is required with photolysis: pass zeros for dark cells")
     check_tensor("J", J, (cells, branches), device)
     return J.contiguous()
 
@@ -207,8 +217,9 @@ class Solver:
             )
             problems.append(
                 f"{n['bad_input']} cells of bad input: x negative or non-finite, |sum(x) - 1| above {X_SUM_TOL:g} "
-                f"or no x above 0; T non-finite, P not above 0, dt negative or non-finite, or J negative or "
-                f"non-finite (first: {where}); pass x normalized to sum 1 in float64, clamped at 0"
+                "or no x above 0; T non-finite, P non-finite, not above 0 or so large that P / (k_B T) overflows, dt "
+                f"negative or non-finite, or J negative or non-finite (first: {where}); pass x normalized to sum 1 in "
+                "float64, clamped at 0"
             )
         raise ValueError("the call refused cells: " + "; ".join(problems))
 

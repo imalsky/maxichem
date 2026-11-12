@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 
-from maxichem import _constants, paths
+from maxichem import _constants, _solver, paths
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
@@ -51,6 +52,10 @@ def test_cpp_call_is_the_python_call(export_program, tmp_path, network, photo, t
     assert "bitwise identical" in result.stdout
     assert ("(default arguments)" in result.stdout) == (tries == _constants.DEFAULT_MAX_STEPS)
     assert ("J [B, 0] gives the same bits, J [B, 1] refused" in result.stdout) == (photo == 0)
+    if not photo:  # the C++ call refuses the [B, 1] J with the Python call's message
+        with pytest.raises(ValueError, match="no photolysis") as python:
+            _solver.check_photolysis(torch.zeros(CELLS, 1, dtype=torch.float64), CELLS, 0, torch.device("cpu"))
+        assert f"(maxichem: {python.value})" in result.stdout
     assert "accessors return copies" in result.stdout
 
 
@@ -109,8 +114,7 @@ CONTRACT_EDITS = {
 
 @pytest.mark.parametrize("edit", CONTRACT_EDITS)
 def test_cpp_refuses_another_kernel_contract_at_construction(export_program, tmp_path, edit):
-    # before, a name only the recovery takes was found missing after the call kernel had run, and a repeated, missing
-    # or misplaced known name, or J on the guard, was not found at all
+    # the constructor refuses each edit before any kernel runs, also one in the list of the recovery, which runs last
     paths.need(paths.vulcan_thermo())
     kernel, old, new, message = CONTRACT_EDITS[edit]
     case = [sys.executable, ROOT / "tests" / "cpp_export_case.py", tmp_path, 64, 1, FORCED_TRIES]

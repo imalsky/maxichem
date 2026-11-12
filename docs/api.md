@@ -48,8 +48,11 @@ branches enter the call, which then takes J. Calls run one at a time on torch's 
 | `info` | The kernel's layout |
 | `close()` | Unloads the kernels and drops the tables and scratch; the counts stay readable |
 
-J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells) and refused
-without it.
+J is [B, len(net.photo)], columns in `net.photo`'s order. It is required with `photo=True` (pass zeros for dark cells). Without
+photolysis a call takes no J or an empty one, [B, 0], and refuses a J with columns. The C++ caller follows the same rule; there an
+undefined tensor is no J. Its messages for a J with columns without photolysis and for a missing J are the Python ones after its
+"maxichem: " prefix; its message for a J of the wrong dtype, shape or device names the same fault in libtorch's words for the dtype
+(`Float` where Python says `torch.float32`).
 
 The results are named tuples, so `x, h, done, steps = solver(...)` and indexing work as before:
 
@@ -65,7 +68,7 @@ constructors' optional arguments are keyword only too: `CudaSolver(net, device, 
 write `drift=` and `photo=` (and `cap=` for `ADSolver`).
 
 A cell is refused when it is bad input (a negative or non-finite mole fraction, |sum(x) - 1| above `X_SUM_TOL`, no mole fraction
-above 0, a non-finite T, P <= 0, a negative or non-finite dt, or a negative or non-finite J) or outside [`T_MIN`, `T_MAX`] (counted
+above 0, a non-finite T, a non-finite P, P <= 0 or a P so large that the number density P / (k_B T) overflows, a negative or non-finite dt, or a negative or non-finite J) or outside [`T_MIN`, `T_MAX`] (counted
 as cold or hot). The kernel that steps the cell decides this once (method.md, "Refused cells"); it does not step the cell, and the
 guard counts it. After the kernels, `launch` and a call read the counts back, the call's one host sync, and raise ValueError when any
 cell was refused, naming the count of each kind, the limits and the first refused cell of each kind with its values. The counts are
@@ -86,8 +89,13 @@ A non-finite h acts as dt and is counted in `nonfinite_h`. `launch` and a call b
 
 Everything after the required tensors (after `dh` in `jvp`, after `gx` in `vjp`) is keyword only. The results are named tuples:
 `JvpResult` holds `CallResult`'s fields, then `dx` ([B, S], or [D, B, S] with a leading axis of directions) and `dh` ([B] or [D, B],
-s); `VjpResult` holds `CallResult`'s fields, then `cotangents`, a dict: x [B, S], T [B], P [B], dt [B], h [B], lm [B, R], rc [R, 9]
-and, with `photo=True`, J [B, branches], each per unit of its input. The per-cell flag is `flag`, as in `CudaSolver`.
+s); `VjpResult` holds `CallResult`'s fields, then `cotangents`, a `Cotangents` named tuple with one field per input: x [B, S],
+T [B], P [B], dt [B], h [B], lm [B, R], rc [R, 9] and J [B, branches] (None without photolysis), each per unit of its input. The tangent dJ follows J's rule: without photolysis
+none or an empty one, [B, 0] or [D, B, 0], and a dJ with columns is refused. The per-cell flag is `flag`, as in `CudaSolver`.
+
+Interface change: `cotangents` was a dict of str to tensor. Write `cotangents.x` for `cotangents["x"]`, and
+`cotangents._asdict()` where code looped over its keys; without photolysis J is a field holding None, where the dict had no
+key "J".
 
 A non-finite log multiplier in `lm` takes no try: its cell comes back with done 0, flag 2 and NaN derivatives, counted as unfinished,
 recomputed and still failed.
@@ -104,15 +112,14 @@ With a leading axis of at most `DMAX` directions on every tangent, the direction
 ## Constants in `kincuda`
 
 `ATOL`, `DRIFT`, `REC_STEPS`, `T_MIN`, `T_MAX`, `X_SUM_TOL`, `COUNTS`. The result types are `kincuda.CallResult`,
-`kincuda.LaunchResult`, `kincuda_ad.JvpResult` and `kincuda_ad.VjpResult`.
+`kincuda.LaunchResult`, `kincuda_ad.JvpResult`, `kincuda_ad.VjpResult` and `kincuda_ad.Cotangents`.
 
 ## C++: `maxichem::Solver(folder, device)`
 
-Loads an export from `cpp/maxichem.hpp`. `chem(x, T, P, dt, h, J, rtol, atol, max_steps)` returns the new mole fractions, the next
-step sizes, done and the accepted steps. A negative `atol` takes the export's default. It refuses the cells `CudaSolver` refuses,
-with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits. A defined J must be float64
-[B, `nj()`] on the device; an export without photolysis (`nj()` 0) takes an undefined J or an empty [B, 0] one, and refuses any
-other. Before any CUDA work, the constructor checks each kernel's argument list in `meta.txt` against the one the call passes
+Loads an export from `cpp/maxichem.hpp`. `chem(x, T, P, dt, h, J, rtol, atol, max_steps)` returns a `maxichem::CallResult`, a
+struct with `CallResult`'s fields `x`, `h`, `done` and `steps`, so `auto [x1, h1, done, steps] = chem(...)` works. A negative `atol` takes the export's default. It refuses the cells `CudaSolver` refuses,
+with the same message, as `std::invalid_argument`; the export's `meta.txt` carries the limits. J follows `CudaSolver`'s rule
+above. Before any CUDA work, the constructor checks each kernel's argument list in `meta.txt` against the one the call passes
 (`KERNEL_ARGUMENTS`, with J last for call and recover with photolysis): an unknown, missing, repeated or misplaced name, or J on
 the guard, is refused as `std::runtime_error` naming the kernel and the argument.
 
@@ -130,3 +137,6 @@ than calling it in a hot loop.
 Interface change: these were public data members (`chem.ns`, `chem.nj`, `chem.species`, `chem.elements`, `chem.default_atol`,
 `chem.count`, `chem.total`); write them with `()`. The call trusts them and its kernels write to the counts, so a caller can no
 longer rebind or resize them.
+
+Interface change: the call returned `std::array<torch::Tensor, 4>`; it returns `maxichem::CallResult` now. Structured bindings
+compile as before; indexing (`r[0]`, `r[3]`) does not: write `r.x`, `r.h`, `r.done`, `r.steps`.

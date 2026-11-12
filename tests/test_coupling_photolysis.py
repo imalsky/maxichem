@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from coupling.photolysis import nearest_layer_rates
+from maxichem.coupling.photolysis import nearest_layer_rates
 
 TABLE_P = torch.tensor([1.0e1, 1.0e3, 1.0e5], dtype=torch.float64)  # Pa
 TABLE_J = torch.tensor([[3.0, 30.0], [2.0, 20.0], [1.0, 10.0]], dtype=torch.float64)  # s^-1

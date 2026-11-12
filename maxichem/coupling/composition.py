@@ -22,7 +22,8 @@ __all__ = [
     "tracer_totals",
 ]
 
-GAS_CONSTANT = 8.314462618  # J mol^-1 K^-1, CODATA (exact); kintera, which snapy's EOS uses, has 8.31446 (3e-7 lower)
+# J mol^-1 K^-1: k_B N_A, exact in the SI. kintera, which snapy's EOS uses, has 8.31446 (3e-7 lower).
+GAS_CONSTANT = 8.31446261815324
 
 # kg/mol: pyharp's atomic weights (harp/element.cpp), so the tracers and the dynamics' gas weigh atoms alike
 ATOMIC_MASS = {"H": 1.008e-3, "He": 4.002602e-3, "C": 12.011e-3, "N": 14.007e-3, "O": 15.999e-3, "S": 32.06e-3}
@@ -85,7 +86,7 @@ def molar_masses(atoms: np.ndarray | torch.Tensor, elements: Sequence[str]) -> t
     """
     missing = [e for e in elements if e not in ATOMIC_MASS]
     if missing:
-        raise ValueError(f"no atomic mass for {missing}: add them to coupling.composition.ATOMIC_MASS")
+        raise ValueError(f"no atomic mass for {missing}: add them to maxichem.coupling.composition.ATOMIC_MASS")
     a = torch.as_tensor(atoms, dtype=torch.float64).cpu()
     if a.dim() != 2 or a.shape[1] != len(elements):
         raise ValueError(f"atoms must be [species, {len(elements)}], got shape {tuple(a.shape)}")
@@ -114,6 +115,8 @@ def mass_to_mole(q: torch.Tensor, mw: torch.Tensor) -> torch.Tensor:
         Mole fractions, summing to 1 in each cell.
     """
     _check_cells("q", q, mw)
+    if q.dtype != mw.dtype:
+        raise ValueError(f"q and mw must share one precision, got {q.dtype}, {mw.dtype}")
     if bool((q < 0).any()):
         raise ValueError(f"q holds negatives, the least {float(q.min()):.3g}: clamp them before the conversion")
     n = q / mw
@@ -142,6 +145,8 @@ def signed_mole_fractions(q: torch.Tensor, mw: torch.Tensor) -> torch.Tensor:
         n / sum(n) with n = q / mw, summing to 1 in each cell.
     """
     _check_cells("q", q, mw)
+    if q.dtype != mw.dtype:
+        raise ValueError(f"q and mw must share one precision, got {q.dtype}, {mw.dtype}")
     n = q / mw
     return n / n.sum(1, keepdim=True)
 
@@ -165,6 +170,8 @@ def mole_to_mass(x: torch.Tensor, mw: torch.Tensor, mass: torch.Tensor) -> torch
     """
     _check_cells("x", x, mw)
     _check_per_cell("mass", mass, x.shape[0])
+    if not (x.dtype == mw.dtype == mass.dtype):
+        raise ValueError(f"x, mw and mass must share one precision, got {x.dtype}, {mw.dtype}, {mass.dtype}")
     if bool((x < 0).any()):
         raise ValueError(f"x holds negatives, the least {float(x.min()):.3g}: the call's result is not usable")
     xm = x * mw
@@ -247,7 +254,9 @@ def start_mole_fractions(species: Sequence[str], elements: Sequence[str]) -> tor
     """
     unknown = [e for e in elements if e not in _CARRIER]
     if unknown:
-        raise ValueError(f"the network has elements {unknown} with no start carrier: add one to coupling.composition")
+        raise ValueError(
+            f"the network has elements {unknown} with no start carrier: add one to maxichem.coupling.composition"
+        )
     need = [e for e in _CARRIER if e in elements or e not in _OPTIONAL]
     lacking = [f"{_CARRIER[e]} (for {e})" for e in need if _CARRIER[e] not in species]
     if lacking:

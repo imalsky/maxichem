@@ -2,8 +2,9 @@
 
 A cell the call did not finish holds a state for the wrong elapsed time, so the run stops; the message names the cause
 from the call's own counts, and the fix that matches it. The call itself raises on refused cells (cold, hot, bad
-input), so here those are seen only where that raise was switched off; the cells left are those still failing after
-the recovery. docs/architecture.md places this module.
+input) before it returns, so after a real call those counts are 0 here, and the cells left are those still failing
+after the recovery. The causes named for those three counts serve counts from a solver whose raise is replaced, as in
+the tests. docs/architecture.md places this module.
 """
 
 from collections.abc import Mapping
@@ -37,7 +38,8 @@ def _causes(counts: Mapping[str, int]) -> list[str]:
     if counts.get("bad_input"):
         out.append(
             f"{counts['bad_input']} cell(s) with bad input (non-finite or negative mole fractions, |sum(x) - 1| above "
-            f"{X_SUM_TOL:g}, none above 0, P <= 0, a non-finite T, dt < 0 or a bad J). The driver's inputs to the "
+            f"{X_SUM_TOL:g}, none above 0, P non-finite, P <= 0 or P / (k_B T) overflowing, a non-finite T, dt < 0 "
+            "or a bad J). The driver's inputs to the "
             "call are wrong there: check the cells' tracers, their normalization, T and P"
         )
     if counts.get("still_failed"):

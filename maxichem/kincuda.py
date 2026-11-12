@@ -255,8 +255,8 @@ class CudaSolver(Solver):
         max_steps : int
             Tries per call, keyword only; the recovery has ``REC_STEPS`` times as many.
         J : torch.Tensor, optional
-            Photolysis rates [B, branches] in s^-1, keyword only: required with ``photo=True``, refused without it.
-            Dark cells pass zeros.
+            Photolysis rates [B, branches] in s^-1, keyword only: required with ``photo=True`` (dark cells pass
+            zeros); without photolysis None or an empty [B, 0] J, and a J with columns is refused.
 
         Returns
         -------
@@ -345,7 +345,7 @@ class CudaSolver(Solver):
         max_steps : int
             Tries per call, keyword only; the recovery has ``REC_STEPS`` times as many.
         J : torch.Tensor, optional
-            Photolysis rates [B, branches] in s^-1, keyword only: required with ``photo=True``, refused without it.
+            Photolysis rates [B, branches] in s^-1, keyword only, as ``launch``.
 
         Returns
         -------

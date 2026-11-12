@@ -20,12 +20,13 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
 ### Code
 - maxichem solves a VULCAN-format network as a batched 0-D solver: one call per cell per GCM step. The whole call
   (rates, every step, the step control) runs in one CUDA kernel, generated from the network and compiled at run time
-  (NVRTC). Persistent warps take cells from a queue; no host loop and no host sync.
+  (NVRTC). Persistent warps take cells from a queue; no host loop. Each call reads its counts back once (its one
+  host sync), so it can raise on refused cells.
 - Default network: VULCAN-JAX's NCHO_photo (69 species, 390 thermal reactions, 48 photolysis branches). All 11
   VULCAN-JAX networks load and run (4,096 cells, 21 calls: 0 unfinished, 0 failed, element shares within 3.8e-11). The
   generator caps a network at 254 species. The sulfur network is SNCHO_photo_network_2025 (91 species, 4 warps per
   cell; since 2026-11-04, replacing SNCHO_photo, 88 species).
-- Production numerics: the module docstring of maxichem/kincuda.py holds every setting. In short: Rodas3; a sparse LU
+- Production numerics: maxichem/_constants.py holds every setting. In short: Rodas3; a sparse LU
   without pivoting in a minimum-degree order; rtol 1e-3; atol 1e-25 (kincuda.ATOL); the step size carried between calls;
   the first try judged by its worst species; the V3F step rule; the collision limit on rates; a guard and a device-side
   recovery (40,000 tries). Why each: the topics below.
@@ -418,8 +419,8 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
   contract (A0c: the entering step size held) was tested in the torch reference only; its dt derivative tracks A's
   within p90 2.1e-4; not in the kernels.
 - Recovered cells: the derivative kernels redo the cells the guard flags as the recover kernel does and differentiate
-  that path. A cell that still fails gets NaN derivatives and is counted. The derivative calls have no host sync (guard
-  counts stay on the device).
+  that path. A cell that still fails gets NaN derivatives and is counted. As the call, each derivative call reads its counts
+  back once (one host sync), to raise on refused cells.
 - Cost (53-species network, idle GPU, state advanced every call): JVP / VJP 2.3-3.5x the forward call; ~0.80 / 0.78 us
   per cell-call at 1 M cells. Not remeasured on the current networks.
 - The starting-step derivative of ill-conditioned 300 K cold cells is not computable in fp64: an independent torch
@@ -2248,6 +2249,57 @@ per-cell setup for the tangent and adjoint kernels would take about 18 arguments
   per stage changed jvp's code in 4 variants and was not kept. The int region equals the old carving in 36 of 36
   cases. Checks after: CPU 115 passed, tests/test_size_limits.py 4 passed, pre-commit on the changed files passes. No
   GPU check was rerun, since no machine code changed.
+
+### 2026-11-11 10:36 to 14:55: interface fixes from a review of main; coupling/ moved into the package
+On main, from 10a3b08, then merged with origin/main 980a189 (the collision limit's rule; one doc conflict, both sides
+kept). No number moves and no reference was regenerated; no kernel file changed in this work (`git diff origin/main --
+maxichem/kernels` is empty after the merge).
+- Package. `coupling/` is `maxichem/coupling/` (`maxichem.coupling`), shipped in the wheel (the built wheel holds its six
+  files); `import maxichem` imports none of it and no torch. The 11 experiment drivers that imported `coupling.*` import
+  `maxichem.coupling.*` (28 import lines; nothing else changed in them). Two error messages name the new module path.
+- J, one rule in Python and C++, with the same messages. Without photolysis a call takes no J or an empty [B, 0] one and
+  refuses a J with columns; with photolysis J [B, nj] is required. Python had refused [B, 0], which the C++ call took. An
+  empty J reaches the kernels as no J.
+- C++ (breaking). The call returns `maxichem::CallResult {x, h, done, steps}`, not `std::array<torch::Tensor, 4>`:
+  structured bindings compile as before, indexing does not (`r[0]` becomes `r.x`). The C++ box driver of
+  experiments/2026-11-05_e2e (`prefix_drivers/box.cpp`) indexes the result and will need the names.
+- Python (breaking). `VjpResult.cotangents` is `kincuda_ad.Cotangents` (x, T, P, dt, h, lm, rc, J; J None without
+  photolysis), not a dict: `cotangents["x"]` becomes `cotangents.x`.
+- Refusal message. The kernel refuses a cell whose P / (k_B T) is not finite: P = inf or NaN, or a finite P whose density
+  overflows (1e300 dyn cm^-2 at any T of the range). The message (Python and C++), the coupling stop and the docs named only
+  P not above 0; they name all three. Which cells are refused is unchanged. The C++ message keeps its "maxichem: " prefix,
+  as every C++ message has; the test strips it.
+- Coupling. The gas constant is k_B N_A, 8.31446261815324 J/mol/K (it was 8.314462618, 1.8e-11 relative lower; no test or
+  stored reference read the digits). `mass_to_mole` and `mole_to_mass` refuse mixed precisions, as `element_moles` did. A
+  start column whose grid holds a tuple loads (its JSON record read the tuple back as a list, so it was always refused),
+  and a malformed record raises FlowFileError (see the review round below for the cases this first form missed). The stop's docstring says the cold, hot and
+  bad-input causes serve only a solver whose raise is replaced (there is no public switch); the branches stay.
+- Tests. The kernel-copies case of rejected tries is shown to take that branch: 72 accepted steps, and the test asserts
+  the cell is still unfinished at 73 tries (steps + 1); a case starting with a short step fails the assertion. An assertion that could not fail was dropped from the
+  interface test, and comments that told history say what is checked.
+- Shown to fail without the change: the J rule (Python; and the C++ thermal export's refusal message, 2 of 2), the named
+  C++ result (the new test does not compile on the old header), the cotangents type (import), the P message (2 of 2
+  networks), the gas constant and the precision refusal, the flow-file tuple and records (4 of 4).
+- Checks on the merged head 8386d2d: CPU 134 passed; slow CPU 4 passed; parity and guard 50 passed in 254 s (worst
+  7.7e-8 dex); test_vulcan_truth 2 passed in 211 s (NCHO boxes 0 misses, worst 0.014 dex; paths 0 misses, worst 0.004
+  dex; sulfur: the two pinned misses held, paths worst 0.007 dex); test_export_cpp 19 passed in 552 s, bitwise on every
+  case; test_ad 81 passed in 1022 s, 0 FAIL. The known-answer tier (collision limit, known answers, rate laws, order,
+  kernel copies, dense LU) failed 1 of 26: `test_known_answers.py` still read the cotangents as a dict; fixed after, and
+  the tier rerun on the fixed head fbf7cd6: 26 passed in 379 s; CPU 134 passed there.
+- Review round (an independent review of 7ca5b7e; nothing blocked on behaviour). (1) Only the two J rule messages are the
+  same in Python and C++; the form message names the dtype in each language's words (`torch.float32`, `Float`): docs and
+  comments say so. (2) `jvp`'s dJ follows J's rule: without photolysis none or an empty [B, 0] / [D, B, 0] one, which
+  counts as none; one with columns is refused in the J rule's words (it refused every dJ before). (3) Flow files: a molar
+  mass that is not a number (TypeError from math.isclose) and a column record that is not JSON (JSONDecodeError) raise
+  FlowFileError; a grid holding numpy scalars saves and loads (a column raised TypeError from json.dumps, and a flow saved
+  with one failed torch's weights_only load); both record and compare the grid as JSON reads it back, and a numpy integer
+  nz is a layer count. (4) `signed_mole_fractions` refuses mixed precisions. (5) README names the two breaking changes.
+  (6) test_ad's loops over the cotangents skip a None field (J without photolysis; latent, every fixture is lit).
+  Shown failing on the code before: the dJ rule (the CPU test and the GPU test of an empty J and dJ, both on the old
+  check), the flow-file records and numpy grid (2 of 2), the signed mole fractions' precision. Checks on 671c55e: CPU 137
+  passed; slow CPU 4 passed; parity and guard 51 passed in 321 s (worst 7.7e-8 dex); the known-answer tier 26 passed in
+  370 s; test_vulcan_truth 2 passed in 206 s (NCHO boxes 0 misses, worst 0.014 dex; paths worst 0.004 dex; sulfur pins
+  held, paths worst 0.007 dex); test_export_cpp 19 passed in 521 s, bitwise on every case; test_ad 81 passed in 1029 s.
 
 ### 2026-11-11 11:00 to 17:02: the recovery's retries, a drifting recomputed cell tried again with a smaller first try (experiments/2026-11-10_truth_v3)
 Branch recovery-retry from 980a189. A numerics change of the recovery alone: the call and guard kernels compile to the

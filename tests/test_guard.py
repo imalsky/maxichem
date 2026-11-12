@@ -181,6 +181,24 @@ def test_bad_inputs_are_refused(parity, verdict, monkeypatch):
     )
 
 
+def test_non_finite_and_overflowing_pressures_are_refused_and_named(parity, verdict):
+    # the kernel refuses a cell whose number density P / (k_B T) is not finite: P = inf, NaN, and a finite P so large
+    # that the density overflows (1e300 dyn cm^-2 does at every T of the solver's range)
+    cells = 4
+    x0, T, P = parity.starts(cells, 1, 0.0)
+    p_bad = P.clone()
+    p_bad[1:] = helpers.tensor([float("inf"), float("nan"), 1e300], parity.device)
+    named = r"^the call refused cells: 3 cells of bad input: .*P non-finite, not above 0 or so large that P / \(k_B T\)"
+    with pytest.raises(ValueError, match=rf"{named} overflows.*first: cell 1:") as raised:
+        parity.solver(x0, T, p_bad, parity.full(cells, 50.0), parity.full(cells, 1e-10))
+    counts = dict(parity.solver.fallback)
+    verdict(
+        "guard: P = inf, NaN and 1e300 dyn cm^-2 refused as bad input, the cause named",
+        counts["bad_input"] == 3,
+        f"counts {counts}; ValueError: {raised.value}",
+    )
+
+
 def test_just_outside_the_range_is_refused_and_named(parity, verdict, monkeypatch):
     # T one float64 step outside each end, with dt = 0 and dt > 0: every such cell is refused, named and not done.
     x0, _, P = parity.starts(4, 2, 1.0)
@@ -202,8 +220,9 @@ def test_just_outside_the_range_is_refused_and_named(parity, verdict, monkeypatc
 
 
 def test_sum_on_the_tolerance_is_judged_once(parity, verdict):
-    # The call's warp and the guard add x in different orders. A sum just above X_SUM_TOL in the warp's order and just
-    # below it in the network's order is refused; the opposite cell is accepted and stepped. Each is judged once.
+    # The call kernel's warp adds x in its own order, not the network's, and only that sum is judged. A sum just above
+    # X_SUM_TOL in the warp's order and just below it in the network's order is refused; the opposite cell is accepted
+    # and stepped.
     cells = 16
     x0, T, P = parity.starts(cells, 3, 0.0)
     perm = [int(q) for q in parity.solver._tables["perm"].tolist()]
@@ -300,6 +319,22 @@ def test_closed_solver_refuses_a_call(parity, tmp_path):
         solver(x, T, P, parity.full(8, 1.0), parity.full(8, 1.0))
     with pytest.raises(RuntimeError, match="closed"):
         solver.export(tmp_path)
+
+
+def test_empty_j_and_dj_are_none_without_photolysis(read_network, gpu):
+    net = read_network("synthetic_small")
+    cells = 4
+    x = helpers.state(net, cells, gpu, H=0.1, H2=0.6, OH=0.05, H2O=0.1, O=0.05, He=0.1)
+    T, P, dt, h = (helpers.full(cells, q, gpu) for q in (1500.0, 1e6, 1e-3, 1e-3))
+    tangents = (torch.ones_like(x), torch.ones_like(T), *(torch.zeros_like(T) for _ in range(3)))
+    empty = torch.zeros(cells, 0, dtype=torch.float64, device=gpu)
+    with kincuda.CudaSolver(net, gpu) as solver:
+        assert all(map(torch.equal, solver(x, T, P, dt, h), solver(x, T, P, dt, h, J=empty)))
+    with kincuda_ad.ADSolver(net, gpu) as ad:
+        none = ad.jvp(x, T, P, dt, h, *tangents)
+        assert all(map(torch.equal, none, ad.jvp(x, T, P, dt, h, *tangents, J=empty, dJ=empty)))
+        with pytest.raises(ValueError, match=r"^dJ: none or an empty \[4, 0\] one expected"):
+            ad.jvp(x, T, P, dt, h, *tangents, J=empty, dJ=torch.zeros(cells, 1, dtype=torch.float64, device=gpu))
 
 
 def test_closed_solver_refuses_its_rate_table(read_network, gpu):
@@ -438,7 +473,7 @@ def test_retried_cell_has_the_derivatives_of_its_retry(gpu):
             flags = [-1 if f is None else int(f[0]) for f in flags]
             same = all(torch.equal(getattr(r, k), getattr(ref, k)) for r in runs for k in ("x", "h", "done", "steps"))
             t_dt, t_h = (float((c * r.dx).sum()) for r in runs[:2])
-            g_dt, g_h = (float(runs[2].cotangents[k][0]) for k in ("dt", "h"))
+            g_dt, g_h = (float(getattr(runs[2].cotangents, k)[0]) for k in ("dt", "h"))
             print(
                 f"h {float(h[0]):.4e}: flags {flags}, primal bitwise {same}; <c, dx/ddt> {t_dt:.6e}, d/ddt "
                 f"{g_dt:.6e} (relative {abs(t_dt - g_dt) / abs(t_dt):.1e}); along h {t_h}, d/dh {g_h}"

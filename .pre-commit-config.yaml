@@ -33,7 +33,7 @@ repos:
     rev: "v2.4.0"
     hooks:
       - id: mypy
-        files: ^(maxichem|coupling|tests)/
+        files: ^(maxichem|tests)/
         args: []
         additional_dependencies:
           - numpy
