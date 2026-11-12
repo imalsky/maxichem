@@ -389,26 +389,60 @@ def test_drift_beyond_the_allowance_is_flagged(read_network, gpu):
     assert counts["drift"] == counts["recomputed"] == sum(r > 1.0 for r in DRIFTS)
 
 
-def test_one_step_call_whose_recovery_drifts_is_retried(gpu):
-    # Box 98666's last call (tests/data/recovery_box98666.json): one step of 5.6e7 s from its first try, the guard
-    # flags the element drift, and the recovery's own one step drifts again. Its retry from the inputs with a smaller
-    # first try passes.
+def _box98666(gpu):
+    """Return box 98666's last call of the NCHO truth: its network, then x, T, P, dt, h and J as one-cell tensors."""
     case = json.loads((Path(__file__).parent / "data" / "recovery_box98666.json").read_text())
     thermo = paths.vulcan_thermo()
     net = kinvulcan.VulcanNetwork(thermo / case["network"], thermo / "NASA9", species=case["species"])
     J = [case["J"][f"{r['absorber']},{r['branch']}"] for r in net.photo]
+    inputs = [helpers.tensor([case["x"]], gpu)] + [helpers.full(1, case[k], gpu) for k in ("T", "P", "dt", "h")]
+    return net, *inputs, helpers.tensor([J], gpu)
+
+
+def test_one_step_call_whose_recovery_drifts_is_retried(gpu):
+    # Box 98666's last call: one step of 5.6e7 s from its first try, the guard flags the element drift, and the
+    # recovery's own one step drifts again. Its retry from the inputs with a smaller first try passes.
+    net, x, T, P, dt, h, J = _box98666(gpu)
     with kincuda.CudaSolver(net, gpu, photo=True) as solver:
-        y, _, done, _, flag = solver.launch(
-            helpers.tensor([case["x"]], gpu),
-            helpers.full(1, case["T"], gpu),
-            helpers.full(1, case["P"], gpu),
-            helpers.full(1, case["dt"], gpu),
-            helpers.full(1, case["h"], gpu),
-            J=helpers.tensor([J], gpu),
-        )
-        counts, allowance = dict(solver.fallback), solver.drift
-    shares = [(np.asarray(v) @ net.atoms) / (np.asarray(v) @ net.atoms).sum() for v in (case["x"], y[0].cpu().numpy())]
-    moved = float(np.abs(shares[1] / shares[0] - 1.0).max())
-    print(f"flag {int(flag[0])}, done {bool(done[0])}, shares moved {moved:.2e} of {allowance:.0e}; {counts}")
+        y, _, done, _, flag = solver.launch(x, T, P, dt, h, J=J)
+        counts = dict(solver.fallback)
+    print(f"flag {int(flag[0])}, done {bool(done[0])}, finite {bool(torch.isfinite(y).all())}; {counts}")
     assert (int(flag[0]), bool(done[0]), counts["recovered"], counts["still_failed"]) == (1, True, 1, 0)
-    assert moved <= allowance
+
+
+RETRY_DOT = 1e-6  # relative, test_ad.py's DOT_P99: both sides are rounding apart, measured 2.0e-11; a wrong cap weight
+# in either kernel moved one side by 1.6 times its size
+
+
+def test_retried_cell_has_the_derivatives_of_its_retry(gpu):
+    # The same call through jvp and vjp, which must redo the retry: the result bitwise launch's, and the derivatives of
+    # the pass that passed, whose first try dt REC_RETRY_SPLIT is capped. The result then does not depend on h, also
+    # at h = dt, where the first pass would give h half of the first try's sensitivity; dt carries it, so the dt
+    # tangent and cotangent must agree. Central differences cannot judge them: the result moves by about 1e-10 per
+    # ln dt, below the differences' rounding, and dt + 1 % passes in the first recovery pass.
+    net, x, T, P, dt, h0, J = _box98666(gpu)
+    rn = torch.Generator(device=gpu).manual_seed(7)
+    zero, dJ = torch.zeros_like(T), torch.zeros_like(J)
+    with kincuda.CudaSolver(net, gpu, photo=True) as kc, kincuda_ad.ADSolver(net, gpu, photo=True) as ad:
+        for h in (h0, dt):  # h above dt (the stored state), and the tie
+            ref = kc.launch(x, T, P, dt, h, J=J)
+            c = torch.where(ref.x > 1e-20, torch.randn(ref.x.shape, generator=rn, dtype=torch.float64, device=gpu), 0.0)
+            c = c / ref.x.clamp_min(1e-300)  # a cotangent of relative changes
+            runs, flags = [], []
+            for tangent in ((1.0, 0.0), (0.0, 1.0)):  # along dt, along h
+                ddt, dh = (helpers.full(1, v, gpu) for v in tangent)
+                runs.append(ad.jvp(x, T, P, dt, h, torch.zeros_like(x), zero, zero, ddt, dh, J=J, dJ=dJ))
+                flags.append(ad.flag)
+            runs.append(ad.vjp(x, T, P, dt, h, c, J=J))
+            flags.append(ad.flag)
+            flags = [-1 if f is None else int(f[0]) for f in flags]
+            same = all(torch.equal(getattr(r, k), getattr(ref, k)) for r in runs for k in ("x", "h", "done", "steps"))
+            t_dt, t_h = (float((c * r.dx).sum()) for r in runs[:2])
+            g_dt, g_h = (float(runs[2].cotangents[k][0]) for k in ("dt", "h"))
+            print(
+                f"h {float(h[0]):.4e}: flags {flags}, primal bitwise {same}; <c, dx/ddt> {t_dt:.6e}, d/ddt "
+                f"{g_dt:.6e} (relative {abs(t_dt - g_dt) / abs(t_dt):.1e}); along h {t_h}, d/dh {g_h}"
+            )
+            assert (int(ref.flag[0]), flags, same) == (1, [1, 1, 1], True)
+            assert (t_h, g_h) == (0.0, 0.0)
+            assert abs(t_dt - g_dt) <= RETRY_DOT * abs(t_dt)
