@@ -133,9 +133,12 @@ still-failed cell returns done = 0.
 
 A recomputed result that is finite and finished but fails the element test again is computed once more from the inputs, up to
 `REC_RETRIES` times, with the first try of retry k at most dt `REC_RETRY_SPLIT`^k. In the cases seen (notes.md), such a
-failure comes from a call of one or a few long steps, whose rounding drift is a single draw; a smaller first try changes the steps, and with them the draw. A
-non-finite or unfinished result is not retried, since a smaller first try does not cure it. A cell saved by a retry counts as
-recovered; one that fails every retry as still failed. A cell that passes the guard or the first recovery pass is computed as
+failure comes from a call of one or a few long steps, whose rounding drift is a single draw; a smaller first try changes the
+steps, and with them the draw. A retry changes the computation only when its cap binds, min(h, dt) > dt
+`REC_RETRY_SPLIT`^k; otherwise it repeats the same arithmetic and fails again. A non-finite or unfinished result is not
+retried. A cell saved by a retry counts as recovered (flag 1). One that is still failed holds the last pass's result: x, h,
+done and steps all come from that pass, so x may differ from the first recomputation's and may be non-finite where an earlier
+pass was finite; it has flag 2 and done 0 either way. A cell that passes the guard or the first recovery pass is computed as
 before, bit for bit.
 
 Each cell's arithmetic depends only on its inputs, so results are bitwise reproducible on one GPU whatever the batch order.

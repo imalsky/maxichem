@@ -58,10 +58,8 @@ PIVTAU = 0.1
 ELEMENT_PIVOT_MIN = 1e-10  # the guard leaves out an element whose pivot falls below this share
 # recovery: a recomputed cell that finishes but fails the guard's element test again is computed once more from its
 # inputs with the starting step at most dt REC_RETRY_SPLIT^k on retry k = 1 .. REC_RETRIES, so a one-step call is cut
-# into steps whose rounding differs. On perturbed last calls of two hot dense boxes (2,048 cells x 2 start states x
-# 4 drift allowances each), 49 cells still failed without retries: 1 retry saved 43, 2 saved all; 3 keeps one of
-# margin, which only a failing cell pays for. A split of 0.5, the mildest cut tried (0.5, 0.25, 0.1), saved all
-# (notes.md, "The recovery's retries").
+# into steps whose rounding differs. Two retries saved every measured cell; the third is margin, paid only by a
+# failing cell. 0.5 is the mildest cut tried (notes.md, log entry of 2026-11-11, the recovery's retries).
 REC_RETRIES = 3
 REC_RETRY_SPLIT = 0.5
 GMAX = 1e-3  # the element-share correction changes a species by at most this, relative
