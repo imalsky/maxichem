@@ -91,7 +91,8 @@ def test_kernel_constants_are_classified_and_settings_come_from_the_header():
         f"classify in this test: {sorted(names - classified)}; gone: {sorted(classified - names)}"
     )
     for name, macro in HEADER_SETTINGS.items():
-        assert [(t, v) for t, n, v in declared if n == name] == [("double", macro)], name
+        kind = "int" if isinstance(getattr(_constants, name, 0.0), int) else "double"  # REC_RETRIES is a count
+        assert [(t, v) for t, n, v in declared if n == name] == [(kind, macro)], name
 
 
 def test_kernels_write_no_bare_floats_but_arithmetic():

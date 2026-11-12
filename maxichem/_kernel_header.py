@@ -214,8 +214,8 @@ def call_header(tab: dict[str, Any], cpb: int, wsh: bool, drift: float) -> str:
         "KBOLTZ": repr(KB),
         "NASA_SPLIT_T_K": repr(NASA_SPLIT_T),
         "P0BAR": repr(P0),
-        # repr gives the double back exactly
-        **{f"{name}_VALUE": repr(float(value)) for name, value in _METHOD_SETTINGS.items()},
+        # repr gives the double back exactly, and a count as an integer
+        **{f"{name}_VALUE": repr(value) for name, value in _METHOD_SETTINGS.items()},
         "WSH": int(wsh),
         "RPD": -(-ns // WARP_LANES),
         "PERWR": perwr,

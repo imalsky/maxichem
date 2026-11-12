@@ -21,7 +21,7 @@ constexpr double SECANT_MAX_ORDER = SECANT_MAX_ORDER_VALUE;
 constexpr double SECANT_TARGET = SECANT_TARGET_VALUE;
 constexpr double PIVTAU = PIVTAU_VALUE;
 constexpr double ELEMENT_PIVOT_MIN = ELEMENT_PIVOT_MIN_VALUE;
-constexpr double REC_RETRIES = REC_RETRIES_VALUE;
+constexpr int REC_RETRIES = REC_RETRIES_VALUE;
 constexpr double REC_RETRY_SPLIT = REC_RETRY_SPLIT_VALUE;
 constexpr double NASA_SPLIT_T = NASA_SPLIT_T_K;  // K, from maxichem/_constants.py
 // The Troe factor's published coefficients (Venot et al. 2012, eq. C.2-C.5).
