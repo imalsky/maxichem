@@ -28,3 +28,7 @@ Tasks put off to return to, with the date deferred.
 - 2026-11-05. Rerun the sphere work with the corrected heating formula (notes.md, 2026-11-05 18:53), after the code cleanup.
   - The 2-day runs at 100, 120 and 140 layers from both starts, then the lid comparison on 0.1-1 bar and a lid choice.
   - The 10-day runs with and without chemistry and their figures, then the radiation-step and sponge tests as needed.
+- 2026-11-12. Switch the accuracy reference from VULCAN-0D to VULCAN-JAX (vulcan3).
+  - Now: the truth data come from the VULCAN-0D generator (notes.md, "Truth generator").
+  - Needed: truth sets made with vulcan3 on the same designs, new check references, and the reference named in
+    oracle.md changed by the author.
