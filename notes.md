@@ -2278,9 +2278,24 @@ same machine code.
   whose layout the two new globals moved (g_sass_diff.log).
 - Unchanged results (dump_plugin.py, dump_compare.log): the SHA-256 of every launch, jvp and vjp result of the parity,
   guard, known-answer, order, rate-law, kernel-copy, dense-LU, collision-limit and derivative tests, b927ef9 against the
-  fix: 6,791 of 6,791 bitwise equal, among them 5,280 flag-2 cells (unfinished or failing at allowance 0) whose results
-  did not move. Such a cell whose h is below dt split^k repeats the same arithmetic on each retry: the retries cost it
-  three more recomputations for nothing.
+  fix: 6,791 of 6,791 bitwise equal, among them 5,280 flag-2 cells. What that shows: 52 of those are drift-only
+  failures (test_element_drift_is_recomputed, allowance 0, h 1e-10 s, dt 500 s), whose cap never binds, so they ran
+  three identical retries; their equal digests show that each pass starts again from a complete reset, not that the cap
+  works. The other 5,228 are unfinished (max_steps 2 or 3) and are never retried. A binding cap is exercised only by the
+  new tests, the lottery harness and retry_levels.py.
+- The derivative kernels' retries (tests/test_guard.py, the same stored call through jvp and vjp, at the stored h above
+  dt and at h = dt): flags 1, x, h, done and steps bitwise launch's; the h tangent and cotangent exactly 0 (the cap
+  binds); the dt tangent and cotangent agree to 2.0e-11 and 2.1e-11 relative (tolerance 1e-6). Central differences
+  cannot judge them: the result moves by about 1e-10 per ln dt, below their rounding, and dt + 1 % passes in the first
+  recovery pass (flag 0 there). The test fails on four broken copies (regress2_demo.log): jvp's first-try tangent
+  without the cap and vjp's cap share 0 (the dt sides then differ by 1.4e-17, 1.6 times the cotangent), and a jvp or
+  vjp kernel that never retries (its flag 2, its result not launch's).
+- REC_RETRIES is an int in the kernels; every kernel's machine code is the same as with the double (r2_sass_diff.log).
+- Limits. The settings were chosen and judged on the same cells (one seed; boxes 98666 and 33162). At the production
+  allowance alone, 23 cells still fail with no retry, 2 with one, 0 with two. A failing cell's worst case is 4 recovery
+  passes, each of up to REC_STEPS x max_steps tries. A retry whose cap does not bind repeats the pass before it; skipping
+  such a pass (and going on to the next k, whose cap may bind) would give the same results for less work. Proposed, not
+  done.
 - Checks on f1a6784: CPU 129 passed; slow CPU 4 passed; parity and guard 49 passed (the new test included); known
   answers, order, rate laws, kernel copies, dense LU, collision limit 26 passed; test_vulcan_truth 2 passed (NCHO quick:
   0 misses, worst box 0.014 dex, paths 0.004; sulfur as before, only the pinned boxes 1939 and 96); test_export_cpp 19
