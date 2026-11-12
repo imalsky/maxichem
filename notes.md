@@ -2292,6 +2292,11 @@ maxichem/kernels` is empty after the merge).
   with one failed torch's weights_only load); both record and compare the grid as JSON reads it back, and a numpy integer
   nz is a layer count. (4) `signed_mole_fractions` refuses mixed precisions. (5) README names the two breaking changes.
   (6) test_ad's loops over the cotangents skip a None field (J without photolysis; latent, every fixture is lit).
+  Shown failing on the code before: the dJ rule (the CPU test and the GPU test of an empty J and dJ, both on the old
+  check), the flow-file records and numpy grid (2 of 2), the signed mole fractions' precision. Checks on 671c55e: CPU 137
+  passed; slow CPU 4 passed; parity and guard 51 passed in 321 s (worst 7.7e-8 dex); the known-answer tier 26 passed in
+  370 s; test_vulcan_truth 2 passed in 206 s (NCHO boxes 0 misses, worst 0.014 dex; paths worst 0.004 dex; sulfur pins
+  held, paths worst 0.007 dex); test_export_cpp 19 passed in 521 s, bitwise on every case; test_ad 81 passed in 1029 s.
 
 ## References (by topic)
 
