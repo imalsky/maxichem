@@ -9,6 +9,8 @@ over a batch, stay stable when it runs autoregressively for long stretches, matc
 and work for every VULCAN network, not only NCHO. A feature that works only for NCHO is not finished yet. Wide,
 realistic coverage beats polishing a narrow case; flag any rule or decision that over-focuses the project.
 
+The goals, and what counts as success and as failure: `oracle.md`. Read it before planning work.
+
 What the code does: `docs/architecture.md` and notes.md "Current state". Removed and retired code: notes.md "Reduced
 tracers" and "Neural-network emulator". `README.md` is the public front page.
 

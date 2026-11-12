@@ -2357,6 +2357,19 @@ same machine code.
   worst 0.066 dex (box 87219, CH4, as before); guard drift 2, recovered 2, still failed 0 (on db83a04: recovered 1,
   still failed 1, box 98666). 1,096 paths, 1,326,198 states: 0 misses, worst 0.004 dex; unfinished, non-finite and negative 0.
 
+### 2026-11-12 11:05 to 11:30: oracle.md written
+No experiment and no code change. oracle.md now states the goal and the success and failure criteria. The author's
+decisions in it:
+- The goal is a fast CUDA version of VULCAN's 0-D chemistry, with derivatives, for use in a GCM that solves transport.
+- The pass bar for speed is 10 us per cell-call for every network, sulfur included. CLAUDE.md still names about 1 us
+  as the target; the author has not said which wording it keeps.
+- At least 1,000 consecutive calls for stability. The domain is the truth design's ranges, with call lengths 1-500 s.
+- A miss is investigated; one with a recorded cause outside maxichem is not a failure.
+- TiSNCHO is not required.
+- The reference stays VULCAN-0D for now and moves to vulcan3 later (todo.md).
+- Proposed here and accepted with the draft: the per-call element bar 1e-6 (`DRIFT`), the derivative bars of
+  `tests/test_ad.py`, and the batch of 2,457,600 cells.
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
