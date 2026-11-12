@@ -253,7 +253,9 @@ card runs fp64 at 1/64 of its fp32 speed. "(inferred)" marks a claim not read fr
 - Device recovery (2026-10-31): after the guard (non-finite state, unfinished call, element-share drift above the
   allowance), a kernel redoes only the flagged cells, on a dense, threshold-pivoted (0.1) Rodas3. Unflagged cells stay
   bitwise unchanged; no host sync. Plain partial pivoting's solve error reached 12x the step-control scale (against
-  1.3e-10).
+  1.3e-10). Since 2026-11-11 a recomputed result that fails only the element test is computed again from the inputs
+  with a smaller first try, up to 3 times (log entry of 2026-11-11, the recovery's retries): a one- or few-step call's
+  drift is a single rounding draw, and the same first try draws the same.
 - Element-drift allowance per network: max(1e-6, 10 r), r the network's worst rounding drift on the parity stress cases
   (3e-11 to 4.5e-9 for six networks; 1.61e-6 for Venot 2019).
 - Why mixed gas costs many steps (53-species ring bed, 2026-11-01; a read-only scan, no experiment folder). After a mix
@@ -1337,7 +1339,7 @@ The per-step commits these cleanup entries name (through 2026-11-06) were later 
 - The recovery fixes both, in one step: worst ratio then 2.7e-10 and 1.8e-10. Against VULCAN, without the recovery 0.00002 and 0.00007 dex, with it below 0.00001 dex in the 12 gases; the largest change of any species 2.1e-4 dex (C6H6). So no accuracy depended on it.
 - It is rounding, not an anomaly. Each flagged cell repeats alone (B = 1) and in a batch of 2,048 copies, so it is deterministic. On 548f608, where x still shows the drift, the same ratios are 0.0001 and 0.086. Relative noise of 1e-15 on the input flags box 33162 in 581 of 2,048 draws and box 98666 in 885 of 2,048; moving dt by up to 0.1 % flags 1,057 and 889 of 2,048. 3eb0586 moved x by up to 6.2e-13 relative (its entry). 84 noisy repeats of call 47 on all boxes (noise 1e-15 to 1e-12): 0 to 4 flags per pass, mean 1.4. The 36 repeats that list boxes (replay.log) flag 24 boxes, all at 2,517-2,996 K and 16.6-99.8 bar, 10 of them dark. So 0 on 548f608 and 2 now are two draws from the same lottery. An earlier run also shows it: boxes_ncho_final2.log in experiments/2026-11-03_overnight/logs, before atol 1e-25 went in, has drift 4, recovered 4.
 - Inferred, not measured: at h = 5.6e7 s the factorized matrix tends to -J, singular along the element vectors, and in hot dense gas h times the fastest rate nears 1 / rounding, so the unpivoted solve loses the conservation. In line with that, the same state at dt 4e7 s or below flags nothing, and the worst ratio per call rises with dt from about 5e-9 at 1e-6 s to 0.23 at 2.5e7 s. A GCM's 70 s calls are far from this (worst ratio 1e-4 to 4e-4 at dt 20 to 80 s on these boxes).
-- Open, for Isaac: the recovery can lose the same lottery. In the 48 repeats that count it (noisy_passes.log) 1 of 61 flagged cells ended flag 2 (box 106586, 2517 K, 58.2 bar, noise 1e-13: recovery's drift 12.7 times the allowance, done 0, state finite, error against VULCAN 0.00005 dex); in the draws above, 29 of 6,144 on box 33162 and 0 of 6,144 on box 98666. `kintest full` exits 1 on any still-failed cell, so a change that only moves rounding has about a 2 % chance per run of turning that pass red with no accuracy lost (estimate from those 48 passes). Nothing changed: `DRIFT`, the kernels and the bench's rule stay.
+- Open, for Isaac: the recovery can lose the same lottery. In the 48 repeats that count it (noisy_passes.log) 1 of 61 flagged cells ended flag 2 (box 106586, 2517 K, 58.2 bar, noise 1e-13: recovery's drift 12.7 times the allowance, done 0, state finite, error against VULCAN 0.00005 dex); in the draws above, 29 of 6,144 on box 33162 and 0 of 6,144 on box 98666. `kintest full` exits 1 on any still-failed cell, so a change that only moves rounding has about a 2 % chance per run of turning that pass red with no accuracy lost (estimate from those 48 passes). Nothing changed: `DRIFT`, the kernels and the bench's rule stay. Closed on 2026-11-11 by the recovery's retries, which save such a drifting recomputed cell (log entry of that day).
 
 ### 2026-11-06 19:25: kintest full within the 90-minute limit (experiments/2026-11-06_kintest_parts)
 Isaac's rule: no test, tier or check run takes over 90 minutes of wall time.
@@ -2086,7 +2088,8 @@ checks now read data/truth_v3, and refuse a set or a parity reference that does 
   5.5e-6, above the allowance 1e-6; the guard recomputes it and the recovery's step fails too (still failed, done 0). Its
   scored error is still 0.0003 dex. On main (the old rule) the same call is flagged and recovered; at rtol 1e-4 the old
   rule takes two steps, the new rule still one; at rtol 1e-5 both pass (share change 1.8e-16). A one-step call of 5.6e7 s
-  at 2973 K and 43 bar is not a GCM call; left as it is, for the owner (experiments/2026-11-10_truth_v3/box_drift.log).
+  at 2973 K and 43 bar is not a GCM call (experiments/2026-11-10_truth_v3/box_drift.log). Fixed by the recovery's
+  retries (log entry of 2026-11-11).
 - Is it the rule or the lottery? Paired test (lottery.py, lottery2_98666.jsonl, lottery2_33162.jsonl, the per-cell flags
   in lottery2_<box>_<kernel>.npz, counts in lottery_paired.log). The state before that call was saved as reached under
   each rule (main cecbf8e and f2ab956), and each state was run on three kernels: old (cecbf8e), new (61fa409, its kernels
@@ -2105,7 +2108,7 @@ checks now read data/truth_v3, and refuse a set or a parity reference that does 
   unperturbed call of box 98666 (cell 0) fails its recovery on every run under the new rule from the new state (flag 2 at
   1 and 2 times the allowance, passes at 5), so at this head kintest full on NCHO exits 1 on every run, not on about 2 %
   of runs. Verdict: inconclusive whether the rule raises the failure rate (pooled p 0.065); the failure of box 98666 is
-  deterministic. No change made here.
+  deterministic. No change made here; the recovery's retries (log entry of 2026-11-11) save every one of these cells.
 - Gate on the sulfur network against truth_v3 (kintest quick, cce9052): boxes_sncho25 1,931 boxes, 7 missed states, all
   pinned (box 1939, S2, 1.647-4.341 dex, held); boxes_sncho25p 1 missed state, pinned (box 96, S2 0.155 dex, held); next
   worst boxes 0.030 and 0.021 dex; 208 paths, 0 misses, worst 0.007 dex. The pins keep their reasons: both boxes' truth is
@@ -2245,6 +2248,47 @@ per-cell setup for the tangent and adjoint kernels would take about 18 arguments
   per stage changed jvp's code in 4 variants and was not kept. The int region equals the old carving in 36 of 36
   cases. Checks after: CPU 115 passed, tests/test_size_limits.py 4 passed, pre-commit on the changed files passes. No
   GPU check was rerun, since no machine code changed.
+
+### 2026-11-11 11:00 to 17:02: the recovery's retries, a drifting recomputed cell tried again with a smaller first try (experiments/2026-11-10_truth_v3)
+Branch recovery-retry from 980a189. A numerics change of the recovery alone: the call and guard kernels compile to the
+same machine code.
+- The cause. Box 98666's last call (2973 K, 43 bar, 5.6e7 s) is one step from its first try, and so is the
+  recovery's recomputation, whose element shares move by 5.51e-6 against the allowance 1e-6 (flag 2, done 0). A one-
+  or few-step call's drift is one rounding draw, and a recomputation with the same first try draws the same.
+- The fix. A recomputed result that is finished and finite but fails only the element test (check_cell's bits equal
+  GUARD_DRIFT) is computed again from the inputs, up to REC_RETRIES times, the first try of retry k at most
+  dt REC_RETRY_SPLIT^k. A non-finite or unfinished result is not retried. A cell saved by a retry counts as recovered
+  (flag 1); no count is added. The derivative kernels' recovery passes run the same retries and differentiate the pass
+  whose result is the cell's, through its first try min(h, dt split^k).
+- The settings (retry_levels.py on the lottery's cells: boxes 98666 and 33162, 2,048 perturbed last calls, the old-
+  and new-rule start states, allowances 1, 2, 5 and 10 times the drift allowance): still failed with no retry 49 (21
+  and 28); 1 retry at split 0.5, 6 (0 and 6); 2, 3 or 4 retries, 0; splits 0.25 and 0.1 with 3 retries, 0. Kept: 3
+  retries (one of margin, paid only by a failing cell) and split 0.5, the mildest cut. In every setting each cell that
+  is not flag 2 with no retry is bitwise equal (x, h, done, steps, flag), and with no retry the flags equal b927ef9's
+  cell for cell.
+- The lottery harness, b927ef9 against the fix (lottery3_*.jsonl), still failed at allowances 1, 2, 5, 10: box 98666,
+  old-rule state 4, 2, 2, 1 to 0, 0, 0, 0; new-rule state 5, 5, 2, 0 to all 0; box 33162, 7, 4, 2, 1 to all 0 on both
+  states. Flagged counts unchanged. The unperturbed call of box 98666 now ends flag 1.
+- Regression test (tests/test_guard.py; tests/data/recovery_box98666.json, the state before call 47 from the box's
+  truth_v3 start on f2ab956's kernels): on 980a189's package flag 2, done False, shares moved 5.51e-6, still_failed 1
+  (fails); on the fix flag 1, done True (passes) (regress_demo.log).
+- Compiled code (sass_compare.py, sass_diff.sh: cuobjdump -sass, blanks squeezed): call and guard equal to b927ef9's on
+  all 20 forms (NCHO and SNCHO25, photo off and on, 1 and 4 cells per block, W in shared memory or not, and the jvp and
+  vjp modules); recover, jvp, jvp_rec, vjp and vjp_rec differ. The call kernel reads no global through constant bank 4,
+  whose layout the two new globals moved (g_sass_diff.log).
+- Unchanged results (dump_plugin.py, dump_compare.log): the SHA-256 of every launch, jvp and vjp result of the parity,
+  guard, known-answer, order, rate-law, kernel-copy, dense-LU, collision-limit and derivative tests, b927ef9 against the
+  fix: 6,791 of 6,791 bitwise equal, among them 5,280 flag-2 cells (unfinished or failing at allowance 0) whose results
+  did not move. Such a cell whose h is below dt split^k repeats the same arithmetic on each retry: the retries cost it
+  three more recomputations for nothing.
+- Checks on f1a6784: CPU 129 passed; slow CPU 4 passed; parity and guard 49 passed (the new test included); known
+  answers, order, rate laws, kernel copies, dense LU, collision limit 26 passed; test_vulcan_truth 2 passed (NCHO quick:
+  0 misses, worst box 0.014 dex, paths 0.004; sulfur as before, only the pinned boxes 1939 and 96); test_export_cpp 19
+  passed; test_ad 81 passed. The truth and export tiers start Python subprocesses that import the editable install,
+  so they run with PYTHONPATH set to the branch (a first run without it tested the main checkout: 3 export failures).
+- kintest full on NCHO against truth_v3 (f1a6784): exit 0, 3,501 s wall. 131,072 boxes, 6,160,384 states: 0 misses,
+  worst 0.066 dex (box 87219, CH4, as before); guard drift 2, recovered 2, still failed 0 (on db83a04: recovered 1,
+  still failed 1, box 98666). 1,096 paths, 1,326,198 states: 0 misses, worst 0.004 dex; unfinished, non-finite and negative 0.
 
 ## References (by topic)
 
