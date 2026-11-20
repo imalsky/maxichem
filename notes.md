@@ -2370,6 +2370,82 @@ decisions in it:
 - Proposed here and accepted with the draft: the per-call element bar 1e-6 (`DRIFT`), the derivative bars of
   `tests/test_ad.py`, and the batch of 2,457,600 cells.
 
+### 2026-11-18 16:20 to 16:49: GCM cost per model day, GPU power (experiments/2026-11-10_figs, 2026-11-18_power)
+- Setup (2026-11-10_figs/run_time.sh): one RTX 6000 Ada, C48x100 hot Jupiter (1,382,400 cells), fixed 70 s step (the
+  run's CFL step was 178 s), radiation every 300 s, fused tracer path, snapy 1fbeef79, maxichem cecbf8e, 300 timed steps.
+- Per model day (1,234 steps): flow 5.5 min, radiation 0.2. NCHO (69 tracers): transport 27.3 min, chemistry 13.7, total
+  47 min (31 sim days per day, 8x flow alone). Sulfur 2025 (91 tracers): transport 35.3, chemistry 27.5, total 69 min
+  (21 sim days per day, 12x flow alone). Flow alone: 5.8 min, about 250 sim days per day.
+- Chemistry per cell-call, whole call / solver only: NCHO 0.48 / 0.38 us, sulfur 0.97 / 0.84 us; 1.12 / 1.25 solver
+  steps per call. Peak torch reserved: 3.2 / 25 / 32 GB (flow / NCHO / sulfur).
+- Power (2026-11-18_power, nvidia-smi each second, 40 cycles): sulfur median 235 W, max 298 W of the 300 W limit, 29.3 GB
+  used; flow alone about 165 W (13 busy samples only). Sulfur timings within 6 % of the 300-step run; this short flow
+  run took 357 ms per step against 268 (not explained).
+- GH200 (NAS, 2026-11-19; data in maxichem_project/gh200_timing there): the same deck, inputs and 300 timed
+  steps; snapy 1fbeef7 built from source for aarch64 / sm_90 (kintera 2.6.6, pyharp 2.7.6, pydisort 1.8.13; tests off,
+  NETCDF on, PNETCDF and UCX off; the dependencies' x86 AVX dispatch defines swapped for SVE256 to link aarch64 torch),
+  maxichem fd85cc4, torch 2.10.0+cu128. us per cell: flow 0.130 per step; radiation 0.024-0.028 per call; transport
+  0.302 (69) / 0.436 (91) per step, 0.0044-0.0048 per tracer; chemistry whole call 0.325 / 0.540 (solver 0.301 /
+  0.510). Per model day: flow alone 3.9 min (~370 days per day), NCHO 21.7 min (5.6x), sulfur 31.6 min (8.2x). Against
+  the Ada: flow 1.5x, transport 2.8-3.2x, chemistry 1.5-1.8x faster. No failed cell. Sulfur: 30.8 GB reserved, 318 W
+  median, 372 W max (900 W limit).
+- Chemistry alone (bench/gpu_speed.py, 1,382,400 cells, fd85cc4), us per cell-call, Ada / GH200: NCHO dark 0.36 / 0.27,
+  lit 0.66 / 0.52; sulfur dark 0.69 / 0.40, lit 0.99 / 0.59. Same solver steps per call on both; the GH200 drew ~220 W.
+- The 2026-11-18 email to the snapy group said "about 6x slower" and quoted solver-only us; both were corrected in the
+  reply. A claim of 1,000 sim days per day for the flow alone is not reproduced on this card; its setup is not known.
+
+### 2026-11-20 09:31 to 10:00: GCM cost at C32x100, the grid of the ISSI intercomparison (experiments/2026-11-20_c32_timing)
+- Why: the 1,000 sim days per day figure came from the ISSI intercomparison cases (HD 189733 b, C32, 200 bar to 1e-5
+  bar; no layer count given). The snapy group's own cubed-sphere hot-Jupiter deck is C32 x 100
+  (`examples/2024-XZhang-cloud-rt/hjdry_exo.inp` in chengcli/canoe: nx1 100, nx2 64, nx3 96 in 32 x 32 blocks,
+  second-order reconstruction, CFL 0.3); that it is a cubed sphere and the ISSI deck is inferred.
+- Setup (run_time.sh): the 2026-11-18 setup with only the grid changed to C32x100 (614,400 cells): one RTX 6000 Ada,
+  the same hot-Jupiter-like deck (not HD 189733 b; lid near 8 mbar), WENO5, fixed 70 s step, radiation every 300 s,
+  fused tracer path, snapy 1fbeef79, maxichem fd85cc4, 500 CFL steps of spin-up, 20 warm-up and 300 timed steps.
+- Per step, median ms (C48 on 2026-11-18 in brackets): flow alone 372 (268; see the repeats below); NCHO flow and
+  tracers 1,049 (1,597), chemistry 326 (664); sulfur 2025 flow and tracers 1,161 (1,984), chemistry 656 (1,335); radiation 49-51 per call (48-51).
+- Chemistry per cell-call, whole call / solver only: NCHO 0.53 / 0.41 us, sulfur 1.07 / 0.92 us; 1.20 / 1.38 solver
+  steps per call, at most 65 / 61; no unfinished cell, no negative tracer entry. Peak reserved 1.5 / 12.3 / 15.9 GB.
+- Per model day at 70 s (1,234 steps): NCHO 28.5 min (about 50 sim days per day), sulfur 37.6 min (about 38). Flow
+  alone 7.9 to 9.7 min (about 150 to 180), from the repeats below.
+- Flow alone is not a stable number on this machine. Repeats back to back (run_flow_repeat.sh, 10:03 to 10:11, the
+  same settings), median ms per step: C32 461, C48 509, C32 456, against 372 for C32 half an hour before and 268 for
+  C48 on 2026-11-18. The load average was 16-18 throughout, from other users' and system processes on the 128
+  threads; the GPU was otherwise empty. So the run-to-run spread (268 to 509 at C48) is larger than the grid's effect
+  (1.1x for 2.25x cells back to back), and the radiation call costs 48-51 ms on both grids.
+- With the flow-alone step subtracted, the 2.25x cells cost 2.0x (NCHO) and 2.2x (sulfur) in tracers and 2.0x in
+  chemistry: tracers and chemistry scale with cells, the flow step does not. The flow step carries a cost that does
+  not scale with cells and varies with the machine's CPU load; its source was not measured (the 2026-11-04 entry
+  measured the Python loop itself at 0.2 % on the box).
+- Flow alone at 206.8 s (0.9 of the 70 s run's smallest CFL step, 230 s), one run: mean 503 ms per step, 3.7 min per
+  model day (about 385 sim days per day), on a young flow whose CFL step was still falling (to 175 s). 77 of the 300
+  steps then took two equal substeps, a cost of this driver's fixed step; a step that follows the CFL limit would not
+  double.
+- Where the flow step's time goes (run_flow_parts.sh, flow_parts.py, 10:16 to 10:28; C32x100, flow alone, 300 timed
+  steps each, load average 14-19; "bare" is snapy's step alone, with no radiation, heating or ghost refresh by the
+  driver). Mean ms per step / mean step / sim days per day over the timed steps / median GPU utilisation:
+  - WENO5, 70 s: 412 / 70 s / 165 / 42 %. Parts: Mesh.forward 364, the driver's ghost refresh 35, redo check 6.5,
+    primitive refresh 3.1, CFL step 2.0, heating 1.6; radiation 49 per call.
+  - WENO5, CFL step: 441 / 228 s / 477 / 41 %.
+  - WENO5, CFL step, bare: 323 / 251 s / 778 / 52 %.
+  - PLM, CFL step: 425 / 243 s / 523 / 39 %.
+  - PLM, CFL step, bare: 387 / 261 s / 674 / 37 %.
+  The flows are young (CFL step 176-305 s, T up to 2,208 K in the bare runs, which have no radiation).
+- Reading: Mesh.forward is 88 % of the step, about 105-130 ms per RK stage at 614,400 cells with the GPU 40-50 % busy,
+  and PLM is no faster than WENO5 within the spread. So the reconstruction order and the GPU kernels are not the limit
+  at C32: snapy's step is limited by work outside the kernels. Its source was not measured. The driver's own parts
+  (ghost refresh, heating, primitive refresh, radiation) cost about 80 ms per step at the CFL step, 17 % of the wall
+  time; the rest of the gap between 477 and 778 is the bare run's longer step (251 against 228 s) and a faster
+  Mesh.forward (314 against 390 ms), which is within the run-to-run spread.
+- The flow's WENO5 runs through snapy's shared-memory CUDA launch (src/recon/recon_dispatch.cu, 48 KB limit; 5
+  variables on 106-cell lines need about 4 KB). The fused tracer path (src/scalar/scalar_fused.cu) uses no shared
+  memory: one thread per element.
+- Conclusion: 1,000 sim days per day for the flow alone is not reached at C32x100 on this card: 165 at the 70 s step,
+  477 at the CFL step with this driver, 778 for snapy's step alone, all uncertain by the spread above. The fastest
+  single steps (240 ms at a 251 s step) would give about 1,050 (estimate), so the figure is within reach only for
+  snapy alone on an idle machine. A trustworthy flow-alone figure needs an idle machine or the GH200. The chemistry meets oracle.md's 10 us limit at this batch (0.53 and 1.07 us at 614,400 cells;
+  the oracle's batch is 2,457,600).
+
 ## References (by topic)
 
 Identifiers as recorded. Verify each before paper use.
