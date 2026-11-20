@@ -74,8 +74,7 @@ Isaac said: don't ask; investigate, post findings and results in the Lumine thre
 an upstream PR (or marking one ready). The acceptance rules are in notes.md, "Decisions in force": default path
 bit-for-bit, opt-in fused path at round-off, deterministic, the 0.01 dex bound for fp32 or cheaper schemes, C64x100
 with 69 tracers for speed numbers; coupled tests on a Cartesian box
-with a single passive-tracer convergence check, element totals and guard counts; the main path is fused CUDA called
-from snapy's C++ loop (a Python driver only for tests); J from kintera. Development build: `../.venv-snapdev` (snapy built
+with a single passive-tracer convergence check, element totals and guard counts; J from kintera. Development build: `../.venv-snapdev` (snapy built
 from source with `../.cuda`); the shared `../.venv` keeps the released snapy wheel.
 Rules for any coupling, C++ included: a driver that writes `scalar_s` or `hydro_u` after `Mesh.forward`'s stages calls
 `exchange_ghost_zones` before the next step, as kScalar for scalars, and re-applies the walls. A frozen source is added as
