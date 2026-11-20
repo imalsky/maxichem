@@ -572,7 +572,7 @@ One item each: what, the result, when. Reduced-tracer results are in "Reduced tr
   learned guess costs about a try (a 2026 study's gate returned 96.8-99.7 % of cells to the solver). Also not
   recommended: surrogates, tabulation (ISAT), cached rate coefficients (T changes every call) (2026-11-02).
 - Source coupling instead of jumps: see "GCM coupling" (new truth needed; no gain on live gas).
-- On the GCM side: CUDA graphs, torch.compile and stream overlap are not worth it (2026-11-01).
+- On the GCM side: torch.compile and stream overlap are not worth it (2026-11-01).
 - Where ML could still fit (2026-10-31 survey, 2026-10-31_broaden; 2026-11-01 reviews): learning one input with the
   physical solver downstream (photolysis rates, missing rate or thermo data); per-cell reduced reaction sets with a
   full-mechanism check, only for hundreds of species; learned rates. Ranked last: solver replacement and speed-only ML.
@@ -748,6 +748,12 @@ github.com/imalsky/Autoregressive-Chemulator (tag paper-v1 is the paper's code).
 - 2026-11-09 ~16:56, snapy's author: maxichem's species go to passive scalars, not hydro species. Vapors and clouds add
   to the total mass, so they are hydro variables in the Riemann solver; chemical tracers do not, so they are stored
   apart and moved on the mass flux the hydro provides. The first of the open coupling decisions is settled.
+- 2026-11-20, snapy's author: snapy tried fused kernels and removed them (fragile, about 20 % gain there); snapy V3
+  uses CUDA graphs to cut the kernel-launch overhead, with about 2x in first tests and no code change. So the
+  2026-11-04 entries above that make the fused tracer transport the main path are open again, not in force: the fused
+  path is an opt-in for our own runs, and work on CUDA graphs or V3 is not blocked by them. The earlier note that CUDA
+  graphs are not worth it had no measurement behind it and is removed. Not yet measured: V3 with graphs against the
+  fused path on the same deck with 69 tracers.
 
 ## Log
 
